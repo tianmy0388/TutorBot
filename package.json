@@ -1,0 +1,25 @@
+{
+  "name": "tutor-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "个性化学习资源生成多智能体系统 — Monorepo root",
+  "scripts": {
+    "backend:install": "cd backend && pip install -e '.[all]'",
+    "backend:dev": "cd backend && python -m tutor api",
+    "backend:start": "cd backend && python -m tutor api",
+    "frontend:install": "cd frontend && npm install",
+    "frontend:dev": "cd frontend && npm run dev",
+    "frontend:build": "cd frontend && npm run build",
+    "dev": "concurrently -k -n backend,frontend -c blue,green \"npm run backend:dev\" \"npm run frontend:dev\"",
+    "test": "cd backend && pytest"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  },
+  "workspaces": [
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -1,0 +1,112 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+test-results/
+
+# Environments
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Node / Frontend
+node_modules/
+.next/
+out/
+build/
+dist/
+.cache/
+.parcel-cache/
+.turbo/
+.vercel
+.netlify
+.pnpm-store/
+.pnp
+.pnp.js
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime data
+data/
+!data/.gitkeep
+!data/README.md
+
+# Knowledge base runtime
+backend/tutor/knowledge_base/*/llamaindex_storage/
+backend/tutor/knowledge_base/*/raw/
+!backend/tutor/knowledge_base/ai_introduction/raw/
+
+# Manim render cache
+media/
+backend/tutor/services/manim_render/output/
+backend/tutor/services/manim_render/temp/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local dev artifacts
+*.local
+*.bak
+*.tmp
