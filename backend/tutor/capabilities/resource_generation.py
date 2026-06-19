@@ -44,6 +44,10 @@ from tutor.agents.resource.manim_video import ManimVideoAgent
 from tutor.agents.resource.multimedia import MultimediaAgent
 from tutor.agents.resource.pedagogy import PedagogyAgent
 from tutor.agents.resource.quality_reviewer import QualityReviewerAgent
+from tutor.agents.safety.anti_hallucination import (
+    AntiHallucinationAgent,
+    OverallVerdict,
+)
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
@@ -77,6 +81,7 @@ class ResourceGenerationCapability(BaseCapability):
             "content_and_pedagogy",
             "parallel_resource_generation",
             "quality_review",
+            "anti_hallucination",
             "package_assembly",
             "path_integration",
         ],
@@ -97,6 +102,7 @@ class ResourceGenerationCapability(BaseCapability):
         manim_video: ManimVideoAgent | None = None,
         code_sandbox: CodeSandboxAgent | None = None,
         quality_reviewer: QualityReviewerAgent | None = None,
+        anti_hallucination: AntiHallucinationAgent | None = None,
     ) -> None:
         super().__init__()
         self.builder = builder
@@ -109,6 +115,7 @@ class ResourceGenerationCapability(BaseCapability):
         self.manim_video = manim_video or ManimVideoAgent()
         self.code_sandbox = code_sandbox or CodeSandboxAgent()
         self.quality_reviewer = quality_reviewer or QualityReviewerAgent()
+        self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
 
     @property
     def _builder(self) -> ProfileBuilder:
@@ -293,7 +300,16 @@ class ResourceGenerationCapability(BaseCapability):
             reviews = await self._review_all(all_resources, context, stream)
 
         # ------------------------------------------------------------------
-        # Stage 8: Package assembly
+        # Stage 8: Anti-hallucination + Safety (per-resource)
+        # ------------------------------------------------------------------
+        safety_reports: list[Any] = []
+        async with stream.stage("anti_hallucination", source="resource_capability"):
+            safety_reports = await self._safety_check_all(
+                all_resources, context, intent, stream
+            )
+
+        # ------------------------------------------------------------------
+        # Stage 9: Package assembly
         # ------------------------------------------------------------------
         package = ResourcePackage(
             topic=intent.topic,
@@ -309,6 +325,7 @@ class ResourceGenerationCapability(BaseCapability):
                 self.manim_video.agent_name,
                 self.code_sandbox.agent_name,
                 self.quality_reviewer.agent_name,
+                self.anti_hallucination.agent_name,
             ],
             metadata={
                 "intent_scope": intent.scope,
@@ -318,11 +335,16 @@ class ResourceGenerationCapability(BaseCapability):
                 "passing_reviews": sum(
                     1 for r in reviews if r.verdict == ReviewVerdict.PASS
                 ),
+                "safety_blocked": sum(
+                    1 for s in safety_reports if s.overall_verdict == OverallVerdict.UNSAFE
+                ),
             },
         )
-        # Attach the latest review to each resource
+        # Attach review + safety to each resource
         review_by_id = {r.resource_id: r for r in reviews}
-        for r in package.resources:
+        safety_by_id = {s.fact_check.topic if False else i: s for i, s in enumerate(safety_reports)}
+        # Match safety to resource by order (same iteration order as resources)
+        for idx, r in enumerate(package.resources):
             rev = review_by_id.get(r.resource_id)
             if rev is not None:
                 r.metadata["review"] = {
@@ -331,9 +353,12 @@ class ResourceGenerationCapability(BaseCapability):
                     "issues": rev.issues,
                     "suggestions": rev.suggestions,
                 }
+            if idx < len(safety_reports):
+                safety = safety_reports[idx]
+                r.metadata["safety"] = safety.to_dict()
 
         # ------------------------------------------------------------------
-        # Stage 9: Path integration — store package ID in profile metadata
+        # Stage 10: Path integration — store package ID in profile metadata
         # ------------------------------------------------------------------
         async with stream.stage("path_integration", source="resource_capability"):
             try:
@@ -636,6 +661,45 @@ class ResourceGenerationCapability(BaseCapability):
         tasks = [asyncio.create_task(_review_one(r)) for r in resources]
         results = await asyncio.gather(*tasks, return_exceptions=False)
         return [r for r in results if r is not None]
+
+    async def _safety_check_all(
+        self,
+        resources: list[Resource],
+        context: UnifiedContext,
+        intent: Intent,
+        stream: StreamBus,
+    ) -> list[Any]:
+        """Run anti-hallucination on each resource, in parallel.
+
+        Returns a list of :class:`AntiHallucinationReport` (one per resource).
+        """
+        if not resources:
+            return []
+        from tutor.agents.safety.anti_hallucination import (
+            AntiHallucinationReport,
+        )
+
+        async def _check_one(r: Resource):
+            try:
+                return await self.anti_hallucination.process(
+                    context,
+                    stream=stream,
+                    resource_content=r.content,
+                    topic=r.topic or intent.topic,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"AntiHallucination failed for {r.resource_id}: {exc!r}"
+                )
+                return AntiHallucinationReport(
+                    overall_verdict=OverallVerdict.UNVERIFIED,
+                    overall_confidence=0.5,
+                    notes=f"safety check failed: {exc}",
+                )
+
+        tasks = [asyncio.create_task(_check_one(r)) for r in resources]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+        return list(results)
 
 
 __all__ = ["ResourceGenerationCapability"]
