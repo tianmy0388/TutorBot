@@ -47,6 +47,8 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.20.0",
+    "networkx>=3.0",
+    "pyyaml>=6.0",
     # Networking
     "httpx>=0.27.0",
     "aiohttp>=3.9.0",
