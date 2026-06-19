@@ -1,7 +1,8 @@
-"""Resource generation agent cluster (核心 — 7 agents).
+"""Resource generation agent cluster (核心 — 8 agents).
 
 Cluster composition (per idea.md):
 
+- :class:`IntentUnderstandingAgent` — parse user message → Intent
 - :class:`ContentExpertAgent`     — knowledge accuracy, RAG-backed initial content
 - :class:`PedagogyAgent`         — restructure for teaching (examples, key points)
 - :class:`ExerciseGeneratorAgent`— tiered exercises (basic/advanced/challenge)
@@ -19,6 +20,12 @@ from tutor.agents.resource.content_expert import (
 from tutor.agents.resource.exercise_generator import (
     EXERCISE_OUTPUT_SCHEMA,
     ExerciseGeneratorAgent,
+)
+from tutor.agents.resource.intent_understanding import (
+    INTENT_SCHEMA,
+    Intent,
+    IntentUnderstandingAgent,
+    parse_intent_keyword,
 )
 from tutor.agents.resource.manim_video import (
     STORYBOARD_SCHEMA,
@@ -41,6 +48,7 @@ __all__ = [
     "CODE_OUTPUT_SCHEMA",
     "CONTENT_OUTPUT_SCHEMA",
     "EXERCISE_OUTPUT_SCHEMA",
+    "INTENT_SCHEMA",
     "MINDMAP_OUTPUT_SCHEMA",
     "PEDAGOGY_OUTPUT_SCHEMA",
     "REVIEW_OUTPUT_SCHEMA",
@@ -48,8 +56,11 @@ __all__ = [
     "CodeSandboxAgent",
     "ContentExpertAgent",
     "ExerciseGeneratorAgent",
+    "Intent",
+    "IntentUnderstandingAgent",
     "ManimVideoAgent",
     "MultimediaAgent",
     "PedagogyAgent",
     "QualityReviewerAgent",
+    "parse_intent_keyword",
 ]

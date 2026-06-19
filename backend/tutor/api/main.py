@@ -91,10 +91,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Routers
     from tutor.api.routers.health import router as health_router
     from tutor.api.routers.knowledge_graph import router as kg_router
+    from tutor.api.routers.resources import router as resources_router
     from tutor.api.routers.unified_ws import router as ws_router
 
     app.include_router(health_router, prefix="/api/v1", tags=["health"])
     app.include_router(kg_router, prefix="/api/v1", tags=["knowledge-graph"])
+    app.include_router(resources_router, prefix="/api/v1", tags=["resources"])
     app.include_router(ws_router, prefix="/api/v1", tags=["websocket"])
 
     # Root info
