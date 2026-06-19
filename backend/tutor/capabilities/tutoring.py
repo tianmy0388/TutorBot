@@ -1,38 +1,243 @@
-"""TutoringCapability — intelligent tutoring (Q&A). Optional bonus.
+"""TutoringCapability — instant, multi-modal Q&A tutoring.
 
-Placeholder for Phase 3.
+Pipeline (5 stages):
+
+    1. question_understanding   — classify + extract concepts
+    2. context_retrieval       — RAG search the KB
+    3. answer_generation        — 4-layer answer (TutoringAgent)
+    4. multi_modal_enrichment   — diagram / code / exercise suggestions
+    5. session_recording        — persist to TutorService
+
+Graceful degradation:
+- Each stage failure is caught + logged; downstream stages still run.
+- If LLM is unavailable, we still emit a structured failure result so
+  the frontend can show "tutoring temporarily unavailable".
+
+The capability is wired into the WebSocket via the orchestrator's
+keyword router ("问", "为什么", "解释", "不懂", ...) or by explicit
+``capability='tutoring'`` from the client.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
+from loguru import logger
+
+from tutor.agents.tutor.multimodal_enrichment import (
+    EnrichmentSuggestion,
+    MultiModalEnrichmentAgent,
+)
+from tutor.agents.tutor.question_understanding import (
+    QuestionUnderstanding,
+    QuestionUnderstandingAgent,
+)
+from tutor.agents.tutor.tutoring import TutoringAgent, TutoringAnswer
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
+from tutor.services.learner_profile.builder import (
+    ProfileBuilder,
+    get_profile_builder,
+)
+from tutor.services.tutor.service import TutorService, get_tutor_service
 
 
 class TutoringCapability(BaseCapability):
-    """即时多模态答疑解惑。"""
+    """End-to-end intelligent tutoring."""
 
     manifest = CapabilityManifest(
         name="tutoring",
-        description="即时多模态答疑解惑（文字 + 图解 + 短视频讲解）",
-        stages=["understand_question", "retrieve_context", "draft_answer", "multimodal_enrich"],
-        tools_used=["rag", "code_execution", "web_search"],
+        description="即时多模态答疑解惑（文字 + 图解 + 例子 + 练习）",
+        stages=[
+            "question_understanding",
+            "context_retrieval",
+            "answer_generation",
+            "multi_modal_enrichment",
+            "session_recording",
+        ],
+        tools_used=["rag"],
         cli_aliases=["tutor", "ask", "question"],
         tags=["tutoring", "qa"],
     )
 
+    def __init__(
+        self,
+        *,
+        builder: ProfileBuilder | None = None,
+        tutor_service: TutorService | None = None,
+        question_agent: QuestionUnderstandingAgent | None = None,
+        tutoring_agent: TutoringAgent | None = None,
+        enrichment_agent: MultiModalEnrichmentAgent | None = None,
+    ) -> None:
+        super().__init__()
+        self.builder = builder
+        self._owns_builder = builder is None
+        self.tutor_service = tutor_service or get_tutor_service()
+        self.question_agent = question_agent or QuestionUnderstandingAgent()
+        self.tutoring_agent = tutoring_agent or TutoringAgent()
+        self.enrichment_agent = enrichment_agent or MultiModalEnrichmentAgent()
+
+    @property
+    def _builder(self) -> ProfileBuilder:
+        if self.builder is None:
+            self.builder = get_profile_builder()
+        return self.builder
+
+    # ------------------------------------------------------------------
+    # Entry point
+    # ------------------------------------------------------------------
+
     async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
-        async with stream.stage("understand_question", source="tutor_capability"):
-            await stream.observation("理解学生问题...", source="tutor_capability")
-        async with stream.stage("retrieve_context", source="tutor_capability"):
-            await stream.observation("从知识库检索相关内容...", source="tutor_capability")
-        async with stream.stage("draft_answer", source="tutor_capability"):
-            await stream.observation("起草文字解答...", source="tutor_capability")
-        async with stream.stage("multimodal_enrich", source="tutor_capability"):
-            await stream.observation("生成图解/短视频补充...", source="tutor_capability")
-        await stream.observation("(占位) TutoringCapability 完整实现将在 Phase 3", source="tutor_capability")
-        await stream.done(source="tutor_capability")
+        understanding: QuestionUnderstanding | None = None
+        answer: TutoringAnswer | None = None
+        enrichments: list[EnrichmentSuggestion] = []
+
+        # ------------------------------------------------------------------
+        # Stage 1: question understanding
+        # ------------------------------------------------------------------
+        async with stream.stage("question_understanding", source="tutoring_capability"):
+            try:
+                understanding = await self.question_agent.process(context, stream=stream)
+                context.metadata["tutor_understanding"] = understanding
+            except Exception as exc:
+                logger.exception(f"QuestionUnderstanding failed: {exc!r}")
+                await stream.error(
+                    f"问题理解失败: {exc}", source="tutoring_capability"
+                )
+                understanding = QuestionUnderstanding(
+                    question_type=__import__(
+                        "tutor.agents.tutor.question_understanding",
+                        fromlist=["QuestionType"],
+                    ).QuestionType.OTHER,
+                    raw_question=context.user_message,
+                )
+
+        # ------------------------------------------------------------------
+        # Stage 2: context retrieval (RAG)
+        # ------------------------------------------------------------------
+        rag_context = ""
+        async with stream.stage("context_retrieval", source="tutoring_capability"):
+            try:
+                # Augment question with concepts to improve retrieval
+                enriched_q = context.user_message
+                if understanding and understanding.concepts:
+                    enriched_q += "\n\n相关概念：" + "、".join(understanding.concepts)
+                rag_context = await self.tutor_service.retrieve_context(
+                    question=enriched_q,
+                    concepts=understanding.concepts if understanding else [],
+                )
+                if rag_context:
+                    await stream.observation(
+                        f"已检索 RAG 上下文 ({len(rag_context)} 字符)",
+                        source="tutoring_capability",
+                        stage="context_retrieval",
+                    )
+                else:
+                    await stream.observation(
+                        "未检索到相关 RAG 内容，将依赖 LLM 自身知识",
+                        source="tutoring_capability",
+                        stage="context_retrieval",
+                    )
+            except Exception as exc:
+                logger.exception(f"RAG retrieval failed: {exc!r}")
+                await stream.error(
+                    f"RAG 检索失败: {exc}", source="tutoring_capability"
+                )
+
+        # ------------------------------------------------------------------
+        # Stage 3: answer generation
+        # ------------------------------------------------------------------
+        profile_snapshot: dict[str, Any] = {}
+        async with stream.stage("answer_generation", source="tutoring_capability"):
+            try:
+                profile = await self._builder.get(context.user_id)
+                profile_snapshot = (
+                    profile.to_summary() if profile else {}
+                )
+                context.metadata["learner_profile"] = profile
+            except Exception as exc:
+                logger.warning(f"Profile load failed: {exc!r}")
+                await stream.error(
+                    f"画像加载失败: {exc}", source="tutoring_capability"
+                )
+
+            if understanding is not None:
+                try:
+                    answer = await self.tutoring_agent.process(
+                        context,
+                        stream=stream,
+                        understanding=understanding,
+                        rag_context=rag_context,
+                        profile=profile_snapshot,
+                    )
+                    context.metadata["tutor_answer"] = answer
+                except Exception as exc:
+                    logger.exception(f"Answer generation failed: {exc!r}")
+                    await stream.error(
+                        f"答案生成失败: {exc}", source="tutoring_capability"
+                    )
+                    answer = TutoringAnswer(
+                        tldr="（暂时无法生成完整解答，请稍后重试）",
+                        confidence=0.0,
+                    )
+
+        # ------------------------------------------------------------------
+        # Stage 4: multi-modal enrichment
+        # ------------------------------------------------------------------
+        async with stream.stage("multi_modal_enrichment", source="tutoring_capability"):
+            if understanding is not None and answer is not None:
+                try:
+                    enrichments = await self.enrichment_agent.process(
+                        context,
+                        stream=stream,
+                        understanding=understanding,
+                        answer=answer,
+                    )
+                except Exception as exc:
+                    logger.exception(f"Enrichment failed: {exc!r}")
+                    await stream.error(
+                        f"多模态补充失败: {exc}", source="tutoring_capability"
+                    )
+
+        # ------------------------------------------------------------------
+        # Stage 5: session recording
+        # ------------------------------------------------------------------
+        async with stream.stage("session_recording", source="tutoring_capability"):
+            try:
+                if understanding is not None and answer is not None:
+                    self.tutor_service.record_interaction(
+                        user_id=context.user_id,
+                        question=context.user_message,
+                        understanding=understanding,
+                        answer=answer,
+                        enrichments=[s.to_dict() for s in enrichments],
+                    )
+            except Exception as exc:
+                logger.warning(f"Session recording failed: {exc!r}")
+
+        # ------------------------------------------------------------------
+        # Emit final result
+        # ------------------------------------------------------------------
+        await stream.result(
+            {
+                "understanding": (
+                    understanding.to_dict() if understanding else {}
+                ),
+                "answer": answer.to_dict() if answer else {},
+                "enrichments": [s.to_dict() for s in enrichments],
+                "history_count": len(
+                    self.tutor_service.get_history(context.user_id)
+                ),
+                "next_step": (
+                    "follow_up"
+                    if (understanding and understanding.follow_up_questions)
+                    else "ask_another"
+                ),
+            },
+            source="tutoring_capability",
+        )
+        await stream.done(source="tutoring_capability")
 
 
 __all__ = ["TutoringCapability"]
