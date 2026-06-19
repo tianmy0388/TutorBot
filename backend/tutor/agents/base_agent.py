@@ -92,7 +92,7 @@ class BaseAgent(ABC):
     ) -> None:
         if not self.agent_name:
             raise TypeError(f"{type(self).__name__} must set class attribute 'agent_name'")
-        self.llm = llm or self._build_default_llm()
+        self.llm = llm  # may be None → built lazily on first call
         self.prompts = prompt_manager or get_prompt_manager()
         self.trace_callback = trace_callback
         self.usage = TokenUsage()
@@ -103,6 +103,13 @@ class BaseAgent(ABC):
 
     def _build_default_llm(self) -> LLMProvider:
         return get_runtime_provider()
+
+    @property
+    def resolved_llm(self) -> LLMProvider:
+        """Return the LLM, building it lazily on first access."""
+        if self.llm is None:
+            self.llm = self._build_default_llm()
+        return self.llm
 
     # ------------------------------------------------------------------
     # Prompt helpers
@@ -180,20 +187,20 @@ class BaseAgent(ABC):
             {
                 "event": "llm_call_start",
                 "agent": self.agent_name,
-                "model": req.model or self.llm.model,
+                "model": req.model or self.resolved_llm.model,
                 "messages_count": len(messages),
             }
         )
 
         if stream is not None:
             await stream.thinking(
-                f"Calling {req.model or self.llm.model}...",
+                f"Calling {req.model or self.resolved_llm.model}...",
                 source=source or self.agent_name,
                 stage=stage,
             )
 
         try:
-            resp = await self.llm.call(req)
+            resp = await self.resolved_llm.call(req)
         except Exception as exc:
             logger.exception(f"LLM call failed for {self.agent_name}: {exc!r}")
             if stream is not None:
@@ -258,17 +265,17 @@ class BaseAgent(ABC):
             {
                 "event": "llm_stream_start",
                 "agent": self.agent_name,
-                "model": req.model or self.llm.model,
+                "model": req.model or self.resolved_llm.model,
             }
         )
 
         buffer: list[str] = []
         buf_len = 0
         final_usage: dict[str, int] = {}
-        model_name = req.model or self.llm.model
+        model_name = req.model or self.resolved_llm.model
 
         try:
-            async for chunk in self.llm.stream(req):
+            async for chunk in self.resolved_llm.stream(req):
                 if chunk.delta:
                     buffer.append(chunk.delta)
                     buf_len += len(chunk.delta)

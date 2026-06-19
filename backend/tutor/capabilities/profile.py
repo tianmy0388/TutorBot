@@ -1,20 +1,38 @@
-"""LearnerProfileCapability — dialogue-driven profile construction.
+"""LearnerProfileCapability — dialogue-driven profile construction (Phase 2).
 
-Uses the 3-agent cluster from :mod:`tutor.agents.profile`:
-
-1. FeatureExtractorAgent — extracts structured features from user messages.
-2. CognitiveDiagnosticAgent — asks follow-up probing questions.
-3. ProfileUpdaterAgent — incrementally updates the learner profile.
-
-This is a placeholder implementation that emits a stage trace; the full
-implementation lands in Phase 2.
+Flow per turn
+-------------
+1. **Load current profile** (or create blank).
+2. **Decide mode** based on profile age & coverage:
+   - Cold start (no profile or stale > 7d): full extraction + diagnostics
+   - Warm (recent profile): incremental update only
+3. **Run FeatureExtractorAgent** → :class:`DialogueSignal`
+4. **Run ProfileUpdaterAgent** → apply diff, persist
+5. If confidence < 0.7 *and* we have weak concepts: run
+   **CognitiveDiagnosticAgent** → emit probe questions back to user.
+6. Emit a ``result`` with the updated profile + (optional) probe questions.
 """
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+from loguru import logger
+
+from tutor.agents.profile.cognitive_diagnostic import CognitiveDiagnosticAgent
+from tutor.agents.profile.feature_extractor import FeatureExtractorAgent
+from tutor.agents.profile.profile_updater import ProfileUpdaterAgent
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
+from tutor.services.learner_profile.builder import (
+    LearnerProfile,
+    ProfileBuilder,
+    get_profile_builder,
+)
+from tutor.services.learner_profile.schema import empty_profile
 
 
 class LearnerProfileCapability(BaseCapability):
@@ -23,52 +41,155 @@ class LearnerProfileCapability(BaseCapability):
     manifest = CapabilityManifest(
         name="profile",
         description="通过对话构建并更新学习者画像（≥6 维度）",
-        stages=["feature_extraction", "cognitive_diagnosis", "profile_update"],
+        stages=[
+            "load_profile",
+            "decide_mode",
+            "feature_extraction",
+            "profile_update",
+            "diagnostic_probing",
+        ],
         tools_used=[],
         cli_aliases=["profile", "learner"],
         tags=["profile", "personalization"],
     )
 
+    # Heuristic: if profile is older than this, treat as cold start
+    COLD_START_AGE_DAYS = 7.0
+
+    def __init__(
+        self,
+        *,
+        builder: ProfileBuilder | None = None,
+        feature_extractor: FeatureExtractorAgent | None = None,
+        profile_updater: ProfileUpdaterAgent | None = None,
+        cognitive_diagnostic: CognitiveDiagnosticAgent | None = None,
+    ) -> None:
+        super().__init__()
+        self.builder = builder
+        self._owns_builder = builder is None
+        self.feature_extractor = feature_extractor or FeatureExtractorAgent()
+        self.profile_updater = profile_updater or ProfileUpdaterAgent()
+        self.cognitive_diagnostic = cognitive_diagnostic or CognitiveDiagnosticAgent()
+
+    @property
+    def _builder(self) -> ProfileBuilder:
+        if self.builder is None:
+            self.builder = get_profile_builder()
+        return self.builder
+
     async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
-        async with stream.stage("feature_extraction", source="profile_capability"):
-            await stream.observation(
-                "分析用户输入并提取结构化特征...",
-                source="profile_capability",
-            )
+        user_id = context.user_id
+
+        # ------------------------------------------------------------------
+        # Stage 1: Load current profile
+        # ------------------------------------------------------------------
+        async with stream.stage("load_profile", source="profile_capability"):
             await stream.thinking(
-                f"用户消息: {context.user_message[:200]}",
+                f"加载用户 {user_id} 的画像...",
                 source="profile_capability",
+                stage="load_profile",
             )
+            try:
+                profile = await self._builder.get(user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(f"Failed to load profile for {user_id}: {exc!r}")
+                await stream.error(
+                    f"加载画像失败: {exc}", source="profile_capability"
+                )
+                profile = empty_profile(user_id=user_id)
+            context.metadata["learner_profile"] = profile
             await stream.observation(
-                "(占位) FeatureExtractorAgent 将在 Phase 2 实现",
+                f"当前画像: v{profile.version}, "
+                f"{len(profile.knowledge_map.scores)} 概念, "
+                f"avg_mastery={profile.knowledge_map.average_mastery():.2f}",
                 source="profile_capability",
+                stage="load_profile",
             )
 
-        async with stream.stage("cognitive_diagnosis", source="profile_capability"):
+        # ------------------------------------------------------------------
+        # Stage 2: Decide mode
+        # ------------------------------------------------------------------
+        async with stream.stage("decide_mode", source="profile_capability"):
+            is_cold_start = (
+                profile.version <= 1
+                and len(profile.knowledge_map.scores) == 0
+            ) or len(profile.knowledge_map.scores) == 0
+            mode = "cold_start" if is_cold_start else "incremental"
             await stream.observation(
-                "通过对话探测知识掌握情况...",
+                f"模式: {mode}",
                 source="profile_capability",
-            )
-            await stream.observation(
-                "(占位) CognitiveDiagnosticAgent 将在 Phase 2 实现",
-                source="profile_capability",
-            )
-
-        async with stream.stage("profile_update", source="profile_capability"):
-            await stream.observation(
-                "增量更新 6 维画像...",
-                source="profile_capability",
-            )
-            await stream.observation(
-                "(占位) ProfileUpdaterAgent 将在 Phase 2 实现",
-                source="profile_capability",
+                stage="decide_mode",
+                metadata={"mode": mode, "age_days": profile.age_days()},
             )
 
+        # ------------------------------------------------------------------
+        # Stage 3: Feature extraction
+        # ------------------------------------------------------------------
+        signal = None
+        try:
+            signal = await self.feature_extractor.process(context, stream=stream)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(f"FeatureExtractor failed: {exc!r}")
+            await stream.error(
+                f"特征抽取失败: {exc}",
+                source="profile_capability",
+                stage="feature_extraction",
+            )
+
+        if signal is not None:
+            context.metadata["profile_signal"] = signal
+
+        # ------------------------------------------------------------------
+        # Stage 4: Profile update
+        # ------------------------------------------------------------------
+        try:
+            updated_profile = await self.profile_updater.process(context, stream=stream)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(f"ProfileUpdater failed: {exc!r}")
+            await stream.error(
+                f"画像更新失败: {exc}",
+                source="profile_capability",
+                stage="profile_update",
+            )
+            updated_profile = profile
+
+        # ------------------------------------------------------------------
+        # Stage 5: Diagnostic probing (only if confidence low or cold start)
+        # ------------------------------------------------------------------
+        probe_questions: list[dict[str, Any]] = []
+        should_probe = (
+            mode == "cold_start"
+            or (signal is not None and signal.confidence < 0.7)
+            or len(updated_profile.weak_concepts()) >= 2
+        )
+
+        if should_probe:
+            try:
+                probe_questions = await self.cognitive_diagnostic.process(
+                    context, stream=stream
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(f"CognitiveDiagnostic failed: {exc!r}")
+                await stream.error(
+                    f"诊断问题生成失败: {exc}",
+                    source="profile_capability",
+                    stage="diagnostic_probing",
+                )
+
+        # ------------------------------------------------------------------
+        # Emit final result
+        # ------------------------------------------------------------------
         await stream.result(
             {
-                "status": "placeholder",
-                "capability": "profile",
-                "message": "ProfileCapability 占位实现 — 完整功能在 Phase 2 实现",
+                "user_id": user_id,
+                "mode": mode,
+                "profile": updated_profile.to_summary(),
+                "probe_questions": probe_questions,
+                "next_step": (
+                    "answer_probe_questions"
+                    if probe_questions
+                    else "ready_for_resource_generation"
+                ),
             },
             source="profile_capability",
         )

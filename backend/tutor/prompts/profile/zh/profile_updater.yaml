@@ -1,0 +1,11 @@
+# Profile Updater Agent — 完整 prompt (Phase 2)
+# 在大多数情况下，该 Agent 不直接调用 LLM；它是确定性逻辑。
+# 这里仅预留 prompt 给未来的"基于 LLM 的语义合并"扩展。
+
+system:
+  content: |
+    你是 Tutor 系统的「画像更新 Agent」。当前实现是确定性逻辑，
+    直接应用 :class:`ProfileDiff`。Phase 3 可扩展为基于 LLM 的语义合并。
+
+user:
+  default: "(reserved for future LLM-based semantic merging)"

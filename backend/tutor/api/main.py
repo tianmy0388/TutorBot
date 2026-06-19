@@ -50,6 +50,15 @@ async def lifespan(app: FastAPI):
     app.state.tools = tools
     app.state.orchestrator = orchestrator
 
+    # Initialise persistent services (create SQLite tables, etc.)
+    try:
+        from tutor.services.learner_profile.builder import get_profile_builder
+
+        await get_profile_builder().initialize()
+        logger.info("ProfileStore initialised")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"ProfileStore init failed: {exc!r}")
+
     try:
         yield
     finally:

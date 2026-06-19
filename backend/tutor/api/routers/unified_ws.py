@@ -93,6 +93,7 @@ async def _handle_turn(
     user_message = envelope.get("message") or ""
     history = envelope.get("history") or []
     language = envelope.get("language") or "zh"
+    capability = envelope.get("capability") or None
 
     context = UnifiedContext(
         session_id=session_id,
@@ -100,6 +101,7 @@ async def _handle_turn(
         user_message=user_message,
         history=history,
         language=language,
+        capability=capability,
         metadata=dict(envelope.get("metadata") or {}),
     )
 
