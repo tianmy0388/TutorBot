@@ -1,0 +1,5 @@
+# Feature Extractor Agent Prompts (English)
+# Phase 2 will provide the full prompts.
+system:
+  content: |
+    You are the Feature Extractor Agent in Tutor. (Phase 2 placeholder.)

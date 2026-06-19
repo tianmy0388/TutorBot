@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  body {
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 hover:bg-brand-500 text-white;
+  }
+  .btn-ghost {
+    @apply btn bg-bg-panel hover:bg-bg-card text-fg;
+  }
+  .card {
+    @apply bg-bg-card border border-fg/10 rounded-xl p-4 shadow-sm;
+  }
+  .panel {
+    @apply bg-bg-panel border border-fg/10 rounded-2xl;
+  }
+}
+
+/* Mermaid container styling */
+.mermaid-container {
+  @apply bg-bg-panel rounded-lg p-4 overflow-auto;
+}
+
+/* Markdown styles */
+.prose-tutor {
+  @apply text-fg leading-relaxed;
+}
+.prose-tutor h1 {
+  @apply text-2xl font-bold mt-6 mb-3;
+}
+.prose-tutor h2 {
+  @apply text-xl font-semibold mt-5 mb-2;
+}
+.prose-tutor h3 {
+  @apply text-lg font-semibold mt-4 mb-2;
+}
+.prose-tutor p {
+  @apply my-3;
+}
+.prose-tutor code:not(pre code) {
+  @apply bg-bg-panel px-1.5 py-0.5 rounded text-accent text-sm;
+}
+.prose-tutor pre {
+  @apply bg-bg-panel rounded-lg p-4 overflow-x-auto my-4;
+}
+.prose-tutor ul {
+  @apply list-disc list-inside my-3 space-y-1;
+}
+.prose-tutor ol {
+  @apply list-decimal list-inside my-3 space-y-1;
+}
+.prose-tutor blockquote {
+  @apply border-l-4 border-brand-500 pl-4 my-3 text-fg-muted;
+}
+.prose-tutor table {
+  @apply w-full my-4 border-collapse;
+}
+.prose-tutor th {
+  @apply bg-bg-panel px-3 py-2 text-left font-semibold border border-fg/10;
+}
+.prose-tutor td {
+  @apply px-3 py-2 border border-fg/10;
+}

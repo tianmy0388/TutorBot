@@ -1,0 +1,79 @@
+{
+  "topic": "神经网络与深度学习",
+  "course": "ai_introduction",
+  "version": "1.0.0",
+  "questions": [
+    {
+      "id": "nn-001",
+      "type": "single_choice",
+      "difficulty": 2,
+      "knowledge_point": "反向传播",
+      "question": "反向传播算法中，链式法则的核心作用是？",
+      "options": [
+        "A. 加速前向传播计算",
+        "B. 将输出层的损失逐层回传以计算参数梯度",
+        "C. 初始化网络权重",
+        "D. 选择学习率"
+      ],
+      "answer": "B",
+      "explanation": "反向传播通过链式法则把输出层的损失对各层参数的梯度计算出来，本质就是多元复合函数求导的链式法则。"
+    },
+    {
+      "id": "nn-002",
+      "type": "multiple_choice",
+      "difficulty": 3,
+      "knowledge_point": "激活函数",
+      "question": "下列激活函数中，哪些能缓解梯度消失问题？",
+      "options": [
+        "A. Sigmoid",
+        "B. ReLU",
+        "C. Leaky ReLU",
+        "D. Tanh"
+      ],
+      "answer": "BC",
+      "explanation": "ReLU 和 Leaky ReLU 在正区间梯度恒为 1（或 α），不会饱和，因此能缓解梯度消失。Sigmoid 和 Tanh 在两侧都会饱和。"
+    },
+    {
+      "id": "nn-003",
+      "type": "true_false",
+      "difficulty": 2,
+      "knowledge_point": "优化器",
+      "question": "Adam 优化器同时维护一阶矩和二阶矩的指数移动平均。",
+      "answer": true,
+      "explanation": "Adam = Adaptive Moment Estimation，结合了 Momentum（一阶矩）和 RMSProp（二阶矩）。"
+    },
+    {
+      "id": "nn-004",
+      "type": "single_choice",
+      "difficulty": 3,
+      "knowledge_point": "过拟合",
+      "question": "下列哪种方法不属于缓解过拟合的常用手段？",
+      "options": [
+        "A. Dropout",
+        "B. 权重衰减 (Weight Decay)",
+        "C. 数据增强 (Data Augmentation)",
+        "D. 增大学习率"
+      ],
+      "answer": "D",
+      "explanation": "增大学习率会让训练更不稳定，并不能缓解过拟合，反而可能加剧。"
+    },
+    {
+      "id": "nn-005",
+      "type": "short_answer",
+      "difficulty": 3,
+      "knowledge_point": "BatchNorm",
+      "question": "请简述 Batch Normalization 的作用及其在训练/推理时的不同。",
+      "answer_outline": "BatchNorm 在每个 mini-batch 上对激活值做归一化，使其均值为 0、方差为 1，然后学习缩放和平移参数。作用：缓解内部协变量偏移、允许更大学习率、有正则化效果。训练时用当前 batch 的均值和方差；推理时用训练时累计的移动平均均值和方差，以保证确定性。",
+      "explanation": "训练-推理不一致是 BatchNorm 的关键细节，迁移到不同框架/部署环境时需要注意。"
+    },
+    {
+      "id": "nn-006",
+      "type": "code",
+      "difficulty": 4,
+      "knowledge_point": "PyTorch",
+      "question": "用 PyTorch 实现一个 2 层 MLP 对 MNIST 分类（不要求训练，只写模型）。",
+      "answer_outline": "nn.Flatten + nn.Linear(784, 256) + nn.ReLU + nn.Dropout(0.2) + nn.Linear(256, 10)",
+      "explanation": "重点：理解层之间的维度对应。"
+    }
+  ]
+}

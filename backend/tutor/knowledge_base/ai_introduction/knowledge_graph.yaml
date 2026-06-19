@@ -1,0 +1,124 @@
+# 人工智能导论 — 知识图谱定义
+# MVP 用 YAML 静态定义 + NetworkX 内存遍历
+# 后续可替换为 Neo4j
+
+course: ai_introduction
+version: "1.0.0"
+
+# ---------------------------------------------------------------------------
+# 节点
+# ---------------------------------------------------------------------------
+nodes:
+  - id: ai_overview
+    name: 人工智能概述
+    category: foundation
+    difficulty: 1
+    prerequisites: []
+    estimated_hours: 2
+    learning_outcomes:
+      - 理解 AI / ML / DL 的层级关系
+      - 能列举 AI 的主要应用领域
+    source_file: 01_什么是人工智能.md
+
+  - id: ml_basics
+    name: 机器学习基础
+    category: machine_learning
+    difficulty: 2
+    prerequisites: [ai_overview]
+    estimated_hours: 6
+    learning_outcomes:
+      - 理解监督 / 无监督 / 强化学习的区别
+      - 能用 sklearn 训练简单分类模型
+      - 理解过拟合与正则化
+    source_file: 02_机器学习基础.md
+
+  - id: neural_network
+    name: 神经网络与深度学习
+    category: deep_learning
+    difficulty: 3
+    prerequisites: [ml_basics]
+    estimated_hours: 10
+    learning_outcomes:
+      - 理解前馈神经网络结构与激活函数
+      - 能手写反向传播算法
+      - 理解梯度下降与优化器
+    source_file: 03_神经网络与深度学习.md
+
+  - id: cnn
+    name: CNN 与计算机视觉
+    category: deep_learning
+    difficulty: 3
+    prerequisites: [neural_network]
+    estimated_hours: 8
+    learning_outcomes:
+      - 理解卷积、池化、感受野
+      - 熟悉经典 CNN 架构（LeNet, AlexNet, VGG, ResNet）
+      - 能用 PyTorch 构建图像分类器
+    source_file: 04_CNN与计算机视觉.md
+
+  - id: rnn
+    name: RNN 与序列建模
+    category: deep_learning
+    difficulty: 4
+    prerequisites: [neural_network]
+    estimated_hours: 8
+    learning_outcomes:
+      - 理解 RNN 的循环结构与梯度问题
+      - 掌握 LSTM / GRU 门控机制
+      - 能用 RNN 做文本生成
+    source_file: 05_RNN与序列建模.md
+
+  - id: transformer
+    name: Transformer 与注意力机制
+    category: deep_learning
+    difficulty: 4
+    prerequisites: [neural_network]
+    estimated_hours: 10
+    learning_outcomes:
+      - 深入理解 Self-Attention 与 Multi-Head Attention
+      - 掌握 Positional Encoding
+      - 能从零实现简化版 Transformer
+    source_file: 06_Transformer与注意力机制.md
+
+  - id: llm
+    name: LLM 与大语言模型
+    category: applications
+    difficulty: 4
+    prerequisites: [transformer]
+    estimated_hours: 10
+    learning_outcomes:
+      - 理解预训练-微调范式
+      - 掌握 GPT / BERT / T5 架构差异
+      - 了解 Prompt Engineering 与 RLHF
+    source_file: 07_LLM与大语言模型.md
+
+# ---------------------------------------------------------------------------
+# 边（先修关系）
+# ---------------------------------------------------------------------------
+edges:
+  - { from: ai_overview, to: ml_basics, type: prerequisite }
+  - { from: ml_basics, to: neural_network, type: prerequisite }
+  - { from: neural_network, to: cnn, type: prerequisite }
+  - { from: neural_network, to: rnn, type: prerequisite }
+  - { from: neural_network, to: transformer, type: prerequisite }
+  - { from: transformer, to: llm, type: prerequisite }
+  - { from: rnn, to: transformer, type: related }
+
+# ---------------------------------------------------------------------------
+# 推荐学习路径（按方向）
+# ---------------------------------------------------------------------------
+learning_paths:
+  - id: cv_path
+    name: 计算机视觉方向
+    description: 偏向图像处理与 CNN 应用
+    sequence: [ai_overview, ml_basics, neural_network, cnn]
+
+  - id: nlp_path
+    name: 自然语言处理方向
+    description: 偏向文本与序列建模
+    sequence: [ai_overview, ml_basics, neural_network, rnn, transformer, llm]
+
+  - id: full_path
+    name: 全栈 AI 工程师方向
+    description: 完整学完所有章节
+    sequence: [ai_overview, ml_basics, neural_network, cnn, rnn, transformer, llm]
