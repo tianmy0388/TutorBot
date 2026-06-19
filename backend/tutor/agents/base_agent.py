@@ -121,19 +121,34 @@ class BaseAgent(ABC):
             self.module_name, self.agent_name, language=language
         )
 
-    def get_system_prompt(self, prompt_data: dict[str, Any] | None = None) -> str:
-        """Read the ``system.content`` field from this agent's prompt."""
+    def get_system_prompt(
+        self,
+        prompt_data: dict[str, Any] | None = None,
+        *,
+        section: str = "system",
+        field: str = "content",
+        fallback: str = "",
+    ) -> str:
+        """Read a system prompt field.
+
+        Defaults to ``system.content`` but supports custom section/field
+        so agents with multi-stage prompts (e.g. Manim designer/coder) can
+        pick different sections.
+        """
         prompt_data = prompt_data or self.get_prompt_data()
-        return self.prompts.get_prompt(prompt_data, "system", "content")
+        return self.prompts.get_prompt(prompt_data, section, field, fallback)
 
     def get_user_prompt(
         self,
         prompt_data: dict[str, Any] | None = None,
+        *,
+        section: str = "user",
         field: str = "default",
+        fallback: str = "",
     ) -> str:
         """Read a user-prompt template (e.g. ``user.default``)."""
         prompt_data = prompt_data or self.get_prompt_data()
-        return self.prompts.get_prompt(prompt_data, "user", field)
+        return self.prompts.get_prompt(prompt_data, section, field, fallback)
 
     # ------------------------------------------------------------------
     # LLM call helpers

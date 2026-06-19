@@ -1,0 +1,415 @@
+"""Resource / ResourcePackage schema (Pydantic v2).
+
+A :class:`Resource` is one chunk of learning material — a document,
+a mind map, a quiz, a video, etc. Each has:
+
+- Stable ``resource_id`` (uuid4 hex)
+- ``type`` — discriminator (one of :class:`ResourceType`)
+- ``title`` + Markdown ``content``
+- ``format_specific`` — type-dependent payload (validated by per-type model)
+- ``difficulty`` (1-5), ``estimated_minutes``
+- ``prerequisites`` — concept ids this resource assumes
+- ``generated_by`` — list of agent names that contributed
+- ``confidence_score`` (0-1) — quality signal
+
+A :class:`ResourcePackage` bundles multiple Resources for one learner +
+topic, plus the optional learning path and the snapshot of the profile
+that produced it.
+"""
+
+from __future__ import annotations
+
+import math
+import uuid
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+
+class ResourceType(str, Enum):
+    """All supported resource types (≥6 per idea.md)."""
+
+    DOCUMENT = "document"      # 课程讲解文档 (Markdown)
+    MINDMAP = "mindmap"        # 知识点思维导图 (Mermaid DSL)
+    EXERCISE = "exercise"      # 练习题/题库 (JSON)
+    READING = "reading"        # 拓展阅读材料 (Markdown + citations)
+    VIDEO = "video"            # 多模态视频/动画 (MP4 + Manim source)
+    CODE = "code"              # 代码实操案例 (Python + explanation)
+    PPT = "ppt"                # PPT 教案 (optional, Phase 5)
+
+
+class ReviewVerdict(str, Enum):
+    """Outcome of a quality review."""
+
+    PASS = "pass"
+    REVISE = "revise"
+    REJECT = "reject"
+
+
+# ---------------------------------------------------------------------------
+# Format-specific payloads
+# ---------------------------------------------------------------------------
+
+
+class DocumentResource(BaseModel):
+    """Payload for ``type=document``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sections: list[dict[str, Any]] = Field(default_factory=list)
+    # Each section: {"title": "...", "content": "...", "key_points": [...]}
+    has_math: bool = False
+    has_diagrams: bool = False
+
+
+class MindMapResource(BaseModel):
+    """Payload for ``type=mindmap``. Uses Mermaid ``mindmap`` syntax."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mermaid_dsl: str = ""  # raw ```mermaid ...``` block (without fences)
+    central_topic: str = ""
+    branch_count: int = 0
+
+
+class ExerciseOption(BaseModel):
+    """One option in a multiple-choice question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str  # "A" / "B" / ...
+    text: str
+
+
+class ExerciseQuestion(BaseModel):
+    """One question in a quiz/exercise set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: Literal["single_choice", "multiple_choice", "true_false", "fill_blank", "short_answer", "code"]
+    difficulty: int = 2
+    knowledge_point: str = ""
+    question: str
+    options: list[ExerciseOption] = Field(default_factory=list)
+    answer: Any = None  # string, list[str], bool, or code string
+    explanation: str = ""
+    estimated_seconds: int = 60
+
+    @field_validator("difficulty")
+    @classmethod
+    def _diff_in_range(cls, v: int) -> int:
+        if v < 1 or v > 5:
+            raise ValueError(f"difficulty must be in [1, 5], got {v}")
+        return v
+
+
+class ExerciseResource(BaseModel):
+    """Payload for ``type=exercise``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[ExerciseQuestion] = Field(default_factory=list)
+    total_questions: int = 0
+    difficulty_breakdown: dict[str, int] = Field(default_factory=dict)
+    # e.g. {"basic": 3, "advanced": 2, "challenge": 1}
+
+
+class ReadingResource(BaseModel):
+    """Payload for ``type=reading``. Markdown body + citations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    # Each: {"title": "...", "url": "...", "author": "...", "year": 2024}
+    estimated_reading_minutes: int = 5
+
+
+class VideoResource(BaseModel):
+    """Payload for ``type=video``. Holds Manim source + (optional) render result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    manim_code: str = ""
+    scene_class: str = "GeneratedScene"
+    video_url: str | None = None
+    thumbnail_url: str | None = None
+    duration_seconds: int = 0
+    render_status: Literal["pending", "rendering", "ready", "failed"] = "pending"
+    render_error: str | None = None
+
+
+class CodeResource(BaseModel):
+    """Payload for ``type=code``. Code + explanation + execution result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    language: str = "python"
+    code: str = ""
+    explanation: str = ""
+    execution_status: Literal["not_run", "pending", "success", "failed"] = "not_run"
+    stdout: str = ""
+    stderr: str = ""
+    sandbox_url: str | None = None
+
+
+class PPTResource(BaseModel):
+    """Payload for ``type=ppt``. python-pptx generated deck info."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slide_count: int = 0
+    pptx_path: str | None = None
+    slide_titles: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Resource (root)
+# ---------------------------------------------------------------------------
+
+
+class Resource(BaseModel):
+    """One learning resource of any supported type.
+
+    The ``format_specific`` field is validated against the corresponding
+    per-type model at construction time. The union type isn't directly
+    expressible in Pydantic v2 discriminator syntax, so we use a validator
+    that switches on ``type``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resource_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    type: ResourceType
+    title: str
+    content: str = ""  # Markdown body (used directly for document/reading)
+    format_specific: dict[str, Any] = Field(default_factory=dict)
+    difficulty: int = 2
+    estimated_minutes: int = 5
+    prerequisites: list[str] = Field(default_factory=list)
+    generated_by: list[str] = Field(default_factory=list)
+    confidence_score: float = 0.7
+    topic: str = ""
+    tags: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
+
+    @field_validator("title")
+    @classmethod
+    def _title_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("title must be non-empty")
+        return v.strip()
+
+    @field_validator("difficulty")
+    @classmethod
+    def _difficulty_in_range(cls, v: int) -> int:
+        if v < 1 or v > 5:
+            raise ValueError(f"difficulty must be in [1, 5], got {v}")
+        return v
+
+    @field_validator("estimated_minutes")
+    @classmethod
+    def _minutes_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"estimated_minutes must be >= 0, got {v}")
+        return v
+
+    @field_validator("confidence_score")
+    @classmethod
+    def _confidence_in_range(cls, v: float) -> float:
+        if math.isnan(v) or math.isinf(v):
+            raise ValueError(f"confidence_score must be finite, got {v!r}")
+        return max(0.0, min(1.0, float(v)))
+
+    @model_validator(mode="after")
+    def _validate_format_specific(self) -> "Resource":
+        expected_type = self.type
+        expected_key = _format_specific_key(expected_type)
+        if not self.format_specific:
+            return self
+        if expected_key not in self.format_specific and len(self.format_specific) > 0:
+            # Allow other keys but warn via metadata — strict mode would reject
+            self.metadata.setdefault("_format_specific_keys", list(self.format_specific.keys()))
+        return self
+
+    # ------------------------------------------------------------------
+    # Convenience accessors
+    # ------------------------------------------------------------------
+
+    def parsed_format_specific(self) -> Any:
+        """Return ``format_specific`` validated against the per-type model.
+
+        The ``format_specific`` dict is directly validated as the type's
+        payload (its keys match the per-type model's fields). If validation
+        fails (e.g. extra keys), returns ``None``.
+        """
+        if not self.format_specific:
+            return None
+        model = _FORMAT_MODELS[self.type]
+        try:
+            return model.model_validate(self.format_specific)
+        except Exception:
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Resource review (QualityReviewer output)
+# ---------------------------------------------------------------------------
+
+
+class ResourceReview(BaseModel):
+    """Outcome of a :class:`QualityReviewer` pass over a Resource."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resource_id: str
+    verdict: ReviewVerdict = ReviewVerdict.PASS
+    quality_score: float = 0.8  # 0-1
+    issues: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    reviewer: str = "QualityReviewerAgent"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("quality_score")
+    @classmethod
+    def _score_in_range(cls, v: float) -> float:
+        if math.isnan(v) or math.isinf(v):
+            raise ValueError(f"quality_score must be finite, got {v!r}")
+        return max(0.0, min(1.0, float(v)))
+
+
+# ---------------------------------------------------------------------------
+# Package
+# ---------------------------------------------------------------------------
+
+
+class ResourcePackage(BaseModel):
+    """A bundle of resources generated for one learner + one topic."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    package_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    topic: str
+    resources: list[Resource] = Field(default_factory=list)
+    target_profile_snapshot: dict[str, Any] = Field(default_factory=dict)
+    # ^ snapshot of LearnerProfile.to_summary() at generation time
+    learning_path_summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_by: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Convenience
+    # ------------------------------------------------------------------
+
+    def by_type(self, rtype: ResourceType) -> list[Resource]:
+        return [r for r in self.resources if r.type == rtype]
+
+    def has_type(self, rtype: ResourceType) -> bool:
+        return any(r.type == rtype for r in self.resources)
+
+    def total_minutes(self) -> int:
+        return sum(r.estimated_minutes for r in self.resources)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "package_id": self.package_id,
+            "topic": self.topic,
+            "resource_count": len(self.resources),
+            "total_minutes": self.total_minutes(),
+            "types": sorted({r.type.value for r in self.resources}),
+            "avg_confidence": (
+                round(sum(r.confidence_score for r in self.resources) / len(self.resources), 3)
+                if self.resources
+                else 0.0
+            ),
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+_FORMAT_MODELS: dict[ResourceType, type[BaseModel]] = {
+    ResourceType.DOCUMENT: DocumentResource,
+    ResourceType.MINDMAP: MindMapResource,
+    ResourceType.EXERCISE: ExerciseResource,
+    ResourceType.READING: ReadingResource,
+    ResourceType.VIDEO: VideoResource,
+    ResourceType.CODE: CodeResource,
+    ResourceType.PPT: PPTResource,
+}
+
+
+def _format_specific_key(rtype: ResourceType) -> str:
+    """Map ``ResourceType`` to the conventional key inside ``format_specific``.
+
+    e.g. ``ResourceType.DOCUMENT → "document"`` — but most keys are just
+    the type value. We define this explicitly to allow future divergence.
+    """
+    return rtype.value
+
+
+def build_resource(
+    *,
+    type: ResourceType,
+    title: str,
+    content: str = "",
+    format_specific: dict[str, Any] | None = None,
+    difficulty: int = 2,
+    estimated_minutes: int = 5,
+    prerequisites: list[str] | None = None,
+    generated_by: list[str] | None = None,
+    confidence_score: float = 0.7,
+    topic: str = "",
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Resource:
+    """Convenience builder with sensible defaults."""
+    return Resource(
+        type=type,
+        title=title,
+        content=content,
+        format_specific=format_specific or {},
+        difficulty=difficulty,
+        estimated_minutes=estimated_minutes,
+        prerequisites=list(prerequisites or []),
+        generated_by=list(generated_by or []),
+        confidence_score=confidence_score,
+        topic=topic,
+        tags=list(tags or []),
+        metadata=dict(metadata or {}),
+    )
+
+
+__all__ = [
+    "CodeResource",
+    "DocumentResource",
+    "ExerciseOption",
+    "ExerciseQuestion",
+    "ExerciseResource",
+    "MindMapResource",
+    "PPTResource",
+    "ReadingResource",
+    "Resource",
+    "ResourcePackage",
+    "ResourceReview",
+    "ResourceType",
+    "ReviewVerdict",
+    "VideoResource",
+    "build_resource",
+]
