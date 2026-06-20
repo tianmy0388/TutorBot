@@ -1,40 +1,54 @@
 import type { Config } from "tailwindcss";
 
+/**
+ * Colors are wired through CSS variables so the theme can be switched at
+ * runtime by toggling ``<html data-theme="...">`` (see globals.css).
+ *
+ * The vars are space-separated RGB triplets (without the ``rgb()``
+ * wrapper), which lets Tailwind's ``<alpha-value>`` placeholder wrap
+ * them so opacity modifiers like ``text-fg/10`` work correctly.
+ */
+const withAlpha = (rgb: string) => `rgb(${rgb} / <alpha-value>)`;
+
 const config: Config = {
   content: [
     "./app/**/*.{js,ts,jsx,tsx,mdx}",
     "./components/**/*.{js,ts,jsx,tsx,mdx}",
   ],
+  darkMode: ["class", '[data-theme="dark"]'],
   theme: {
     extend: {
       colors: {
         bg: {
-          DEFAULT: "#0a0a0a",
-          subtle: "#111111",
-          panel: "#171717",
-          card: "#1f1f1f",
+          DEFAULT: withAlpha("var(--color-bg)"),
+          subtle: withAlpha("var(--color-bg-subtle)"),
+          panel: withAlpha("var(--color-bg-panel)"),
+          card: withAlpha("var(--color-bg-card)"),
         },
         fg: {
-          DEFAULT: "#fafafa",
-          muted: "#a1a1a1",
-          subtle: "#737373",
+          DEFAULT: withAlpha("var(--color-fg)"),
+          muted: withAlpha("var(--color-fg-muted)"),
+          subtle: withAlpha("var(--color-fg-subtle)"),
+        },
+        border: {
+          DEFAULT: withAlpha("var(--color-border)"),
         },
         brand: {
-          50: "#eef4ff",
-          100: "#dce8ff",
-          200: "#bdd2ff",
-          300: "#90b1ff",
-          400: "#6086ff",
-          500: "#3b5dff",
-          600: "#2a44e5",
-          700: "#2234b8",
-          800: "#1f2d8f",
-          900: "#1d2a72",
+          50: withAlpha("var(--color-brand-50)"),
+          100: withAlpha("var(--color-brand-100)"),
+          200: withAlpha("var(--color-brand-200)"),
+          300: withAlpha("var(--color-brand-300)"),
+          400: withAlpha("var(--color-brand-400)"),
+          500: withAlpha("var(--color-brand-500)"),
+          600: withAlpha("var(--color-brand-600)"),
+          700: withAlpha("var(--color-brand-700)"),
+          800: withAlpha("var(--color-brand-800)"),
+          900: withAlpha("var(--color-brand-900)"),
         },
         accent: {
-          DEFAULT: "#22d3ee",
-          warm: "#f97316",
-          green: "#22c55e",
+          DEFAULT: withAlpha("var(--color-accent)"),
+          warm: withAlpha("var(--color-accent-warm)"),
+          green: withAlpha("var(--color-accent-green)"),
         },
       },
       fontFamily: {

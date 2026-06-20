@@ -35,6 +35,7 @@ import { PathVisualizer } from "@/components/kg/PathVisualizer";
 import { TutorPanel } from "@/components/tutor/TutorPanel";
 import { AssessmentPanel } from "@/components/assessment/AssessmentPanel";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { SettingsModal } from "@/components/layout/SettingsModal";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useTutorStore } from "@/lib/store";
 import {
@@ -63,6 +64,13 @@ export default function HomePage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightPane, setRightPane] = useState<RightPane>("profile");
   const userInitiatedPane = useRef(false);
+
+  // Apply the user's stored theme preference on first mount (post-hydration
+  // so SSR HTML doesn't fight client). Runs once.
+  const hydrateTheme = useTutorStore((s) => s.hydrateTheme);
+  useEffect(() => {
+    hydrateTheme();
+  }, [hydrateTheme]);
 
   // Keep the WebSocket connection alive for the whole page lifetime
   useWebSocket();
@@ -239,6 +247,9 @@ export default function HomePage() {
           </aside>
         </div>
       </main>
+
+      {/* Settings modal — mounted at root so it overlays everything */}
+      <SettingsModal />
     </div>
   );
 }

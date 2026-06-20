@@ -48,13 +48,81 @@ export function dispatchStreamEvent(ev: StreamEvent): void {
     }
     case "done": {
       // Pull current result from the turn
-      const result = useTutorStore.getState().activeTurn.result;
+      const turn = useTutorStore.getState().activeTurn;
+      const result = turn.result;
       useTutorStore.getState().completeActiveTurn(result, null);
+      // If completeActiveTurn didn't push a visible assistant message
+      // (because text_buffer + thinking_buffer were both empty — the common
+      // case for resource_generation, which never streams text), inject a
+      // contextual completion message so the user gets visible feedback.
+      injectCompletionMessageIfMissing();
       break;
     }
     default:
       break;
   }
+}
+
+/**
+ * Some capabilities (notably resource_generation) don't emit ``content``
+ * events — they only emit stage_start/thinking/result. When such a turn
+ * finishes, ``completeActiveTurn`` has nothing to put in an assistant
+ * message bubble. To avoid the dialog going silent, generate a one-line
+ * summary based on the capability + result payload.
+ */
+function injectCompletionMessageIfMissing(): void {
+  const store = useTutorStore.getState();
+  const turn = store.activeTurn;
+  const messages = store.messages;
+
+  // Was a message just pushed for this turn? If so, leave it alone.
+  const last = messages[messages.length - 1];
+  const justAdded =
+    last && last.role === "assistant" && last.timestamp >= turn.started_at;
+  if (justAdded) return;
+
+  const cap = store.currentCapability ?? "unknown";
+  const result = turn.result as Record<string, unknown> | null;
+
+  let content = "";
+  switch (cap) {
+    case "resource_generation": {
+      // result is { package: { resources: [...] }, summary, kg_summary }
+      const pkg = result?.package as { resources?: unknown[] } | undefined;
+      const count = pkg?.resources?.length ?? 0;
+      const summary = (result?.summary as string) || "";
+      content =
+        count > 0
+          ? `✅ 已生成 ${count} 类学习资源${
+              summary ? `（${summary}）` : ""
+            }，请在右侧面板查看。`
+          : "✅ 资源生成任务完成，但未产出资源（请检查 LLM 是否正常工作）。";
+      break;
+    }
+    case "tutoring":
+      content =
+        "✅ 答疑完成，详见右侧「即时答疑」面板。";
+      break;
+    case "assessment":
+      content =
+        "✅ 效果评估完成，详见右侧「效果评估」面板（含 6 维评分 + 自适应策略）。";
+      break;
+    case "path_planning":
+      content = "✅ 学习路径已规划，详见右侧「路径规划」面板。";
+      break;
+    case "profile":
+      content = "✅ 学习画像已更新。";
+      break;
+    default:
+      content = `✅ 任务完成（${cap}）。`;
+  }
+
+  store.addMessage({
+    role: "assistant",
+    agent: cap,
+    content,
+    metadata: { capability: cap, synthetic: true },
+  });
 }
 
 function routeResult(

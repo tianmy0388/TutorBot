@@ -4,22 +4,99 @@
 @tailwind components;
 @tailwind utilities;
 
+/* -------------------------------------------------------------------------
+   Theme tokens
+   -------------------------------------------------------------------------
+   All UI colors are exposed as CSS custom properties on :root so the
+   theme can be swapped at runtime by setting
+   ``document.documentElement.dataset.theme = 'light'``.
+
+   Color values are stored as space-separated RGB triplets (without the
+   ``rgb()`` wrapper) so that Tailwind's opacity modifiers
+   (e.g. ``text-fg/10``) work via the ``<alpha-value>`` placeholder in
+   tailwind.config.ts.
+
+   Tailwind utility classes resolve ``rgb(var(--color-...) / 1)`` at use
+   time, so flipping the ``data-theme`` attribute cascades through every
+   ``bg-bg-*`` / ``text-fg-*`` / ``border-brand-*`` class without
+   touching React state.
+   ------------------------------------------------------------------------- */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-bg: 10 10 10;
+  --color-bg-subtle: 17 17 17;
+  --color-bg-panel: 23 23 23;
+  --color-bg-card: 31 31 31;
+
+  --color-fg: 250 250 250;
+  --color-fg-muted: 161 161 170;
+  --color-fg-subtle: 113 113 122;
+
+  --color-border: 39 39 42;
+
+  --color-brand-50: 238 244 255;
+  --color-brand-100: 220 232 255;
+  --color-brand-200: 189 210 255;
+  --color-brand-300: 144 177 255;
+  --color-brand-400: 96 134 255;
+  --color-brand-500: 59 93 255;
+  --color-brand-600: 42 68 229;
+  --color-brand-700: 34 52 184;
+  --color-brand-800: 31 45 143;
+  --color-brand-900: 29 42 114;
+
+  --color-accent: 34 211 238;
+  --color-accent-warm: 249 115 22;
+  --color-accent-green: 34 197 94;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --color-bg: 250 250 250;
+  --color-bg-subtle: 244 244 245;
+  --color-bg-panel: 255 255 255;
+  --color-bg-card: 244 244 245;
+
+  --color-fg: 10 10 10;
+  --color-fg-muted: 82 82 91;
+  --color-fg-subtle: 161 161 170;
+
+  --color-border: 228 228 231;
+
+  --color-brand-50: 238 244 255;
+  --color-brand-100: 219 229 255;
+  --color-brand-200: 184 204 255;
+  --color-brand-300: 138 169 255;
+  --color-brand-400: 85 119 255;
+  --color-brand-500: 42 68 229;
+  --color-brand-600: 34 52 184;
+  --color-brand-700: 29 42 114;
+  --color-brand-800: 22 31 92;
+  --color-brand-900: 15 22 69;
+
+  --color-accent: 8 145 178;
+  --color-accent-warm: 234 88 12;
+  --color-accent-green: 22 163 74;
+}
+
 @layer base {
-  :root {
-    color-scheme: dark;
-  }
   html,
   body {
     height: 100%;
   }
   body {
     font-feature-settings: "rlig" 1, "calt" 1;
-    background-color: #0a0a0a;
-    color: #fafafa;
+    background-color: rgb(var(--color-bg));
+    color: rgb(var(--color-fg));
+    transition: background-color 0.2s ease, color 0.2s ease;
   }
   /* Better focus rings */
   :focus-visible {
-    outline: 2px solid #6086ff;
+    outline: 2px solid rgb(var(--color-brand-400));
     outline-offset: 2px;
     border-radius: 4px;
   }
@@ -32,137 +109,89 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: #27272a;
+    background: rgb(var(--color-border));
     border-radius: 4px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #3f3f46;
+    background: rgb(var(--color-fg-subtle));
   }
 }
 
 @layer components {
-  .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap;
+  .card {
+    @apply rounded-xl border border-fg/10 bg-bg-panel p-4 shadow-sm;
   }
   .btn-primary {
-    @apply btn bg-brand-600 hover:bg-brand-500 text-white shadow-sm disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
+           bg-gradient-to-br from-brand-500 to-brand-700 text-white
+           hover:from-brand-400 hover:to-brand-600 active:scale-[0.98]
+           disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-ghost {
-    @apply btn bg-bg-panel hover:bg-bg-card text-fg border border-fg/10;
-  }
-  .card {
-    @apply bg-bg-card border border-fg/10 rounded-xl p-4 shadow-sm;
-  }
-  .panel {
-    @apply bg-bg-panel border border-fg/10 rounded-2xl;
-  }
-  .chip {
-    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs;
+    @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg font-medium transition-colors
+           text-fg-muted hover:text-fg hover:bg-bg-card border border-transparent hover:border-fg/10;
   }
 }
 
-/* Smooth scroll for anchor links */
-html {
-  scroll-behavior: smooth;
+/* KaTeX tweaks for dark mode */
+[data-theme="dark"] .katex {
+  color: rgb(var(--color-fg));
+}
+[data-theme="light"] .katex {
+  color: rgb(var(--color-fg));
 }
 
-/* Mermaid container styling */
-.mermaid-container {
-  @apply bg-bg-panel rounded-lg p-4 overflow-auto border border-fg/5;
-}
-.mermaid-container svg {
-  max-width: 100%;
-  height: auto;
+/* Streaming cursor */
+.streaming-cursor::after {
+  content: "▍";
+  display: inline-block;
+  color: rgb(var(--color-brand-400));
+  animation: pulse 1s ease-in-out infinite;
+  margin-left: 2px;
 }
 
-/* Markdown prose styles */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* Markdown body */
 .prose-tutor {
   @apply text-fg leading-relaxed;
 }
-.prose-tutor h1 {
-  @apply text-2xl font-bold mt-6 mb-3;
-}
-.prose-tutor h2 {
-  @apply text-xl font-semibold mt-5 mb-2 border-b border-fg/5 pb-1;
-}
-.prose-tutor h3 {
-  @apply text-lg font-semibold mt-4 mb-2;
-}
-.prose-tutor h4 {
-  @apply text-base font-semibold mt-3 mb-1;
-}
 .prose-tutor p {
-  @apply my-2.5 leading-relaxed;
+  @apply my-2;
+}
+.prose-tutor h1, .prose-tutor h2, .prose-tutor h3 {
+  @apply font-semibold text-fg mt-4 mb-2;
+}
+.prose-tutor h1 { @apply text-xl; }
+.prose-tutor h2 { @apply text-lg; }
+.prose-tutor h3 { @apply text-base; }
+.prose-tutor ul {
+  @apply list-disc list-inside my-2 space-y-1;
+}
+.prose-tutor ol {
+  @apply list-decimal list-inside my-2 space-y-1;
 }
 .prose-tutor a {
   @apply text-brand-400 underline hover:text-brand-300;
 }
 .prose-tutor code:not(pre code) {
-  @apply bg-bg-panel px-1.5 py-0.5 rounded text-accent text-sm font-mono;
+  @apply px-1.5 py-0.5 rounded bg-bg-card text-accent text-xs;
 }
 .prose-tutor pre {
-  @apply bg-bg-panel rounded-lg p-4 overflow-x-auto my-3 border border-fg/5 text-xs;
-}
-.prose-tutor ul {
-  @apply list-disc list-inside my-2.5 space-y-1;
-}
-.prose-tutor ol {
-  @apply list-decimal list-inside my-2.5 space-y-1;
-}
-.prose-tutor li {
-  @apply leading-relaxed;
+  @apply p-3 rounded-lg bg-bg-card border border-fg/10 overflow-x-auto my-3 text-xs;
 }
 .prose-tutor blockquote {
-  @apply border-l-4 border-brand-500 pl-4 my-3 text-fg-muted italic;
+  @apply border-l-4 border-brand-500/50 pl-3 my-2 text-fg-muted italic;
 }
 .prose-tutor table {
-  @apply w-full my-3 border-collapse text-sm;
+  @apply my-2 border-collapse;
+}
+.prose-tutor th, .prose-tutor td {
+  @apply border border-fg/10 px-2 py-1 text-xs;
 }
 .prose-tutor th {
-  @apply bg-bg-panel px-3 py-2 text-left font-semibold border border-fg/10;
-}
-.prose-tutor td {
-  @apply px-3 py-2 border border-fg/10;
-}
-.prose-tutor hr {
-  @apply my-4 border-fg/10;
-}
-
-/* KaTeX tweaks for dark mode */
-.katex {
-  color: #fafafa !important;
-}
-.katex .mord,
-.katex .mop,
-.katex .mbin,
-.katex .mrel,
-.katex .mopen,
-.katex .mclose,
-.katex .mpunct {
-  color: inherit;
-}
-
-/* Typing cursor for streaming markdown */
-.streaming-cursor::after {
-  content: "▍";
-  color: #6086ff;
-  animation: pulse 1s ease-in-out infinite;
-  margin-left: 2px;
-}
-
-/* Card hover lift effect */
-.card-hover {
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-}
-.card-hover:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-}
-
-/* Subtle gradient text */
-.text-gradient {
-  background: linear-gradient(135deg, #6086ff 0%, #22d3ee 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  @apply bg-bg-card font-medium;
 }

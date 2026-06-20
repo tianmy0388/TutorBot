@@ -51,6 +51,8 @@ export type TurnPhase =
   | "success"
   | "error";
 
+export type Theme = "dark" | "light";
+
 export interface ActiveTurn {
   turn_id: string;
   phase: TurnPhase;
@@ -108,6 +110,8 @@ export interface TutorState {
   tracePanelOpen: boolean;
   currentCapability: string | null;
   wsConnected: boolean;
+  theme: Theme;
+  settingsOpen: boolean;
 
   // ---- actions ----
   setUser: (userId: string) => void;
@@ -115,6 +119,9 @@ export interface TutorState {
   setCurrentCapability: (cap: string | null) => void;
   setTracePanelOpen: (open: boolean) => void;
   setWsConnected: (connected: boolean) => void;
+  setTheme: (theme: Theme) => void;
+  hydrateTheme: () => void;
+  setSettingsOpen: (open: boolean) => void;
   setProfile: (p: LearnerProfileDetail | null) => void;
   setLatestPackage: (pkg: ResourcePackage | null) => void;
   selectResource: (resourceId: string | null) => void;
@@ -178,6 +185,8 @@ export const useTutorStore = create<TutorState>()(
     tracePanelOpen: true,
     currentCapability: null,
     wsConnected: false,
+    theme: "dark",
+    settingsOpen: false,
 
     // --- simple setters ---
     setUser: (userId) => set({ userId }),
@@ -185,6 +194,37 @@ export const useTutorStore = create<TutorState>()(
     setCurrentCapability: (cap) => set({ currentCapability: cap }),
     setTracePanelOpen: (open) => set({ tracePanelOpen: open }),
     setWsConnected: (connected) => set({ wsConnected: connected }),
+    setTheme: (theme) => {
+      if (typeof document !== "undefined") {
+        document.documentElement.dataset.theme = theme;
+      }
+      try {
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem("tutor:theme", theme);
+        }
+      } catch {
+        // localStorage may be blocked (private mode); silently ignore.
+      }
+      set({ theme });
+    },
+    hydrateTheme: () => {
+      let theme: Theme = "dark";
+      try {
+        if (typeof window !== "undefined") {
+          const stored = window.localStorage.getItem("tutor:theme");
+          if (stored === "light" || stored === "dark") {
+            theme = stored;
+          }
+        }
+      } catch {
+        // ignore
+      }
+      if (typeof document !== "undefined") {
+        document.documentElement.dataset.theme = theme;
+      }
+      set({ theme });
+    },
+    setSettingsOpen: (open) => set({ settingsOpen: open }),
     setProfile: (p) => set({ profile: p, profileLoaded: p !== null }),
     setLatestPackage: (pkg) =>
       set((state) => ({

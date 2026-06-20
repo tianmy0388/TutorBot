@@ -48,6 +48,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
   const currentCapability = useTutorStore((s) => s.currentCapability);
   const setCapability = useTutorStore((s) => s.setCurrentCapability);
   const resetSession = useTutorStore((s) => s.resetSession);
+  const setSettingsOpen = useTutorStore((s) => s.setSettingsOpen);
   const { courses, currentCourse, plannedPath } = useKG();
 
   if (!open) {
@@ -175,6 +176,13 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
           <div className="font-mono text-[10px] text-fg-subtle truncate flex-1">
             {sessionId ? `${sessionId.slice(0, 8)}…` : "connecting…"}
           </div>
+          <button
+            onClick={() => setSettingsOpen(true)}
+            className="p-1.5 text-fg-subtle hover:text-fg transition-colors"
+            title="设置"
+          >
+            <Settings className="w-3.5 h-3.5" />
+          </button>
           <button
             onClick={() => {
               if (confirm("确定清空当前会话的所有数据吗？")) {
