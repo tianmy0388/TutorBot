@@ -1,3 +1,5 @@
+@import "katex/dist/katex.min.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -6,20 +8,47 @@
   :root {
     color-scheme: dark;
   }
+  html,
+  body {
+    height: 100%;
+  }
   body {
     font-feature-settings: "rlig" 1, "calt" 1;
+    background-color: #0a0a0a;
+    color: #fafafa;
+  }
+  /* Better focus rings */
+  :focus-visible {
+    outline: 2px solid #6086ff;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  /* Scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #27272a;
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3f3f46;
   }
 }
 
 @layer components {
   .btn {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap;
   }
   .btn-primary {
-    @apply btn bg-brand-600 hover:bg-brand-500 text-white;
+    @apply btn bg-brand-600 hover:bg-brand-500 text-white shadow-sm disabled:opacity-50;
   }
   .btn-ghost {
-    @apply btn bg-bg-panel hover:bg-bg-card text-fg;
+    @apply btn bg-bg-panel hover:bg-bg-card text-fg border border-fg/10;
   }
   .card {
     @apply bg-bg-card border border-fg/10 rounded-xl p-4 shadow-sm;
@@ -27,14 +56,26 @@
   .panel {
     @apply bg-bg-panel border border-fg/10 rounded-2xl;
   }
+  .chip {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs;
+  }
+}
+
+/* Smooth scroll for anchor links */
+html {
+  scroll-behavior: smooth;
 }
 
 /* Mermaid container styling */
 .mermaid-container {
-  @apply bg-bg-panel rounded-lg p-4 overflow-auto;
+  @apply bg-bg-panel rounded-lg p-4 overflow-auto border border-fg/5;
+}
+.mermaid-container svg {
+  max-width: 100%;
+  height: auto;
 }
 
-/* Markdown styles */
+/* Markdown prose styles */
 .prose-tutor {
   @apply text-fg leading-relaxed;
 }
@@ -42,35 +83,86 @@
   @apply text-2xl font-bold mt-6 mb-3;
 }
 .prose-tutor h2 {
-  @apply text-xl font-semibold mt-5 mb-2;
+  @apply text-xl font-semibold mt-5 mb-2 border-b border-fg/5 pb-1;
 }
 .prose-tutor h3 {
   @apply text-lg font-semibold mt-4 mb-2;
 }
+.prose-tutor h4 {
+  @apply text-base font-semibold mt-3 mb-1;
+}
 .prose-tutor p {
-  @apply my-3;
+  @apply my-2.5 leading-relaxed;
+}
+.prose-tutor a {
+  @apply text-brand-400 underline hover:text-brand-300;
 }
 .prose-tutor code:not(pre code) {
-  @apply bg-bg-panel px-1.5 py-0.5 rounded text-accent text-sm;
+  @apply bg-bg-panel px-1.5 py-0.5 rounded text-accent text-sm font-mono;
 }
 .prose-tutor pre {
-  @apply bg-bg-panel rounded-lg p-4 overflow-x-auto my-4;
+  @apply bg-bg-panel rounded-lg p-4 overflow-x-auto my-3 border border-fg/5 text-xs;
 }
 .prose-tutor ul {
-  @apply list-disc list-inside my-3 space-y-1;
+  @apply list-disc list-inside my-2.5 space-y-1;
 }
 .prose-tutor ol {
-  @apply list-decimal list-inside my-3 space-y-1;
+  @apply list-decimal list-inside my-2.5 space-y-1;
+}
+.prose-tutor li {
+  @apply leading-relaxed;
 }
 .prose-tutor blockquote {
-  @apply border-l-4 border-brand-500 pl-4 my-3 text-fg-muted;
+  @apply border-l-4 border-brand-500 pl-4 my-3 text-fg-muted italic;
 }
 .prose-tutor table {
-  @apply w-full my-4 border-collapse;
+  @apply w-full my-3 border-collapse text-sm;
 }
 .prose-tutor th {
   @apply bg-bg-panel px-3 py-2 text-left font-semibold border border-fg/10;
 }
 .prose-tutor td {
   @apply px-3 py-2 border border-fg/10;
+}
+.prose-tutor hr {
+  @apply my-4 border-fg/10;
+}
+
+/* KaTeX tweaks for dark mode */
+.katex {
+  color: #fafafa !important;
+}
+.katex .mord,
+.katex .mop,
+.katex .mbin,
+.katex .mrel,
+.katex .mopen,
+.katex .mclose,
+.katex .mpunct {
+  color: inherit;
+}
+
+/* Typing cursor for streaming markdown */
+.streaming-cursor::after {
+  content: "▍";
+  color: #6086ff;
+  animation: pulse 1s ease-in-out infinite;
+  margin-left: 2px;
+}
+
+/* Card hover lift effect */
+.card-hover {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Subtle gradient text */
+.text-gradient {
+  background: linear-gradient(135deg, #6086ff 0%, #22d3ee 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
