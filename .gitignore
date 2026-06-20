@@ -76,6 +76,7 @@ dist/
 .pnpm-store/
 .pnp
 .pnp.js
+*.tsbuildinfo
 
 # Logs
 logs/
