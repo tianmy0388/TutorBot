@@ -8,13 +8,16 @@
 import type {
   AssessmentReport,
   CapabilitiesResponse,
+  ConfigTestResult,
   CourseGraph,
   CourseListResponse,
+  EmbeddingSectionPatch,
   HealthResponse,
   JobDetail,
   JobListResponse,
   JobStatsResponse,
   JobSummary,
+  LLMSectionPatch,
   LearnerProfileDetail,
   LearnerProfileSummary,
   PackageListResponse,
@@ -23,7 +26,9 @@ import type {
   Resource,
   ResourcePackage,
   ResourcePackageSummary,
+  RuntimeConfig,
   StrategyDecision,
+  WebSearchSectionPatch,
 } from "./types";
 
 const API_BASE =
@@ -220,6 +225,39 @@ export const deleteJob = (userId: string, jobId: string) =>
     `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}`,
     { method: "DELETE" },
   );
+
+// ---------------------------------------------------------------------------
+// Runtime configuration (Task 6 / Task 7)
+// ---------------------------------------------------------------------------
+
+export const getRuntimeConfig = () => request<RuntimeConfig>("/config");
+
+export const updateLLMConfig = (patch: LLMSectionPatch) =>
+  request<RuntimeConfig>("/config/llm", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const updateEmbeddingConfig = (patch: EmbeddingSectionPatch) =>
+  request<RuntimeConfig>("/config/embedding", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const updateWebSearchConfig = (patch: WebSearchSectionPatch) =>
+  request<RuntimeConfig>("/config/web-search", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const testLLMConnection = () =>
+  request<ConfigTestResult>("/config/test/llm", { method: "POST" });
+
+export const testEmbeddingConnection = () =>
+  request<ConfigTestResult>("/config/test/embedding", { method: "POST" });
+
+export const testWebSearchConnection = () =>
+  request<ConfigTestResult>("/config/test/web-search", { method: "POST" });
 
 // ---------------------------------------------------------------------------
 // Re-exports

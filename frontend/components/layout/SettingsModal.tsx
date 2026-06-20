@@ -86,7 +86,11 @@ export function SettingsModal() {
           {/* Future sections can be added here */}
           <section className="pt-3 border-t border-fg/10">
             <div className="text-[11px] text-fg-subtle">
-              后续会加入:语言切换、模型选择、消息历史保留策略等。
+              后续会加入:语言切换、消息历史保留策略等。AI 服务、密钥与连接测试已迁移到&nbsp;
+              <a className="text-brand-300 underline" href="/settings">
+                /settings
+              </a>
+              &nbsp;页面。
             </div>
           </section>
         </div>

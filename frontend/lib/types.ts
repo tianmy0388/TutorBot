@@ -490,6 +490,84 @@ export interface StrategyDecision {
 }
 
 // ============================================================================
+// Runtime configuration (Task 6)
+// ============================================================================
+
+export interface MaskedSecret {
+  configured: boolean;
+  preview: string;
+}
+
+export interface LLMConfig {
+  provider: string;
+  model: string;
+  base_url: string;
+  temperature: number;
+  max_tokens: number;
+  timeout: number;
+  api_key: MaskedSecret;
+}
+
+export interface EmbeddingConfig {
+  provider: string;
+  model: string;
+  base_url: string;
+  dimensions: number;
+  api_key: MaskedSecret;
+}
+
+export interface WebSearchConfig {
+  enabled: boolean;
+  provider: string;
+  max_results: number;
+  api_key: MaskedSecret;
+}
+
+export interface RuntimeConfig {
+  llm: LLMConfig;
+  embedding: EmbeddingConfig;
+  web_search: WebSearchConfig;
+}
+
+export interface LLMSectionPatch {
+  provider?: string;
+  model?: string;
+  base_url?: string;
+  temperature?: number;
+  max_tokens?: number;
+  timeout?: number;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+}
+
+export interface EmbeddingSectionPatch {
+  provider?: string;
+  model?: string;
+  base_url?: string;
+  dimensions?: number;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+}
+
+export interface WebSearchSectionPatch {
+  enabled?: boolean;
+  provider?: string;
+  max_results?: number;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+}
+
+export interface ConfigTestResult {
+  ok: boolean;
+  provider: string;
+  model?: string;
+  dimensions?: number;
+  latency_ms: number;
+  message: string;
+  code?: string;
+}
+
+// ============================================================================
 // Tutor
 // ============================================================================
 
