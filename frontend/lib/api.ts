@@ -17,6 +17,10 @@ import type {
   JobListResponse,
   JobStatsResponse,
   JobSummary,
+  KnowledgeBaseDetail,
+  KnowledgeBaseListResponse,
+  KnowledgeBaseSummary,
+  KnowledgeDocument,
   LLMSectionPatch,
   LearnerProfileDetail,
   LearnerProfileSummary,
@@ -258,6 +262,55 @@ export const testEmbeddingConnection = () =>
 
 export const testWebSearchConnection = () =>
   request<ConfigTestResult>("/config/test/web-search", { method: "POST" });
+
+// ---------------------------------------------------------------------------
+// Knowledge bases (Task 8 / Task 9)
+// ---------------------------------------------------------------------------
+
+export const listKnowledgeBases = () =>
+  request<KnowledgeBaseListResponse>("/knowledge-bases");
+
+export const getKnowledgeBase = (id: string) =>
+  request<KnowledgeBaseDetail>(
+    `/knowledge-bases/${encodeURIComponent(id)}`,
+  );
+
+export const createKnowledgeBase = (name: string, description: string) => {
+  const form = new FormData();
+  form.append("name", name);
+  form.append("description", description);
+  return request<KnowledgeBaseSummary>("/knowledge-bases", {
+    method: "POST",
+    body: form,
+  });
+};
+
+export const deleteKnowledgeBase = (id: string) =>
+  request<{ deleted: boolean; id: string }>(
+    `/knowledge-bases/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+
+export const uploadKnowledgeDocument = (libId: string, file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return request<KnowledgeDocument>(
+    `/knowledge-bases/${encodeURIComponent(libId)}/documents`,
+    { method: "POST", body: form },
+  );
+};
+
+export const retryKnowledgeDocument = (libId: string, docId: string) =>
+  request<KnowledgeDocument>(
+    `/knowledge-bases/${encodeURIComponent(libId)}/documents/${encodeURIComponent(docId)}/retry`,
+    { method: "POST" },
+  );
+
+export const deleteKnowledgeDocument = (libId: string, docId: string) =>
+  request<{ deleted: boolean; id: string }>(
+    `/knowledge-bases/${encodeURIComponent(libId)}/documents/${encodeURIComponent(docId)}`,
+    { method: "DELETE" },
+  );
 
 // ---------------------------------------------------------------------------
 // Re-exports

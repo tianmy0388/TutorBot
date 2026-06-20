@@ -109,6 +109,9 @@ export interface TutorState {
   currentCourse: string;
   plannedPath: PlannedPath | null;
 
+  // Knowledge base (Task 9)
+  activeKnowledgeBaseId: string;
+
   // Assessment
   latestAssessment: AssessmentReport | null;
   latestStrategy: StrategyDecision | null;
@@ -138,6 +141,7 @@ export interface TutorState {
   setLatestPackage: (pkg: ResourcePackage | null) => void;
   selectResource: (resourceId: string | null) => void;
   setPlannedPath: (p: PlannedPath | null) => void;
+  setActiveKnowledgeBaseId: (id: string) => void;
   setLatestAssessment: (a: AssessmentReport | null) => void;
   setLatestStrategy: (s: StrategyDecision | null) => void;
   setTutorResult: (
@@ -191,6 +195,7 @@ export const useTutorStore = create<TutorState>()(
 
     currentCourse: "ai_introduction",
     plannedPath: null,
+    activeKnowledgeBaseId: "ai_introduction",
 
     latestAssessment: null,
     latestStrategy: null,
@@ -262,6 +267,7 @@ export const useTutorStore = create<TutorState>()(
         },
       })),
     setPlannedPath: (p) => set({ plannedPath: p }),
+    setActiveKnowledgeBaseId: (id) => set({ activeKnowledgeBaseId: id }),
     setLatestAssessment: (a) => set({ latestAssessment: a }),
     setLatestStrategy: (s) => set({ latestStrategy: s }),
     setTutorResult: (understanding, answer, enrichments) =>

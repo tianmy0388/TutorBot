@@ -103,12 +103,19 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         const client = new WsClient({
           url,
           onOpen: () => {
+            const activeKbId =
+              useTutorStore.getState().activeKnowledgeBaseId ||
+              "ai_introduction";
             client.send(
               startJobMessage({
                 message: text,
                 userId: userId || "anonymous",
                 capability: capability || undefined,
                 language: useTutorStore.getState().language || "zh",
+                metadata: {
+                  knowledge_base_id: activeKbId,
+                  plan_id: "",
+                },
               }),
             );
           },

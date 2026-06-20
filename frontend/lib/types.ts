@@ -490,6 +490,58 @@ export interface StrategyDecision {
 }
 
 // ============================================================================
+// Knowledge base (Task 8 / Task 9)
+// ============================================================================
+
+export type IngestionStatus =
+  | "uploaded"
+  | "extracting"
+  | "chunking"
+  | "embedding"
+  | "ready"
+  | "failed";
+
+export interface KnowledgeBaseSummary {
+  id: string;
+  name: string;
+  description: string;
+  is_seeded: boolean;
+  document_count: number;
+  ready_count: number;
+  failed_count: number;
+  total_chunks: number;
+  embedding_model: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeBaseDetail extends KnowledgeBaseSummary {
+  documents: KnowledgeDocument[];
+}
+
+export interface KnowledgeDocument {
+  id: string;
+  knowledge_base_id: string;
+  display_name: string;
+  source_filename: string;
+  extension: string;
+  size_bytes: number;
+  checksum: string;
+  status: IngestionStatus;
+  chunk_count: number;
+  embedding_model: string;
+  error: string | null;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeBaseListResponse {
+  items: KnowledgeBaseSummary[];
+  total: number;
+}
+
+// ============================================================================
 // Runtime configuration (Task 6)
 // ============================================================================
 
