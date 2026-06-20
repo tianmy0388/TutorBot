@@ -81,8 +81,8 @@ class ManimVideoAgent(BaseAgent):
     ) -> dict[str, Any]:
         """Stage 1: produce a structured storyboard."""
         prompt_data = self.get_prompt_data(context.language)
-        system = self.get_system_prompt(prompt_data, field="designer")
-        user_msg = self.get_user_prompt(prompt_data, field="designer").format(
+        system = self.get_system_prompt(prompt_data, section="designer", field="system")
+        user_msg = self.get_user_prompt(prompt_data, section="designer", field="user").format(
             topic=topic,
             source_content=(source_content or "")[:4000],
         )
@@ -105,8 +105,8 @@ class ManimVideoAgent(BaseAgent):
     ) -> str:
         """Stage 2: translate storyboard → Manim Python code."""
         prompt_data = self.get_prompt_data(context.language)
-        system = self.get_system_prompt(prompt_data, field="coder")
-        user_msg = self.get_user_prompt(prompt_data, field="coder").format(
+        system = self.get_system_prompt(prompt_data, section="coder", field="system")
+        user_msg = self.get_user_prompt(prompt_data, section="coder", field="user").format(
             topic=topic,
             storyboard=json.dumps(storyboard, ensure_ascii=False, indent=2),
         )

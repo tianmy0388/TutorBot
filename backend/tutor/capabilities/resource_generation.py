@@ -507,16 +507,31 @@ class ResourceGenerationCapability(BaseCapability):
         """Decide which resource types to generate.
 
         Strategy:
-        1. Start from intent.resource_types
-        2. If modality preferences are set, **up-rank** matching types:
-           - high video → keep video
-           - high code → keep code
-           - high diagram → keep mindmap
-           - high exercise → keep exercise
-           - high text → keep document, reading
-        3. Skip VIDEO if scope == "overview" (animated video is heavy)
+        1. Start from intent.resource_types (but default to a sensible subset)
+        2. VIDEO is **off by default** — it is expensive (~30-60s render time)
+           and only added when the topic is clearly visual, when the user
+           explicitly asks, or when the profile says modality == "video".
+        3. Drop VIDEO for "overview" scope (heavy).
+        4. Drop VIDEO if the topic is comparison / ranking / list — those are
+           better served by reading + exercise + mindmap.
         """
         types = list(intent.resource_types)
+
+        # ------------------------------------------------------------------
+        # Decide whether VIDEO makes sense for this turn
+        # ------------------------------------------------------------------
+        msg = (intent.raw_message or "").lower()
+        visual_keywords = (
+            "可视化", "动画", "演示", "原理", "推导", "图解", "流程",
+            "工作原理", "动图", "示意", "演示", "demonstration",
+            "visualize", "animation", "demo", "how it works", "intuition",
+        )
+        wants_video = any(k in msg for k in visual_keywords) or any(
+            k in (intent.topic or "").lower() for k in visual_keywords
+        )
+
+        if wants_video and ResourceType.VIDEO not in types:
+            types.append(ResourceType.VIDEO)
 
         # Modality-driven upranking (don't remove; just ensure presence)
         modality = profile_snapshot.get("modality_dominant") or ""
@@ -538,15 +553,27 @@ class ResourceGenerationCapability(BaseCapability):
             if ResourceType.DOCUMENT not in types:
                 types.append(ResourceType.DOCUMENT)
         if intent.scope == "deep_dive":
-            if ResourceType.VIDEO not in types:
+            # deep_dive is the only place VIDEO is added without an explicit
+            # user signal — even then only if the topic is concept-heavy.
+            if (
+                ResourceType.VIDEO not in types
+                and (wants_video or modality == "video")
+            ):
                 types.append(ResourceType.VIDEO)
             if ResourceType.EXERCISE not in types:
                 types.append(ResourceType.EXERCISE)
 
+        # Comparison / ranking / list queries don't need a video — drop it
+        # even if the user typed one of the visual keywords by accident.
+        comparison_kw = ("对比", "比较", "排行", "排名", "top ", "benchmark",
+                         "leaderboard", "comparison", "ranking", " vs ", "versus")
+        if any(k in msg for k in comparison_kw):
+            types = [t for t in types if t != ResourceType.VIDEO]
+
         # Always include document unless explicitly excluded
         if ResourceType.DOCUMENT not in types and intent.scope != "deep_dive":
             # Document is optional for deep_dive (video/reading may suffice)
-            if "document" in (intent.raw_message or "").lower():
+            if "document" in msg:
                 types.append(ResourceType.DOCUMENT)
 
         # Deduplicate but preserve order

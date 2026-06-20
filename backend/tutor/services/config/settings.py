@@ -115,18 +115,29 @@ class Settings(BaseSettings):
 
     # ---------- Knowledge Base ----------
     kb_default: str = "ai_introduction"
-    kb_dir: Path = Field(default=Path("./backend/tutor/knowledge_base"))
+
+    def _default_kb_dir() -> Path:
+        # Resolve relative to this file so the default works regardless of
+        # cwd (project root vs backend/). ``settings.py`` lives at
+        # ``backend/tutor/services/config/settings.py`` — three levels up is
+        # ``backend/tutor``, where ``knowledge_base/`` lives.
+        return Path(__file__).resolve().parent.parent.parent / "knowledge_base"
+
+    kb_dir: Path = Field(default_factory=_default_kb_dir)
 
     # ---------- Manim ----------
     manim_enabled: bool = True
     manim_quality: Literal["l", "m", "h"] = "l"
     manim_timeout: int = 600
-    manim_output_dir: Path = Field(
-        default=Path("./backend/tutor/services/manim_render/output")
-    )
-    manim_temp_dir: Path = Field(
-        default=Path("./backend/tutor/services/manim_render/temp")
-    )
+
+    def _default_manim_output() -> Path:
+        return Path(__file__).resolve().parent.parent / "manim_render" / "output"
+
+    def _default_manim_temp() -> Path:
+        return Path(__file__).resolve().parent.parent / "manim_render" / "temp"
+
+    manim_output_dir: Path = Field(default_factory=_default_manim_output)
+    manim_temp_dir: Path = Field(default_factory=_default_manim_temp)
     code_retry_max_attempts: int = 4
 
     # ---------- Web Search ----------

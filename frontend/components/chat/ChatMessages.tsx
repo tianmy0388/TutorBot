@@ -247,6 +247,17 @@ function ActiveTurnView(props: {
   events: Array<{ type: string; stage: string; source: string; content: string }>;
   error: string | null;
 }) {
+  // Thinking is shown by default while the model is working. Once the final
+  // text starts streaming in (``textBuffer`` non-empty) we auto-collapse it
+  // so the answer takes the spotlight.
+  const thinkingOpen = !props.textBuffer && !props.error;
+
+  // Per-stage thinking items (most recent on top, capped at 6).
+  const stageThinking = props.events
+    .filter((e) => e.type === "thinking")
+    .slice(-6)
+    .reverse();
+
   return (
     <div className="max-w-3xl mr-auto animate-fade-in">
       <div className="card bg-bg-panel/80 border-fg/10">
@@ -258,15 +269,58 @@ function ActiveTurnView(props: {
           <StageProgress events={props.events} />
         )}
 
-        {/* Thinking (collapsible) */}
-        {props.thinkingBuffer && props.showTrace && (
-          <details className="mt-3">
-            <summary className="text-xs text-fg-muted cursor-pointer hover:text-fg transition-colors">
-              💭 思考过程 ({props.thinkingBuffer.length} 字符)
+        {/* Thinking — always visible during wait, auto-collapses on final output */}
+        {(props.thinkingBuffer || stageThinking.length > 0) && (
+          <details
+            className="mt-3 group"
+            open={thinkingOpen}
+          >
+            <summary
+              className={cn(
+                "text-xs cursor-pointer hover:text-fg transition-colors flex items-center gap-2",
+                thinkingOpen ? "text-fg-muted" : "text-fg-subtle",
+              )}
+            >
+              <span className="animate-pulse">💭</span>
+              <span>
+                {thinkingOpen
+                  ? "思考中…（点击折叠）"
+                  : `查看思考过程 (${props.thinkingBuffer.length} 字符)`}
+              </span>
             </summary>
-            <pre className="mt-2 text-xs text-fg-muted whitespace-pre-wrap max-h-48 overflow-y-auto bg-bg/60 rounded-lg p-3">
-              {props.thinkingBuffer}
-            </pre>
+
+            {/* Per-stage thinking entries (latest first) */}
+            {stageThinking.length > 0 && (
+              <div className="mt-2 space-y-1.5">
+                {stageThinking.map((e, i) => (
+                  <div
+                    key={`think_${i}`}
+                    className="text-xs text-fg-muted bg-bg/60 rounded-lg p-2.5 border border-fg/5"
+                  >
+                    <div className="flex items-center gap-1.5 mb-1 text-[10px]">
+                      <Bot className="w-3 h-3 text-accent" />
+                      <span className="text-accent font-medium">
+                        {e.source}
+                      </span>
+                      <span className="text-fg-subtle">·</span>
+                      <span className="text-fg-subtle font-mono">
+                        {e.stage}
+                      </span>
+                    </div>
+                    <div className="whitespace-pre-wrap leading-relaxed">
+                      {e.content}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Fallback / cumulative buffer when there are no per-stage entries */}
+            {stageThinking.length === 0 && props.thinkingBuffer && (
+              <pre className="mt-2 text-xs text-fg-muted whitespace-pre-wrap max-h-48 overflow-y-auto bg-bg/60 rounded-lg p-3">
+                {props.thinkingBuffer}
+              </pre>
+            )}
           </details>
         )}
 
@@ -277,13 +331,16 @@ function ActiveTurnView(props: {
           </div>
         )}
 
-        {/* Loading placeholder */}
-        {!props.textBuffer && !props.thinkingBuffer && !props.error && (
-          <div className="mt-3 text-sm text-fg-muted flex items-center gap-2">
-            <TypingIndicator />
-            <span>正在调用 Agent…</span>
-          </div>
-        )}
+        {/* Loading placeholder — only when there's literally nothing else to show */}
+        {!props.textBuffer &&
+          !props.thinkingBuffer &&
+          stageThinking.length === 0 &&
+          !props.error && (
+            <div className="mt-3 text-sm text-fg-muted flex items-center gap-2">
+              <TypingIndicator />
+              <span>正在调用 Agent…</span>
+            </div>
+          )}
 
         {/* Error */}
         {props.error && (
