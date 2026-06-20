@@ -21,9 +21,11 @@ persistence layer records completed packages there.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 
 from tutor.services.resource_package.schema import Resource, ResourceType
 from tutor.services.resource_package.store import get_resource_package_store
@@ -194,6 +196,65 @@ async def delete_all_packages(user_id: str) -> dict[str, Any]:
     store = get_resource_package_store()
     count = await store.delete_user(user_id)
     return {"deleted": count, "user_id": user_id}
+
+
+# ---------------------------------------------------------------------------
+# File downloads (Phase 5.3 — PPT)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/resources/packages/{user_id}/{package_id}/resources/{resource_id}/download"
+)
+async def download_resource_file(
+    user_id: str, package_id: str, resource_id: str
+) -> FileResponse:
+    """Download an on-disk artifact for a resource (e.g. the .pptx file)."""
+    store = get_resource_package_store()
+    res = await store.get_resource(resource_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="resource not found")
+    pkg = await store.get(package_id)
+    if pkg is None or (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
+        raise HTTPException(status_code=404, detail="resource not found")
+
+    # Currently only PPT resources have on-disk artifacts; route by type.
+    if res.type == ResourceType.PPT:
+        pptx_path = (res.format_specific or {}).get("pptx_path")
+        if not pptx_path:
+            raise HTTPException(
+                status_code=404, detail="pptx_path not set on this resource"
+            )
+        p = Path(pptx_path)
+        if not p.exists():
+            raise HTTPException(status_code=410, detail="pptx file is gone")
+        # Filename uses the resource title for nicer downloads
+        safe_title = _safe_filename(res.title) + ".pptx"
+        return FileResponse(
+            path=str(p),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation"
+            ),
+            filename=safe_title,
+        )
+
+    raise HTTPException(
+        status_code=415,
+        detail=f"download not supported for resource type={res.type.value}",
+    )
+
+
+def _safe_filename(name: str) -> str:
+    """Reduce a title to a filesystem-safe basename (no extension)."""
+    if not name:
+        return "resource"
+    out: list[str] = []
+    for ch in name:
+        if ch.isalnum() or ch in ("-", "_", " "):
+            out.append(ch)
+    cleaned = ("".join(out)).strip().replace(" ", "_")
+    return cleaned[:80] or "resource"
 
 
 __all__ = ["router"]

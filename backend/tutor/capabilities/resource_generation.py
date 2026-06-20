@@ -43,6 +43,7 @@ from tutor.agents.resource.intent_understanding import (
 from tutor.agents.resource.manim_video import ManimVideoAgent
 from tutor.agents.resource.multimedia import MultimediaAgent
 from tutor.agents.resource.pedagogy import PedagogyAgent
+from tutor.agents.resource.ppt_generator import PPTGeneratorAgent
 from tutor.agents.resource.quality_reviewer import QualityReviewerAgent
 from tutor.agents.safety.anti_hallucination import (
     AntiHallucinationAgent,
@@ -108,6 +109,7 @@ class ResourceGenerationCapability(BaseCapability):
         code_sandbox: CodeSandboxAgent | None = None,
         quality_reviewer: QualityReviewerAgent | None = None,
         anti_hallucination: AntiHallucinationAgent | None = None,
+        ppt_generator: PPTGeneratorAgent | None = None,
         package_store: ResourcePackageStore | None = None,
     ) -> None:
         super().__init__()
@@ -122,6 +124,7 @@ class ResourceGenerationCapability(BaseCapability):
         self.code_sandbox = code_sandbox or CodeSandboxAgent()
         self.quality_reviewer = quality_reviewer or QualityReviewerAgent()
         self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
+        self.ppt_generator = ppt_generator or PPTGeneratorAgent()
         self.package_store = package_store
 
     @property
@@ -339,6 +342,7 @@ class ResourceGenerationCapability(BaseCapability):
                 self.code_sandbox.agent_name,
                 self.quality_reviewer.agent_name,
                 self.anti_hallucination.agent_name,
+                self.ppt_generator.agent_name,
             ],
             metadata={
                 "intent_scope": intent.scope,
@@ -393,6 +397,14 @@ class ResourceGenerationCapability(BaseCapability):
         # ------------------------------------------------------------------
         # Stage 11: Persistence — write the package to the persistent store
         # ------------------------------------------------------------------
+        # First, move any PPT artifacts generated with a placeholder
+        # package_id to the real one. This is a small bookkeeping step
+        # so the file layout mirrors the resource_packages DB layout.
+        try:
+            self._relocate_ppt_artifacts(package)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"PPT artifact relocation failed: {exc!r}")
+
         async with stream.stage("persistence", source="resource_capability"):
             try:
                 await self._store.save(package, user_id=context.user_id)
@@ -435,6 +447,50 @@ class ResourceGenerationCapability(BaseCapability):
             source="resource_capability",
         )
         await stream.done(source="resource_capability")
+
+    # ------------------------------------------------------------------
+    # PPT bookkeeping
+    # ------------------------------------------------------------------
+
+    def _relocate_ppt_artifacts(self, package: ResourcePackage) -> None:
+        """Move any PPT files written under ``ad_hoc/`` to
+        ``<data_dir>/ppt/<package_id>/`` and update the resource's
+        ``format_specific["pptx_path"]`` in place.
+        """
+        from pathlib import Path
+
+        from tutor.services.config.settings import get_settings
+        from tutor.services.ppt import get_ppt_service
+
+        ppt_root = get_ppt_service().output_dir
+        for r in package.resources:
+            if r.type != ResourceType.PPT:
+                continue
+            pptx_path = (r.format_specific or {}).get("pptx_path")
+            if not pptx_path:
+                continue
+            src = Path(pptx_path)
+            if not src.exists():
+                continue
+            # Already under the right package dir?
+            try:
+                if src.parent.parent == ppt_root and src.parent.name == package.package_id:
+                    continue
+            except Exception:
+                pass
+            dst_dir = ppt_root / package.package_id
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            dst = dst_dir / src.name
+            try:
+                if dst.exists():
+                    dst.unlink()
+                src.rename(dst)
+            except OSError:
+                # Cross-device or read-only — fall back to copy.
+                import shutil
+
+                shutil.copy2(src, dst)
+            r.format_specific["pptx_path"] = str(dst)
 
     # ------------------------------------------------------------------
     # Resource planning
@@ -599,6 +655,20 @@ class ResourceGenerationCapability(BaseCapability):
                     ),
                     ResourceType.READING,
                )),
+            ))
+        if ResourceType.PPT in planned_types:
+            tasks.append((
+                ResourceType.PPT,
+                asyncio.create_task(_safe(
+                    self.ppt_generator.process(
+                        topic=intent.topic,
+                        source_content=source_content,
+                        profile=profile_snapshot,
+                        package_id=None,  # filled below once we have it
+                        stream=stream,
+                    ),
+                    ResourceType.PPT,
+                )),
             ))
 
         if not tasks:

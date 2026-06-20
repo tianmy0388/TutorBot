@@ -1,0 +1,152 @@
+"""PPTGeneratorAgent — turns a document-style Resource into a .pptx deck.
+
+Pipeline contract:
+
+    topic: str
+    source_content: str  (markdown; typically the ContentExpert output)
+    profile: dict (optional)
+
+    → Resource(type=PPT, format_specific={slide_count, slide_titles,
+      pptx_path}, confidence=~0.8)
+
+The agent is intentionally **deterministic** when no LLM is available:
+it slices the Markdown into slides via
+:func:`tutor.services.ppt.slice_markdown_to_slides` and renders
+straight away. With an LLM it could rewrite each section into tighter
+slide bullets, but the deterministic path is enough for the MVP — the
+output is already a usable teaching deck.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from typing import Any
+
+from loguru import logger
+
+from tutor.agents.base_agent import BaseAgent
+from tutor.core.stream_bus import StreamBus
+from tutor.services.ppt import get_ppt_service
+from tutor.services.resource_package.schema import (
+    PPTResource,
+    Resource,
+    ResourceType,
+    build_resource,
+)
+
+
+class PPTGeneratorAgent(BaseAgent):
+    """Convert a Markdown source into a PPT deck Resource."""
+
+    agent_name = "ppt_generator"
+
+    def __init__(
+        self,
+        ppt_service: Any | None = None,
+        *,
+        estimated_minutes: int = 12,
+    ) -> None:
+        super().__init__()
+        self.ppt_service = ppt_service or get_ppt_service()
+        self.estimated_minutes = estimated_minutes
+
+    async def process(  # type: ignore[override]
+        self,
+        *,
+        topic: str,
+        source_content: str,
+        profile: dict[str, Any] | None = None,
+        package_id: str | None = None,
+        stream: StreamBus | None = None,
+    ) -> Resource:
+        # Build a stable resource_id up front so we can also use it as
+        # the on-disk filename.
+        resource = build_resource(
+            type=ResourceType.PPT,
+            title=f"{topic} — PPT 教案",
+            content=source_content or topic,
+            difficulty=2,
+            estimated_minutes=self.estimated_minutes,
+            topic=topic,
+            tags=["ppt", "教案", "outline"],
+            confidence_score=0.78,
+            generated_by=[self.agent_name],
+            metadata={
+                "source_chars": len(source_content or ""),
+                "agent": self.agent_name,
+            },
+        )
+        # Render (off-thread to avoid blocking the event loop on slow disks)
+        pkg_id = package_id or "ad_hoc"
+        try:
+            pptx_path = await asyncio.to_thread(
+                self.ppt_service.build,
+                topic=topic,
+                markdown=source_content or "",
+                package_id=pkg_id,
+                resource_id=resource.resource_id,
+                title=topic,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(f"PPTGeneratorAgent failed for topic={topic!r}: {exc!r}")
+            if stream is not None:
+                await stream.error(
+                    f"PPT 渲染失败: {exc}", source=self.agent_name
+                )
+            # Return a degraded resource with an error message in
+            # format_specific so the UI can show something useful.
+            resource.format_specific = {
+                "slide_count": 0,
+                "pptx_path": None,
+                "slide_titles": [],
+                "error": str(exc),
+            }
+            resource.confidence_score = 0.0
+            return resource
+
+        # Populate format_specific from the on-disk artifact.
+        try:
+            slide_titles, slide_count = _peek_pptx(pptx_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"PPT peek failed (file still usable): {exc!r}")
+            slide_titles, slide_count = [], 0
+
+        payload = PPTResource(
+            slide_count=slide_count,
+            pptx_path=str(pptx_path),
+            slide_titles=slide_titles,
+        )
+        resource.format_specific = payload.model_dump()
+        resource.metadata["pptx_filename"] = os.path.basename(str(pptx_path))
+        resource.metadata["file_size"] = pptx_path.stat().st_size
+
+        if stream is not None:
+            await stream.observation(
+                f"PPT 已生成 ({slide_count} 张): {pptx_path.name}",
+                source=self.agent_name,
+                metadata={
+                    "pptx_path": str(pptx_path),
+                    "slide_count": slide_count,
+                    "package_id": pkg_id,
+                },
+            )
+        return resource
+
+
+def _peek_pptx(path) -> tuple[list[str], int]:
+    """Open a rendered pptx and return (slide_titles, count). Cheap."""
+    from pptx import Presentation  # local import keeps module import lean
+
+    prs = Presentation(str(path))
+    titles: list[str] = []
+    for slide in prs.slides:
+        try:
+            t = slide.shapes.title.text if slide.shapes.title else ""
+        except Exception:
+            t = ""
+        titles.append(t.strip() or "(untitled)")
+    return titles, len(prs.slides)
+
+
+__all__ = ["PPTGeneratorAgent"]
