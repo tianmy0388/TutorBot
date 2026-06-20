@@ -145,3 +145,21 @@ export const startTurnMessage = (params: {
   session_id: params.sessionId,
   language: params.language,
 });
+
+/**
+ * Helper: build a `submit_job` message (Phase 5.2 async flow).
+ */
+export const startJobMessage = (params: {
+  message: string;
+  userId?: string;
+  capability?: string;
+  sessionId?: string;
+  language?: string;
+}): WSClientMessage => ({
+  type: "submit_job",
+  message: params.message,
+  user_id: params.userId,
+  capability: params.capability,
+  session_id: params.sessionId,
+  language: params.language,
+});

@@ -27,6 +27,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChatComposer } from "@/components/chat/ChatComposer";
 import { ChatMessages } from "@/components/chat/ChatMessages";
+import { JobTray } from "@/components/chat/JobTray";
 import { ProfilePanel } from "@/components/profile/ProfilePanel";
 import { ResourceTray } from "@/components/resources/ResourceTray";
 import { ResourceDetail, ResourceEmptyDetail } from "@/components/resources/ResourceCard";
@@ -151,6 +152,7 @@ export default function HomePage() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <JobTray />
             {activeTurnPhase !== "idle" && (
               <div className="text-[10px] text-brand-300 flex items-center gap-1">
                 <Activity className="w-3 h-3 animate-pulse" />

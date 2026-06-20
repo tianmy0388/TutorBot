@@ -11,6 +11,10 @@ import type {
   CourseGraph,
   CourseListResponse,
   HealthResponse,
+  JobDetail,
+  JobListResponse,
+  JobStatsResponse,
+  JobSummary,
   LearnerProfileDetail,
   LearnerProfileSummary,
   PackageListResponse,
@@ -176,6 +180,44 @@ export const getResourcePackageStats = (userId: string) =>
 export const deleteResourcePackage = (userId: string, packageId: string) =>
   request<{ deleted: boolean; package_id: string }>(
     `/resources/packages/${encodeURIComponent(userId)}/${encodeURIComponent(packageId)}`,
+    { method: "DELETE" },
+  );
+
+// ---------------------------------------------------------------------------
+// Jobs (Phase 5.2)
+// ---------------------------------------------------------------------------
+
+export const listJobs = (
+  userId: string,
+  opts: { status?: string; limit?: number; offset?: number } = {},
+) => {
+  const params = new URLSearchParams();
+  if (opts.status) params.set("status", opts.status);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  if (opts.offset) params.set("offset", String(opts.offset));
+  const qs = params.toString();
+  return request<JobListResponse>(
+    `/jobs/${encodeURIComponent(userId)}${qs ? `?${qs}` : ""}`,
+  );
+};
+
+export const getJobStats = (userId: string) =>
+  request<JobStatsResponse>(`/jobs/${encodeURIComponent(userId)}/stats`);
+
+export const getJobDetail = (userId: string, jobId: string) =>
+  request<JobDetail>(
+    `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}`,
+  );
+
+export const cancelJob = (userId: string, jobId: string) =>
+  request<{ cancelled: boolean; job_id: string }>(
+    `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+  );
+
+export const deleteJob = (userId: string, jobId: string) =>
+  request<{ deleted: boolean; job_id: string }>(
+    `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}`,
     { method: "DELETE" },
   );
 

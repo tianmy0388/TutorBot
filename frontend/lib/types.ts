@@ -49,7 +49,9 @@ export interface StreamEvent {
 
 export type WSClientMessage =
   | { type: "start_turn"; session_id?: string; user_id?: string; message: string; capability?: string; language?: string; history?: WSHistoryMessage[]; metadata?: Record<string, unknown> }
-  | { type: "cancel"; turn_id: string }
+  | { type: "submit_job"; session_id?: string; user_id?: string; message: string; capability?: string; language?: string; metadata?: Record<string, unknown> }
+  | { type: "subscribe_job"; job_id: string }
+  | { type: "cancel"; turn_id?: string; job_id?: string; user_id?: string }
   | { type: "ping" };
 
 export interface WSHistoryMessage {
@@ -300,6 +302,59 @@ export interface PackageStatsResponse {
   avg_confidence: number;
   topics: string[];
   type_counts: Record<string, number>;
+  first_at: string | null;
+  last_at: string | null;
+}
+
+// ============================================================================
+// Jobs (Phase 5.2)
+// ============================================================================
+
+export type JobStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface JobSummary {
+  job_id: string;
+  user_id: string;
+  session_id: string;
+  capability: string;
+  status: JobStatus;
+  message_preview: string;
+  language: string;
+  event_count: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_seconds: number | null;
+  has_result: boolean;
+  error: string | null;
+}
+
+export interface JobDetail extends JobSummary {
+  message: string;
+  language: string;
+  metadata: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  events: StreamEvent[];
+}
+
+export interface JobListResponse {
+  user_id: string;
+  total: number;
+  limit: number;
+  offset: number;
+  items: JobSummary[];
+}
+
+export interface JobStatsResponse {
+  job_count: number;
+  active_count: number;
+  by_status: Record<string, number>;
+  by_capability: Record<string, number>;
   first_at: string | null;
   last_at: string | null;
 }
