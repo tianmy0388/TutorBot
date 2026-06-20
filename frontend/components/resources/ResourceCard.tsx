@@ -32,6 +32,7 @@ import { ExerciseViewer } from "./ExerciseViewer";
 import { ReadingViewer } from "./ReadingViewer";
 import { VideoViewer } from "./VideoViewer";
 import { CodeViewer } from "./CodeViewer";
+import { PPTViewer } from "./PPTViewer";
 
 export interface ResourceCardProps {
   resource: Resource;
@@ -265,15 +266,7 @@ function renderByType(resource: Resource): React.ReactNode {
     case "code":
       return <CodeViewer resource={resource} />;
     case "ppt":
-      return (
-        <div className="text-sm text-fg-muted p-4 bg-bg-card rounded-lg border border-fg/5">
-          <Sparkles className="w-5 h-5 text-cyan-400 mb-2" />
-          <div className="font-medium mb-1">PPT 教案</div>
-          <div className="text-xs text-fg-subtle">
-            PPT 生成将在 Phase 5 集成 python-pptx 后启用。当前请下载 Markdown 版本。
-          </div>
-        </div>
-      );
+      return <PPTViewer resource={resource} />;
     default:
       return (
         <pre className="text-xs whitespace-pre-wrap">{resource.content}</pre>
