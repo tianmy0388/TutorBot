@@ -24,12 +24,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelJob as apiCancelJob,
   deleteJob as apiDeleteJob,
+  getJobDetail,
   getJobStats,
   listJobs,
 } from "@/lib/api";
 import { useTutorStore } from "@/lib/store";
 import { dispatchStreamEvent } from "@/lib/event-handler";
-import type { JobStatsResponse, JobSummary, JobStatus } from "@/lib/types";
+import { getJobIdFromEvent } from "@/lib/job-reducer";
+import type { JobStatsResponse, JobSummary, JobStatus, StreamEvent } from "@/lib/types";
 import { WsClient, startJobMessage } from "@/lib/ws";
 
 function getWsUrl(): string {
@@ -101,12 +103,19 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         const client = new WsClient({
           url,
           onOpen: () => {
+            const activeKbId =
+              useTutorStore.getState().activeKnowledgeBaseId ||
+              "ai_introduction";
             client.send(
               startJobMessage({
                 message: text,
                 userId: userId || "anonymous",
                 capability: capability || undefined,
                 language: useTutorStore.getState().language || "zh",
+                metadata: {
+                  knowledge_base_id: activeKbId,
+                  plan_id: "",
+                },
               }),
             );
           },
@@ -118,6 +127,16 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
                 status: ev.status,
                 created_at: ev.created_at,
               };
+              // Insert the job into the per-job reducer state so the
+              // chat can immediately show a pending card and any
+              // streamed events know where to land.
+              useTutorStore.getState().applyReducerEvent({
+                type: "submit",
+                job_id: result.job_id,
+                capability: result.capability,
+                message_preview:
+                  text.length > 60 ? text.slice(0, 60) + "…" : text,
+              });
               // Optimistic insert into local list (so the JobTray shows
               // the new pending job immediately, before refresh() runs).
               setJobs((prev) => {
@@ -170,6 +189,45 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
       if (liveClients.current.has(jobId)) return; // already subscribed
       if (typeof window === "undefined") return;
 
+      // Re-hydrate the per-job state from the REST snapshot first so
+      // late subscribers see the same terminal assistant message that
+      // a previous tab already produced. This is replay-safe: the
+      // reducer skips an assistant message it has already inserted.
+      (async () => {
+        try {
+          const detail = await getJobDetail(userId || "anonymous", jobId);
+          if (detail) {
+            useTutorStore.getState().applyReducerEvent({
+              type: "snapshot",
+              job: {
+                job_id: detail.job_id,
+                capability: detail.capability,
+                status: detail.status,
+                message_preview: detail.message_preview,
+                submitted_at: detail.created_at
+                  ? Date.parse(detail.created_at)
+                  : Date.now(),
+                started_at: detail.started_at
+                  ? Date.parse(detail.started_at)
+                  : null,
+                finished_at: detail.finished_at
+                  ? Date.parse(detail.finished_at)
+                  : null,
+                last_seq: detail.events?.length ?? 0,
+                events: detail.events ?? [],
+                result: (detail.result as any) ?? null,
+                error: detail.error,
+                event_count: detail.event_count,
+              },
+            });
+          }
+        } catch (e) {
+          // snapshot fetch is best-effort; the WS replay will still
+          // bring the events.
+          console.warn(`[useJobQueue] snapshot fetch failed for ${jobId}`, e);
+        }
+      })();
+
       const url = getWsUrl();
       const client = new WsClient({
         url,
@@ -177,10 +235,18 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
           client.send({ type: "subscribe_job", job_id: jobId });
         },
         onEvent: (ev: any) => {
-          // Reuse the same dispatch pipeline as the legacy WS so chat
-          // messages + result routing work without duplication.
-          dispatchStreamEvent(ev);
-          if (ev.type === "stage_start") {
+          // Reuse the same dispatch pipeline so chat messages + result
+          // routing work without duplication.
+          const streamEv = ev as StreamEvent;
+          const derivedJobId = getJobIdFromEvent(streamEv);
+          // If the event is missing job_id but we know the WS context
+          // (we subscribed to this job), attach it so the reducer is
+          // not put in a protocol-error state.
+          if (!derivedJobId && streamEv.metadata) {
+            streamEv.metadata = { ...streamEv.metadata, job_id: jobId };
+          }
+          dispatchStreamEvent(streamEv);
+          if (streamEv.type === "stage_start") {
             setJobs((prev) =>
               prev.map((j) =>
                 j.job_id === jobId && j.status === "pending"
@@ -193,9 +259,9 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
               ),
             );
           } else if (
-            ev.type === "done" ||
-            ev.type === "cancelled" ||
-            ev.type === "error"
+            streamEv.type === "job_terminal" ||
+            streamEv.type === "done" ||
+            streamEv.type === "cancelled"
           ) {
             setTimeout(() => refresh(), 100);
             liveClients.current.delete(jobId);
@@ -212,7 +278,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
       liveClients.current.set(jobId, client);
       client.connect();
     },
-    [refresh],
+    [userId, refresh],
   );
 
   const cancel = useCallback(

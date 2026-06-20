@@ -1,14 +1,19 @@
 /**
  * StreamEvent → Store dispatch logic.
  *
- * The store provides `applyStreamEvent` and `completeActiveTurn`.
- * This module adds the higher-level semantics: detect capability from the
- * event's `source` / `stage`, route RESULT payloads to the right slice,
- * surface errors as chat messages, etc.
+ * Every event MUST carry a ``job_id`` in its metadata. The dispatcher
+ * routes events to the typed job reducer (lib/job-reducer.ts), which
+ * keeps per-job state. We never infer event ownership from a global
+ * ``currentCapability`` — that heuristic caused the no-output regression.
+ *
+ * Result payloads inside ``result`` events still flow through
+ * ``routeResult`` for backwards compatibility with capability-shaped
+ * consumers (resource packages, tutoring answers, etc.).
  */
 
 import { useTutorStore } from "./store";
-import type { StreamEvent } from "./types";
+import { getJobIdFromEvent } from "./job-reducer";
+import type { StreamEvent, WSServerMessage } from "./types";
 import {
   type AssessmentReport,
   type PlannedPath,
@@ -19,110 +24,90 @@ import {
   type QuestionUnderstanding,
 } from "./types";
 
-export function dispatchStreamEvent(ev: StreamEvent): void {
-  const store = useTutorStore.getState();
-  store.applyStreamEvent(ev);
+/**
+ * Compatibility adapter: capabilities that were designed for the
+ * single-activeTurn model still emit ``result`` / ``error`` / ``done``
+ * / ``cancelled`` events on a per-job basis. We split the dispatch into
+ * the job reducer (for ownership and replay) and the result router
+ * (for capability-specific payload dispatch).
+ */
+export function dispatchStreamEvent(
+  ev: StreamEvent | WSServerMessage,
+): void {
+  // Protocol / ack messages (job_submitted, ack, pong) are handled by the
+  // WsClient itself; we shouldn't see them here. Defensive no-op.
+  if (
+    ev.type === "ack" ||
+    ev.type === "pong" ||
+    ev.type === "job_submitted"
+  ) {
+    return;
+  }
+  // Normalise to a strict StreamEvent for the reducer + router.
+  const streamEv: StreamEvent = {
+    type: ev.type as StreamEvent["type"],
+    source: ev.source ?? "",
+    stage: ev.stage ?? "",
+    content: ev.content ?? "",
+    metadata: ev.metadata ?? {},
+    session_id: ev.session_id ?? "",
+    turn_id: ev.turn_id ?? "",
+    seq: ev.seq ?? 0,
+    timestamp: ev.timestamp ?? Date.now() / 1000,
+    event_id: ev.event_id ?? "",
+  };
+  const jobId = getJobIdFromEvent(streamEv);
+  if (!jobId) {
+    useTutorStore.getState().addMessage({
+      role: "system",
+      content: `协议错误：${streamEv.type} 事件缺少 job_id`,
+      metadata: { protocol_error: true, event_type: streamEv.type },
+    });
+    return;
+  }
 
-  switch (ev.type) {
+  // 1. Always reduce into per-job state.
+  useTutorStore.getState().applyStreamEvent(streamEv);
+
+  // 2. Capability-specific routing for known event types.
+  switch (streamEv.type) {
     case "result": {
-      // The backend serialises the full capability result in `content` as JSON.
       try {
-        const payload = JSON.parse(ev.content);
-        routeResult(payload, ev);
+        const payload = JSON.parse(streamEv.content);
+        routeResult(payload, streamEv);
       } catch (e) {
         console.warn("[event-handler] failed to parse result", e);
       }
       break;
     }
     case "error": {
-      useTutorStore.setState((s) => ({
-        activeTurn: { ...s.activeTurn, error: ev.content },
-      }));
       useTutorStore.getState().addMessage({
         role: "system",
-        content: `错误: ${ev.content}`,
-        stage: ev.stage,
-        metadata: { ...ev.metadata, source: ev.source },
+        content: `错误: ${streamEv.content}`,
+        stage: streamEv.stage,
+        metadata: { ...streamEv.metadata, source: streamEv.source, job_id: jobId },
       });
       break;
     }
+    case "job_terminal": {
+      const md = streamEv.metadata as Record<string, unknown> | undefined;
+      const contract = md?.contract as Record<string, unknown> | undefined;
+      if (contract && typeof contract === "object") {
+        routeResult(contract, streamEv);
+      }
+      break;
+    }
+    // "done" and "cancelled" are no longer required for the visible
+    // assistant message — the job_terminal event from JobRunner carries
+    // the contract with the canonical assistant_message. We still call
+    // completeActiveTurn so legacy single-turn consumers don't hang.
     case "done": {
-      // Pull current result from the turn
-      const turn = useTutorStore.getState().activeTurn;
-      const result = turn.result;
-      useTutorStore.getState().completeActiveTurn(result, null);
-      // If completeActiveTurn didn't push a visible assistant message
-      // (because text_buffer + thinking_buffer were both empty — the common
-      // case for resource_generation, which never streams text), inject a
-      // contextual completion message so the user gets visible feedback.
-      injectCompletionMessageIfMissing();
+      useTutorStore.getState().completeActiveTurn(null, null);
       break;
     }
     default:
       break;
   }
-}
-
-/**
- * Some capabilities (notably resource_generation) don't emit ``content``
- * events — they only emit stage_start/thinking/result. When such a turn
- * finishes, ``completeActiveTurn`` has nothing to put in an assistant
- * message bubble. To avoid the dialog going silent, generate a one-line
- * summary based on the capability + result payload.
- */
-function injectCompletionMessageIfMissing(): void {
-  const store = useTutorStore.getState();
-  const turn = store.activeTurn;
-  const messages = store.messages;
-
-  // Was a message just pushed for this turn? If so, leave it alone.
-  const last = messages[messages.length - 1];
-  const justAdded =
-    last && last.role === "assistant" && last.timestamp >= turn.started_at;
-  if (justAdded) return;
-
-  const cap = store.currentCapability ?? "unknown";
-  const result = turn.result as Record<string, unknown> | null;
-
-  let content = "";
-  switch (cap) {
-    case "resource_generation": {
-      // result is { package: { resources: [...] }, summary, kg_summary }
-      const pkg = result?.package as { resources?: unknown[] } | undefined;
-      const count = pkg?.resources?.length ?? 0;
-      const summary = (result?.summary as string) || "";
-      content =
-        count > 0
-          ? `✅ 已生成 ${count} 类学习资源${
-              summary ? `（${summary}）` : ""
-            }，请在右侧面板查看。`
-          : "✅ 资源生成任务完成，但未产出资源（请检查 LLM 是否正常工作）。";
-      break;
-    }
-    case "tutoring":
-      content =
-        "✅ 答疑完成，详见右侧「即时答疑」面板。";
-      break;
-    case "assessment":
-      content =
-        "✅ 效果评估完成，详见右侧「效果评估」面板（含 6 维评分 + 自适应策略）。";
-      break;
-    case "path_planning":
-      content = "✅ 学习路径已规划，详见右侧「路径规划」面板。";
-      break;
-    case "profile":
-      content = "✅ 学习画像已更新。";
-      break;
-    default:
-      content = `✅ 任务完成（${cap}）。`;
-  }
-
-  store.addMessage({
-    role: "assistant",
-    agent: cap,
-    content,
-    metadata: { capability: cap, synthetic: true },
-  });
 }
 
 function routeResult(
@@ -135,12 +120,6 @@ function routeResult(
   if (payload.package && payload.summary) {
     const pkg = payload.package as ResourcePackage;
     store.setLatestPackage(pkg);
-    // KG summary for path visualization
-    if (payload.kg_summary && typeof payload.kg_summary === "object") {
-      // KG path is computed client-side from planPath() too; backend already
-      // attached a summary — we keep plannedPath null and let the page call
-      // /kg/{course}/plan for the full path.
-    }
     return;
   }
 

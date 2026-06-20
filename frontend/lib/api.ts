@@ -8,13 +8,20 @@
 import type {
   AssessmentReport,
   CapabilitiesResponse,
+  ConfigTestResult,
   CourseGraph,
   CourseListResponse,
+  EmbeddingSectionPatch,
   HealthResponse,
   JobDetail,
   JobListResponse,
   JobStatsResponse,
   JobSummary,
+  KnowledgeBaseDetail,
+  KnowledgeBaseListResponse,
+  KnowledgeBaseSummary,
+  KnowledgeDocument,
+  LLMSectionPatch,
   LearnerProfileDetail,
   LearnerProfileSummary,
   PackageListResponse,
@@ -23,7 +30,11 @@ import type {
   Resource,
   ResourcePackage,
   ResourcePackageSummary,
+  ResourcePlan,
+  ResourcePlanConfirmResponse,
+  RuntimeConfig,
   StrategyDecision,
+  WebSearchSectionPatch,
 } from "./types";
 
 const API_BASE =
@@ -219,6 +230,134 @@ export const deleteJob = (userId: string, jobId: string) =>
   request<{ deleted: boolean; job_id: string }>(
     `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}`,
     { method: "DELETE" },
+  );
+
+// ---------------------------------------------------------------------------
+// Runtime configuration (Task 6 / Task 7)
+// ---------------------------------------------------------------------------
+
+export const getRuntimeConfig = () => request<RuntimeConfig>("/config");
+
+export const updateLLMConfig = (patch: LLMSectionPatch) =>
+  request<RuntimeConfig>("/config/llm", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const updateEmbeddingConfig = (patch: EmbeddingSectionPatch) =>
+  request<RuntimeConfig>("/config/embedding", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const updateWebSearchConfig = (patch: WebSearchSectionPatch) =>
+  request<RuntimeConfig>("/config/web-search", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const testLLMConnection = () =>
+  request<ConfigTestResult>("/config/test/llm", { method: "POST" });
+
+export const testEmbeddingConnection = () =>
+  request<ConfigTestResult>("/config/test/embedding", { method: "POST" });
+
+export const testWebSearchConnection = () =>
+  request<ConfigTestResult>("/config/test/web-search", { method: "POST" });
+
+// ---------------------------------------------------------------------------
+// Knowledge bases (Task 8 / Task 9)
+// ---------------------------------------------------------------------------
+
+export const listKnowledgeBases = () =>
+  request<KnowledgeBaseListResponse>("/knowledge-bases");
+
+export const getKnowledgeBase = (id: string) =>
+  request<KnowledgeBaseDetail>(
+    `/knowledge-bases/${encodeURIComponent(id)}`,
+  );
+
+export const createKnowledgeBase = (name: string, description: string) => {
+  const form = new FormData();
+  form.append("name", name);
+  form.append("description", description);
+  return request<KnowledgeBaseSummary>("/knowledge-bases", {
+    method: "POST",
+    body: form,
+  });
+};
+
+export const deleteKnowledgeBase = (id: string) =>
+  request<{ deleted: boolean; id: string }>(
+    `/knowledge-bases/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+
+export const uploadKnowledgeDocument = (libId: string, file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return request<KnowledgeDocument>(
+    `/knowledge-bases/${encodeURIComponent(libId)}/documents`,
+    { method: "POST", body: form },
+  );
+};
+
+export const retryKnowledgeDocument = (libId: string, docId: string) =>
+  request<KnowledgeDocument>(
+    `/knowledge-bases/${encodeURIComponent(libId)}/documents/${encodeURIComponent(docId)}/retry`,
+    { method: "POST" },
+  );
+
+export const deleteKnowledgeDocument = (libId: string, docId: string) =>
+  request<{ deleted: boolean; id: string }>(
+    `/knowledge-bases/${encodeURIComponent(libId)}/documents/${encodeURIComponent(docId)}`,
+    { method: "DELETE" },
+  );
+
+// ---------------------------------------------------------------------------
+// Plans (Task 4)
+// ---------------------------------------------------------------------------
+
+export const createPlan = (req: {
+  message: string;
+  user_id?: string;
+  language?: string;
+}) =>
+  request<ResourcePlan>("/plans", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+
+export const confirmPlan = (
+  planId: string,
+  selectedTypes: string[],
+  metadata: Record<string, unknown> = {},
+) =>
+  request<ResourcePlanConfirmResponse>(
+    `/plans/${encodeURIComponent(planId)}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        selected_types: { types: selectedTypes },
+        metadata,
+      }),
+    },
+  );
+
+export const retryJob = (userId: string, jobId: string, resourceTypes: string[]) =>
+  request<{
+    job_id: string;
+    parent_job_id: string;
+    selected_types: string[];
+    preserved_artifacts: string[];
+    topic: string;
+    status: string;
+  }>(
+    `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}/retry`,
+    {
+      method: "POST",
+      body: JSON.stringify({ resource_types: resourceTypes }),
+    },
   );
 
 // ---------------------------------------------------------------------------

@@ -385,12 +385,21 @@ class JobStore:
 
     @staticmethod
     def _row_to_job(row: JobRow) -> Job:
+        # Legacy "completed" rows (pre-Phase 5.2) hydrate as SUCCEEDED so
+        # existing jobs.db files stay readable without a migration.
+        try:
+            status = JobStatus(row.status)
+        except ValueError:
+            if row.status == "completed":
+                status = JobStatus.SUCCEEDED
+            else:
+                raise
         return Job(
             job_id=row.job_id,
             user_id=row.user_id,
             session_id=row.session_id,
             capability=row.capability,
-            status=JobStatus(row.status),
+            status=status,
             message=row.message or "",
             language=row.language or "zh",
             metadata=dict(row.metadata_json or {}),

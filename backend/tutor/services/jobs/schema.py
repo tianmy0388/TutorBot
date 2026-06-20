@@ -7,7 +7,8 @@ tab, or queue multiple jobs in parallel.
 
 Status lifecycle:
 
-    pending → running → completed
+    pending → running → succeeded
+                  ↘  partial
                   ↘  failed
                   ↘  cancelled
 
@@ -39,7 +40,8 @@ class JobStatus(str, Enum):
 
     PENDING = "pending"        # accepted, not yet started
     RUNNING = "running"        # capability task in flight
-    COMPLETED = "completed"    # DONE received, result captured
+    SUCCEEDED = "succeeded"    # DONE received, all artifacts ok
+    PARTIAL = "partial"        # DONE received, some artifacts failed
     FAILED = "failed"          # exception or unrecoverable error
     CANCELLED = "cancelled"    # cancelled by user or orchestrator
 

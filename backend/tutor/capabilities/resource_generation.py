@@ -238,6 +238,7 @@ class ResourceGenerationCapability(BaseCapability):
                 intent=intent,
                 profile_snapshot=profile_snapshot,
                 kg_summary=kg_summary,
+                metadata=dict(context.metadata or {}),
             )
             await stream.observation(
                 f"计划生成 {len(planned_types)} 类资源："
@@ -503,18 +504,34 @@ class ResourceGenerationCapability(BaseCapability):
         intent: Intent,
         profile_snapshot: dict[str, Any],
         kg_summary: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
     ) -> list[ResourceType]:
         """Decide which resource types to generate.
 
         Strategy:
-        1. Start from intent.resource_types (but default to a sensible subset)
-        2. VIDEO is **off by default** — it is expensive (~30-60s render time)
-           and only added when the topic is clearly visual, when the user
-           explicitly asks, or when the profile says modality == "video".
-        3. Drop VIDEO for "overview" scope (heavy).
-        4. Drop VIDEO if the topic is comparison / ranking / list — those are
-           better served by reading + exercise + mindmap.
+        1. **Authoritative override**: if the caller (router / retry
+           endpoint) put ``selected_resource_types`` in
+           ``context.metadata``, that list wins. This is the Task 4
+           plan-confirmation contract: the user said yes to exactly
+           these types, so we run exactly these types.
+        2. Otherwise: start from ``intent.resource_types`` (default
+           subset), then apply the legacy heuristics (visual keyword
+           detection, modality upranking, scope adjustments, comparison
+           drop, document default).
         """
+        # 1. Authoritative override from the plan/confirm flow.
+        metadata = metadata or {}
+        selected = metadata.get("selected_resource_types")
+        if selected:
+            valid = {rt.value for rt in ResourceType}
+            chosen: list[ResourceType] = []
+            seen: set[ResourceType] = set()
+            for t in selected:
+                if t in valid and ResourceType(t) not in seen:
+                    chosen.append(ResourceType(t))
+                    seen.add(ResourceType(t))
+            return chosen
+
         types = list(intent.resource_types)
 
         # ------------------------------------------------------------------

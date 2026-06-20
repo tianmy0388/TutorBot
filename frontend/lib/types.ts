@@ -10,6 +10,22 @@
  */
 
 // ============================================================================
+// Chat messages
+// ============================================================================
+
+export type MessageRole = "user" | "assistant" | "system" | "agent";
+
+export interface ChatMessage {
+  id: string;
+  role: MessageRole;
+  agent?: string;
+  content: string;
+  stage?: string;
+  timestamp: number;
+  metadata?: Record<string, unknown>;
+}
+
+// ============================================================================
 // Stream events (from StreamBus on backend)
 // ============================================================================
 
@@ -28,7 +44,8 @@ export type StreamEventType =
   | "error"
   | "cancelled"
   | "session"
-  | "done";
+  | "done"
+  | "job_terminal";
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -61,7 +78,7 @@ export interface WSHistoryMessage {
 
 export interface WSServerMessage {
   // Stream events (type === one of StreamEventType)
-  type: StreamEventType | "ack" | "pong";
+  type: StreamEventType | "ack" | "pong" | "job_submitted";
   source?: string;
   stage?: string;
   content?: string;
@@ -72,6 +89,12 @@ export interface WSServerMessage {
   seq?: number;
   timestamp?: number;
   event_id?: string;
+  // job_submitted fields
+  job_id?: string;
+  capability?: string;
+  status?: JobStatus;
+  created_at?: string;
+  user_id?: string;
 }
 
 // ============================================================================
@@ -295,6 +318,29 @@ export interface PackageListResponse {
   items: ResourcePackageSummary[];
 }
 
+// ============================================================================
+// Resource plan (Task 4)
+// ============================================================================
+
+export interface ResourcePlan {
+  plan_id: string;
+  intent: string;
+  topic: string;
+  recommended: string[];
+  optional: string[];
+  estimated_seconds: number;
+  rationale: string;
+}
+
+export interface ResourcePlanConfirmResponse {
+  job_id: string;
+  plan_id: string;
+  selected_types: string[];
+  topic: string;
+  estimated_seconds: number;
+  status: string;
+}
+
 export interface PackageStatsResponse {
   package_count: number;
   resource_count: number;
@@ -307,15 +353,61 @@ export interface PackageStatsResponse {
 }
 
 // ============================================================================
-// Jobs (Phase 5.2)
+// Jobs (Phase 5.2 + 5.3 contract)
 // ============================================================================
 
 export type JobStatus =
   | "pending"
   | "running"
-  | "completed"
+  | "succeeded"
+  | "partial"
   | "failed"
   | "cancelled";
+
+export type JobTerminalStatus = "succeeded" | "partial" | "failed" | "cancelled";
+
+export interface JobProgress {
+  stage: string;
+  percent: number;
+  active_agents: string[];
+}
+
+export interface JobError {
+  code: string;
+  message: string;
+  diagnostic?: string;
+  retryable: boolean;
+}
+
+export interface JobWarning {
+  code: string;
+  message: string;
+  resource_type?: string | null;
+  context?: Record<string, unknown>;
+}
+
+export interface ArtifactResult {
+  resource_type: string;
+  status: "succeeded" | "failed";
+  resource_id?: string | null;
+  duration_seconds?: number;
+  agents?: string[];
+  error?: JobError | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface JobResultContract {
+  job_id: string;
+  capability: string;
+  status: JobTerminalStatus;
+  assistant_message: string;
+  progress?: JobProgress;
+  artifacts?: ArtifactResult[];
+  warnings?: JobWarning[];
+  error?: JobError | null;
+  event_cursor?: number;
+  finished_at?: string | null;
+}
 
 export interface JobSummary {
   job_id: string;
@@ -418,6 +510,136 @@ export interface StrategyDecision {
   overall_directive: string;
   notes: string;
   created_at: string;
+}
+
+// ============================================================================
+// Knowledge base (Task 8 / Task 9)
+// ============================================================================
+
+export type IngestionStatus =
+  | "uploaded"
+  | "extracting"
+  | "chunking"
+  | "embedding"
+  | "ready"
+  | "failed";
+
+export interface KnowledgeBaseSummary {
+  id: string;
+  name: string;
+  description: string;
+  is_seeded: boolean;
+  document_count: number;
+  ready_count: number;
+  failed_count: number;
+  total_chunks: number;
+  embedding_model: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeBaseDetail extends KnowledgeBaseSummary {
+  documents: KnowledgeDocument[];
+}
+
+export interface KnowledgeDocument {
+  id: string;
+  knowledge_base_id: string;
+  display_name: string;
+  source_filename: string;
+  extension: string;
+  size_bytes: number;
+  checksum: string;
+  status: IngestionStatus;
+  chunk_count: number;
+  embedding_model: string;
+  error: string | null;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeBaseListResponse {
+  items: KnowledgeBaseSummary[];
+  total: number;
+}
+
+// ============================================================================
+// Runtime configuration (Task 6)
+// ============================================================================
+
+export interface MaskedSecret {
+  configured: boolean;
+  preview: string;
+}
+
+export interface LLMConfig {
+  provider: string;
+  model: string;
+  base_url: string;
+  temperature: number;
+  max_tokens: number;
+  timeout: number;
+  api_key: MaskedSecret;
+}
+
+export interface EmbeddingConfig {
+  provider: string;
+  model: string;
+  base_url: string;
+  dimensions: number;
+  api_key: MaskedSecret;
+}
+
+export interface WebSearchConfig {
+  enabled: boolean;
+  provider: string;
+  max_results: number;
+  api_key: MaskedSecret;
+}
+
+export interface RuntimeConfig {
+  llm: LLMConfig;
+  embedding: EmbeddingConfig;
+  web_search: WebSearchConfig;
+}
+
+export interface LLMSectionPatch {
+  provider?: string;
+  model?: string;
+  base_url?: string;
+  temperature?: number;
+  max_tokens?: number;
+  timeout?: number;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+}
+
+export interface EmbeddingSectionPatch {
+  provider?: string;
+  model?: string;
+  base_url?: string;
+  dimensions?: number;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+}
+
+export interface WebSearchSectionPatch {
+  enabled?: boolean;
+  provider?: string;
+  max_results?: number;
+  api_key?: string | null;
+  clear_api_key?: boolean;
+}
+
+export interface ConfigTestResult {
+  ok: boolean;
+  provider: string;
+  model?: string;
+  dimensions?: number;
+  latency_ms: number;
+  message: string;
+  code?: string;
 }
 
 // ============================================================================
