@@ -1,26 +1,36 @@
 "use client";
 
 /**
- * ResourceTray — sidebar list of all resources in the latest package.
+ * ResourceTray — sidebar list of all resources in the active package.
  *
  * Features:
  *  - Group by type with section headers + counts
  *  - Filter by type (chip selector)
  *  - Sort by type/difficulty/duration/confidence
+ *  - History switcher (Phase 5): dropdown to load any of the user's
+ *    previously generated packages; selection swaps `latestPackage`
+ *    in the store so the ResourceDetail pane renders it.
+ *  - Delete current package (with confirm)
  *  - Empty state with prompt
  *  - Click selects resource (rendered by parent in detail pane)
  */
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   Sparkles,
   Package,
   ChevronDown,
   Filter,
   ArrowUpDown,
+  History,
+  Trash2,
+  RefreshCw,
+  Check,
 } from "lucide-react";
 import { useTutorStore } from "@/lib/store";
+import { useResourceHistory } from "@/hooks/useResourceHistory";
 import { ResourceCard, RESOURCE_TYPE_META } from "./ResourceCard";
+import type { ResourcePackage } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type SortBy = "default" | "difficulty" | "duration" | "confidence";
@@ -28,12 +38,18 @@ type FilterType = "all" | string;
 
 export function ResourceTray() {
   const latestPackage = useTutorStore((s) => s.latestPackage);
+  const userId = useTutorStore((s) => s.userId);
+  const setLatestPackage = useTutorStore((s) => s.setLatestPackage);
+  const selectResource = useTutorStore((s) => s.selectResource);
   const selection = useTutorStore((s) => s.resourceSelection);
-  const select = useTutorStore((s) => s.selectResource);
+
+  const history = useResourceHistory(userId);
 
   const [filter, setFilter] = useState<FilterType>("all");
   const [sortBy, setSortBy] = useState<SortBy>("default");
   const [sortOpen, setSortOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [loadingDetail, setLoadingDetail] = useState(false);
 
   const totalMinutes = useMemo(() => {
     if (!latestPackage) return 0;
@@ -67,6 +83,51 @@ export function ResourceTray() {
     return arr;
   }, [latestPackage, filter, sortBy]);
 
+  // When a *new* package arrives via WebSocket (not a history switch),
+  // refresh the history list so the new entry shows in the dropdown.
+  useEffect(() => {
+    if (latestPackage) {
+      // Defer one tick to avoid setState during render
+      const t = setTimeout(() => history.refresh(), 0);
+      return () => clearTimeout(t);
+    }
+  }, [latestPackage?.package_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---------------------------------------------------------------------------
+  // Actions
+  // ---------------------------------------------------------------------------
+
+  const loadFromHistory = async (packageId: string) => {
+    if (packageId === latestPackage?.package_id) {
+      setHistoryOpen(false);
+      return;
+    }
+    setLoadingDetail(true);
+    const full = await history.loadDetail(packageId);
+    setLoadingDetail(false);
+    setHistoryOpen(false);
+    if (full) {
+      setLatestPackage(full);
+    }
+  };
+
+  const removeCurrent = async () => {
+    if (!latestPackage) return;
+    if (!confirm(`确定删除资源包"${latestPackage.topic}"?`)) return;
+    const ok = await history.remove(latestPackage.package_id);
+    if (ok) {
+      setLatestPackage(null);
+      // Auto-load the most-recent remaining package, if any
+      const next = history.packages.find(
+        (p) => p.package_id !== latestPackage.package_id,
+      );
+      if (next) {
+        const full = await history.loadDetail(next.package_id);
+        if (full) setLatestPackage(full);
+      }
+    }
+  };
+
   if (!latestPackage || latestPackage.resources.length === 0) {
     return (
       <div className="p-5">
@@ -75,12 +136,29 @@ export function ResourceTray() {
             <Sparkles className="w-4 h-4 text-accent" />
             资源中心
           </h2>
+          {history.packages.length > 0 && (
+            <button
+              onClick={() => setHistoryOpen(true)}
+              className="text-[10px] text-fg-muted hover:text-fg flex items-center gap-1"
+            >
+              <History className="w-3 h-3" />
+              历史 ({history.total})
+            </button>
+          )}
         </div>
         <div className="text-center py-8 text-xs text-fg-muted">
           <Package className="w-8 h-8 mx-auto mb-2 opacity-40" />
           <p>暂无资源</p>
           <p className="mt-1 text-fg-subtle">发送"系统学习 XXX"开始生成</p>
         </div>
+        {historyOpen && (
+          <HistoryDropdown
+            history={history}
+            currentId={null}
+            onPick={loadFromHistory}
+            onClose={() => setHistoryOpen(false)}
+          />
+        )}
       </div>
     );
   }
@@ -101,13 +179,58 @@ export function ResourceTray() {
           <Sparkles className="w-4 h-4 text-accent" />
           资源中心
         </h2>
-        <span className="text-[10px] text-fg-muted">
-          {latestPackage.resources.length} 项 · {totalMinutes} 分
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-fg-muted">
+            {latestPackage.resources.length} 项 · {totalMinutes} 分
+          </span>
+          <button
+            onClick={() => setHistoryOpen((v) => !v)}
+            className="text-[10px] text-fg-muted hover:text-fg flex items-center gap-1"
+            title="历史资源包"
+          >
+            <History className="w-3 h-3" />
+            {history.total > 0 ? history.total : "历史"}
+          </button>
+          <button
+            onClick={removeCurrent}
+            className="text-fg-subtle hover:text-red-400 transition-colors"
+            title="删除此资源包"
+          >
+            <Trash2 className="w-3 h-3" />
+          </button>
+        </div>
       </div>
-      <div className="text-[11px] text-fg-muted mb-3 truncate">
-        📦 {latestPackage.topic}
+
+      {/* Topic + meta */}
+      <div className="text-[11px] text-fg-muted mb-3 truncate flex items-center gap-2">
+        <span className="truncate">📦 {latestPackage.topic}</span>
+        <button
+          onClick={() => history.refresh()}
+          disabled={history.loading}
+          className="text-fg-subtle hover:text-fg shrink-0"
+          title="刷新历史"
+        >
+          <RefreshCw
+            className={cn("w-3 h-3", history.loading && "animate-spin")}
+          />
+        </button>
       </div>
+
+      {/* History dropdown */}
+      {historyOpen && (
+        <HistoryDropdown
+          history={history}
+          currentId={latestPackage.package_id}
+          onPick={loadFromHistory}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
+
+      {loadingDetail && (
+        <div className="text-[10px] text-fg-muted mb-2 px-1">
+          加载历史包…
+        </div>
+      )}
 
       {/* Filter chips */}
       <div className="flex gap-1 mb-2 flex-wrap text-[10px] shrink-0">
@@ -218,7 +341,7 @@ export function ResourceTray() {
                     resource={r}
                     compact
                     selected={selection.selectedResourceId === r.resource_id}
-                    onClick={() => select(r.resource_id)}
+                    onClick={() => selectResource(r.resource_id)}
                   />
                 ))}
               </div>
@@ -232,5 +355,80 @@ export function ResourceTray() {
         )}
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// History dropdown
+// ---------------------------------------------------------------------------
+
+function HistoryDropdown({
+  history,
+  currentId,
+  onPick,
+  onClose,
+}: {
+  history: ReturnType<typeof useResourceHistory>;
+  currentId: string | null;
+  onPick: (id: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-20"
+        onClick={onClose}
+        aria-hidden
+      />
+      <div className="relative z-30 mb-3 p-2 bg-bg-card border border-fg/10 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+        <div className="flex items-center gap-1 px-2 py-1 mb-1 text-[10px] uppercase tracking-wider text-fg-muted font-semibold">
+          <History className="w-3 h-3" />
+          历史资源包 ({history.total})
+        </div>
+        {history.packages.length === 0 ? (
+          <div className="px-2 py-3 text-[11px] text-fg-muted text-center">
+            {history.loading ? "加载中…" : "暂无历史"}
+          </div>
+        ) : (
+          <div className="space-y-0.5">
+            {history.packages.map((p) => {
+              const isCurrent = p.package_id === currentId;
+              return (
+                <button
+                  key={p.package_id}
+                  onClick={() => onPick(p.package_id)}
+                  className={cn(
+                    "w-full text-left px-2 py-1.5 rounded-md text-[11px] hover:bg-bg-panel transition-colors flex items-start gap-2",
+                    isCurrent && "bg-brand-600/20 text-brand-200",
+                  )}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-fg truncate">{p.topic || "(no topic)"}</div>
+                    <div className="text-[10px] text-fg-subtle flex items-center gap-2 mt-0.5">
+                      <span>{p.resource_count} 项</span>
+                      <span>·</span>
+                      <span>{p.total_minutes} 分</span>
+                      <span>·</span>
+                      <span>{(p.avg_confidence * 100).toFixed(0)}% 置信</span>
+                      {p.created_at && (
+                        <>
+                          <span>·</span>
+                          <span>
+                            {new Date(p.created_at).toLocaleDateString("zh-CN")}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {isCurrent && (
+                    <Check className="w-3 h-3 text-brand-400 shrink-0 mt-0.5" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
