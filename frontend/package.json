@@ -48,10 +48,10 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^9.0.0",
     "eslint-config-next": "^16.2.3",
-    "jsdom": "^29.1.1",
+    "jsdom": "^26.1.0",
     "postcss": "^8.4.49",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.9"
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=20.0.0"
