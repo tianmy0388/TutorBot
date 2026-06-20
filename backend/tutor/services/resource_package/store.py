@@ -389,7 +389,10 @@ class ResourcePackageStore:
         """List package summaries (header only, no resources) for a user.
 
         Returns a list of dicts (ResourcePackage.summary() shape + user_id)
-        ordered by created_at DESC.
+        ordered by created_at DESC. Each item includes a ``types`` list
+        of the resource-type values present in the package; this is
+        fetched with a single batched query so the list call stays
+        O(1) round-trips regardless of result size.
         """
         self._ensure_engine()
         async with self._with_session() as session:
@@ -402,7 +405,25 @@ class ResourcePackageStore:
                 stmt = stmt.where(PackageRow.topic.like(f"%{topic}%"))
             stmt = stmt.order_by(PackageRow.created_at.desc()).limit(limit).offset(offset)
             rows = (await session.execute(stmt)).scalars().all()
-            return [self._row_to_summary(r) for r in rows]
+            if not rows:
+                return []
+            # Batched type lookup: one IN query for all rows.
+            ids = [r.package_id for r in rows]
+            type_rows = (
+                await session.execute(
+                    select(ResourceRow.package_id, ResourceRow.type).where(
+                        ResourceRow.package_id.in_(ids)
+                    )
+                )
+            ).all()
+            types_by_pkg: dict[str, set[str]] = {pid: set() for pid in ids}
+            for pid, t in type_rows:
+                if pid in types_by_pkg:
+                    types_by_pkg[pid].add(t)
+            return [
+                self._row_to_summary(r, sorted(types_by_pkg[r.package_id]))
+                for r in rows
+            ]
 
     async def count(self, user_id: str) -> int:
         self._ensure_engine()
@@ -504,7 +525,19 @@ class ResourcePackageStore:
         )
 
     @staticmethod
-    def _row_to_summary(row: PackageRow) -> dict[str, Any]:
+    def _row_to_summary(
+        row: PackageRow,
+        types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Materialise a package row to the wire summary shape.
+
+        The frontend (``/resources`` page) renders a per-package chip
+        strip of resource types, so ``types`` must be present even when
+        only the header row is loaded. Callers that have not pre-fetched
+        the type set pass ``None`` and we default to an empty list; the
+        list endpoint (see :meth:`list`) supplies a real value via a
+        single batched query to avoid an N+1.
+        """
         return {
             "package_id": row.package_id,
             "user_id": row.user_id,
@@ -513,6 +546,7 @@ class ResourcePackageStore:
             "total_minutes": row.total_minutes,
             "avg_confidence": row.avg_confidence,
             "generated_by": list(row.generated_by or []),
+            "types": list(types or []),
             "created_at": row.created_at.isoformat() if row.created_at else None,
         }
 

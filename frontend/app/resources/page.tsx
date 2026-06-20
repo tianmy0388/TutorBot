@@ -52,7 +52,7 @@ export default function ResourcesPage() {
   }
 
   const filtered = items.filter(
-    (p) => typeFilter === "all" || p.types.includes(typeFilter),
+    (p) => typeFilter === "all" || (p.types ?? []).includes(typeFilter),
   );
 
   return (
@@ -119,7 +119,7 @@ export default function ResourcesPage() {
                 </div>
               </div>
               <div className="text-[11px] text-fg-muted mt-1">
-                {p.resource_count} 项 · {p.types.map((t) => TYPE_LABELS[t as ResourceType] ?? t).join("、")} · 平均置信度 {Math.round(p.avg_confidence * 100)}%
+                {p.resource_count} 项 · {(p.types ?? []).map((t) => TYPE_LABELS[t as ResourceType] ?? t).join("、") || "—"} · 平均置信度 {Math.round((p.avg_confidence ?? 0) * 100)}%
               </div>
             </button>
           ))}
