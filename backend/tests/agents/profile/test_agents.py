@@ -7,6 +7,9 @@ any real provider. Real LLM behaviour is verified by the live e2e test.
 from __future__ import annotations
 
 import asyncio
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +31,21 @@ from tutor.services.learner_profile.schema import (
     apply_diff,
     empty_profile,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_profile_singleton():
+    """Reset profile builder singleton between tests."""
+    from tutor.services.learner_profile import (
+        reset_profile_builder,
+        reset_profile_store,
+    )
+
+    reset_profile_builder()
+    reset_profile_store()
+    yield
+    reset_profile_builder()
+    reset_profile_store()
 
 
 def _mock_llm(response_content: str):
