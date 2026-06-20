@@ -16,7 +16,7 @@ import type {
   WSServerMessage,
 } from "./types";
 
-export type StreamEventHandler = (event: StreamEvent) => void;
+export type StreamEventHandler = (event: StreamEvent | WSServerMessage) => void;
 
 export interface WsClientOptions {
   url: string;
@@ -111,6 +111,10 @@ export class WsClient {
 
     // Skip protocol-level messages
     if (parsed.type === "pong" || parsed.type === "ack") return;
+    if (parsed.type === "job_submitted") {
+      this.opts.onEvent?.(parsed);
+      return;
+    }
 
     const event: StreamEvent = {
       type: parsed.type,

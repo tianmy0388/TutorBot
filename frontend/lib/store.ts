@@ -14,7 +14,9 @@ import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type {
   AssessmentReport,
+  ChatMessage,
   LearnerProfileDetail,
+  MessageRole,
   PlannedPath,
   QuestionUnderstanding,
   ResourcePackage,
@@ -23,22 +25,10 @@ import type {
   TutoringAnswer,
   EnrichmentSuggestion,
 } from "./types";
+import { reduceJobEvent, type JobsState } from "./job-reducer";
 
-// ---------------------------------------------------------------------------
-// Message (chat history)
-// ---------------------------------------------------------------------------
-
-export type MessageRole = "user" | "assistant" | "system" | "agent";
-
-export interface ChatMessage {
-  id: string;
-  role: MessageRole;
-  agent?: string; // for role==="agent" trace events
-  content: string;
-  stage?: string;
-  timestamp: number;
-  metadata?: Record<string, unknown>;
-}
+// Re-export so existing consumers can keep importing ChatMessage from store.
+export type { ChatMessage, MessageRole };
 
 // ---------------------------------------------------------------------------
 // Active turn
@@ -74,6 +64,24 @@ export interface ResourceSelection {
 }
 
 // ---------------------------------------------------------------------------
+// Incoming stream event (loose shape — both StreamEvent and WSServerMessage)
+// ---------------------------------------------------------------------------
+
+/** Stream event with optional content/metadata (WSServerMessage-compatible). */
+export type IncomingStreamEvent = StreamEvent | {
+  type: import("./types").StreamEventType;
+  source?: string;
+  stage?: string;
+  content?: string;
+  metadata?: Record<string, unknown>;
+  session_id?: string;
+  turn_id?: string;
+  seq?: number;
+  timestamp?: number;
+  event_id?: string;
+};
+
+// ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
@@ -84,6 +92,10 @@ export interface TutorState {
   language: "zh" | "en";
   messages: ChatMessage[];
   activeTurn: ActiveTurn;
+
+  // Jobs (Task 3: per-job state, replaces the single activeTurn model)
+  jobsById: JobsState["jobsById"];
+  jobOrder: JobsState["jobOrder"];
 
   // Profile
   profile: LearnerProfileDetail | null;
@@ -137,8 +149,10 @@ export interface TutorState {
   // Chat actions
   addMessage: (msg: Omit<ChatMessage, "id" | "timestamp">) => void;
   startActiveTurn: (turnId: string, capability: string) => void;
-  applyStreamEvent: (ev: StreamEvent) => void;
+  applyStreamEvent: (ev: IncomingStreamEvent) => void;
   completeActiveTurn: (result: Record<string, unknown> | null, error: string | null) => void;
+  /** Internal: route a typed reducer event through the pure job reducer. */
+  applyReducerEvent: (event: import("./job-reducer").ReducerEvent) => void;
   resetSession: () => void;
 }
 
@@ -165,6 +179,9 @@ export const useTutorStore = create<TutorState>()(
     language: "zh",
     messages: [],
     activeTurn: newActiveTurn(),
+
+    jobsById: {},
+    jobOrder: [],
 
     profile: null,
     profileLoaded: false,
@@ -276,16 +293,62 @@ export const useTutorStore = create<TutorState>()(
 
     applyStreamEvent: (ev) =>
       set((state) => {
-        const turn = state.activeTurn;
-        if (turn.phase === "idle") return state;
-        const events = [...turn.events, ev];
-        let { text_buffer, thinking_buffer } = turn;
-        if (ev.type === "content") {
-          text_buffer = text_buffer + ev.content;
-        } else if (ev.type === "thinking") {
-          thinking_buffer = thinking_buffer + ev.content;
+        // Task 3: events are now owned by jobs (see job-reducer.ts). The
+        // single-activeTurn heuristic was the root cause of the no-output
+        // regression — we no longer drop events when no turn is "active".
+        const md = (ev.metadata ?? {}) as Record<string, unknown>;
+        const jobId = typeof md.job_id === "string" ? md.job_id : null;
+        if (!jobId) {
+          // Legacy / protocol error: surface it as a system message but
+          // do NOT guess the owning job from currentCapability.
+          return {
+            messages: [
+              ...state.messages,
+              {
+                id: nextMessageId(),
+                role: "system",
+                content: "协议错误：流事件缺少 job_id",
+                timestamp: Date.now(),
+                metadata: { protocol_error: true, event_type: ev.type },
+              },
+            ],
+          };
         }
-        return { activeTurn: { ...turn, events, text_buffer, thinking_buffer } };
+        // Normalise to a StreamEvent-shaped object for the reducer.
+        const streamEv: StreamEvent = {
+          type: ev.type,
+          source: ev.source ?? "",
+          stage: ev.stage ?? "",
+          content: ev.content ?? "",
+          metadata: ev.metadata ?? {},
+          session_id: ev.session_id ?? "",
+          turn_id: ev.turn_id ?? "",
+          seq: ev.seq ?? 0,
+          timestamp: ev.timestamp ?? Date.now() / 1000,
+          event_id: ev.event_id ?? "",
+        };
+        const next = reduceJobEvent(
+          { jobsById: state.jobsById, jobOrder: state.jobOrder, messages: state.messages },
+          { type: "stream", event: streamEv, job_id: jobId },
+        );
+        return {
+          jobsById: next.jobsById,
+          jobOrder: next.jobOrder,
+          messages: next.messages,
+        };
+      }),
+
+    applyReducerEvent: (event) =>
+      set((state) => {
+        const next = reduceJobEvent(
+          { jobsById: state.jobsById, jobOrder: state.jobOrder, messages: state.messages },
+          event,
+        );
+        return {
+          jobsById: next.jobsById,
+          jobOrder: next.jobOrder,
+          messages: next.messages,
+        };
       }),
 
     completeActiveTurn: (result, error) =>
@@ -315,6 +378,8 @@ export const useTutorStore = create<TutorState>()(
       set({
         messages: [],
         activeTurn: newActiveTurn(),
+        jobsById: {},
+        jobOrder: [],
         latestPackage: null,
         resourceSelection: { packageId: null, selectedResourceId: null },
         plannedPath: null,

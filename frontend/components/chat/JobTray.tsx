@@ -55,11 +55,17 @@ const STATUS_META: Record<
     color: "text-brand-300",
     ring: "bg-brand-950/30 border-brand-800/40",
   },
-  completed: {
+  succeeded: {
     label: "已完成",
     icon: CheckCircle2,
     color: "text-green-300",
     ring: "bg-green-950/30 border-green-800/40",
+  },
+  partial: {
+    label: "部分完成",
+    icon: CheckCircle2,
+    color: "text-yellow-300",
+    ring: "bg-yellow-950/30 border-yellow-800/40",
   },
   failed: {
     label: "失败",
@@ -220,7 +226,7 @@ function JobRow({
   onCancel: () => void;
   onRemove: () => void;
 }) {
-  const sm = STATUS_META[job.status] || STATUS_META.completed;
+  const sm = STATUS_META[job.status] || STATUS_META.succeeded;
   const SIcon = sm.icon;
   const cm = CAPABILITY_META[job.capability] || {
     icon: PlayCircle,

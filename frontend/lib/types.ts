@@ -10,6 +10,22 @@
  */
 
 // ============================================================================
+// Chat messages
+// ============================================================================
+
+export type MessageRole = "user" | "assistant" | "system" | "agent";
+
+export interface ChatMessage {
+  id: string;
+  role: MessageRole;
+  agent?: string;
+  content: string;
+  stage?: string;
+  timestamp: number;
+  metadata?: Record<string, unknown>;
+}
+
+// ============================================================================
 // Stream events (from StreamBus on backend)
 // ============================================================================
 
@@ -28,7 +44,8 @@ export type StreamEventType =
   | "error"
   | "cancelled"
   | "session"
-  | "done";
+  | "done"
+  | "job_terminal";
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -61,7 +78,7 @@ export interface WSHistoryMessage {
 
 export interface WSServerMessage {
   // Stream events (type === one of StreamEventType)
-  type: StreamEventType | "ack" | "pong";
+  type: StreamEventType | "ack" | "pong" | "job_submitted";
   source?: string;
   stage?: string;
   content?: string;
@@ -72,6 +89,12 @@ export interface WSServerMessage {
   seq?: number;
   timestamp?: number;
   event_id?: string;
+  // job_submitted fields
+  job_id?: string;
+  capability?: string;
+  status?: JobStatus;
+  created_at?: string;
+  user_id?: string;
 }
 
 // ============================================================================
@@ -307,15 +330,61 @@ export interface PackageStatsResponse {
 }
 
 // ============================================================================
-// Jobs (Phase 5.2)
+// Jobs (Phase 5.2 + 5.3 contract)
 // ============================================================================
 
 export type JobStatus =
   | "pending"
   | "running"
-  | "completed"
+  | "succeeded"
+  | "partial"
   | "failed"
   | "cancelled";
+
+export type JobTerminalStatus = "succeeded" | "partial" | "failed" | "cancelled";
+
+export interface JobProgress {
+  stage: string;
+  percent: number;
+  active_agents: string[];
+}
+
+export interface JobError {
+  code: string;
+  message: string;
+  diagnostic?: string;
+  retryable: boolean;
+}
+
+export interface JobWarning {
+  code: string;
+  message: string;
+  resource_type?: string | null;
+  context?: Record<string, unknown>;
+}
+
+export interface ArtifactResult {
+  resource_type: string;
+  status: "succeeded" | "failed";
+  resource_id?: string | null;
+  duration_seconds?: number;
+  agents?: string[];
+  error?: JobError | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface JobResultContract {
+  job_id: string;
+  capability: string;
+  status: JobTerminalStatus;
+  assistant_message: string;
+  progress?: JobProgress;
+  artifacts?: ArtifactResult[];
+  warnings?: JobWarning[];
+  error?: JobError | null;
+  event_cursor?: number;
+  finished_at?: string | null;
+}
 
 export interface JobSummary {
   job_id: string;
