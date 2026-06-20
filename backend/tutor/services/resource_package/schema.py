@@ -202,6 +202,18 @@ class Resource(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------
+    # Evidence fields (Task 11)
+    # ------------------------------------------------------------------
+    # These are the four evidence surfaces the UI shows next to every
+    # resource: where the facts came from, how good the resource is,
+    # whether the safety agent flagged anything, and which agents ran.
+
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    review: dict[str, Any] = Field(default_factory=dict)
+    safety: dict[str, Any] = Field(default_factory=dict)
+    unverified_claims: list[str] = Field(default_factory=list)
+
+    # ------------------------------------------------------------------
     # Validators
     # ------------------------------------------------------------------
 
