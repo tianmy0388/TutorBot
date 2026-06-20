@@ -60,6 +60,14 @@ async def lifespan(app: FastAPI):
         logger.exception(f"ProfileStore init failed: {exc!r}")
 
     try:
+        from tutor.services.resource_package.store import get_resource_package_store
+
+        await get_resource_package_store().init()
+        logger.info("ResourcePackageStore initialised")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"ResourcePackageStore init failed: {exc!r}")
+
+    try:
         yield
     finally:
         logger.info("Tutor shutting down")

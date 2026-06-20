@@ -1,22 +1,39 @@
-"""Resource-generation HTTP endpoints (Phase 2 stub).
+"""Resource HTTP endpoints.
 
-Real implementation lands in Phase 5 with proper async jobs + persistence.
-For Phase 2 the entry point is the WebSocket at ``/api/v1/ws``.
+Two layers:
 
-Endpoints:
-- ``GET /api/v1/resources/info`` — agent manifest + sample supported types
-- ``GET /api/v1/resources/types`` — ResourceType enum values
+1. Static metadata (Phase 2):
+   - ``GET /api/v1/resources/info``   — subsystem manifest
+   - ``GET /api/v1/resources/types``  — ResourceType enum
+
+2. Persistence-backed history (Phase 5):
+   - ``GET    /api/v1/resources/packages/{user_id}``
+   - ``GET    /api/v1/resources/packages/{user_id}/{package_id}``
+   - ``GET    /api/v1/resources/packages/{user_id}/{package_id}/resources/{resource_id}``
+   - ``DELETE /api/v1/resources/packages/{user_id}/{package_id}``
+   - ``GET    /api/v1/resources/packages/{user_id}/stats``
+
+The actual generation still happens through the WebSocket at
+``/api/v1/ws`` with ``capability='resource_generation'``; the
+persistence layer records completed packages there.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 
-from tutor.services.resource_package.schema import ResourceType
+from tutor.services.resource_package.schema import Resource, ResourceType
+from tutor.services.resource_package.store import get_resource_package_store
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# Static metadata (unchanged from Phase 2)
+# ---------------------------------------------------------------------------
 
 
 @router.get("/resources/info")
@@ -35,8 +52,10 @@ async def resources_info() -> dict[str, Any]:
             "content_and_pedagogy",
             "parallel_resource_generation",
             "quality_review",
+            "anti_hallucination",
             "package_assembly",
             "path_integration",
+            "persistence",
         ],
         "agents": [
             "IntentUnderstandingAgent",
@@ -47,6 +66,7 @@ async def resources_info() -> dict[str, Any]:
             "ManimVideoAgent",
             "CodeSandboxAgent",
             "QualityReviewerAgent",
+            "AntiHallucinationAgent",
         ],
     }
 
@@ -74,12 +94,106 @@ async def resource_types() -> dict[str, Any]:
                     ResourceType.READING: "PedagogyAgent (reading mode)",
                     ResourceType.VIDEO: "ManimVideoAgent (two-stage)",
                     ResourceType.CODE: "CodeSandboxAgent",
-                    ResourceType.PPT: "(Phase 5)",
+                    ResourceType.PPT: "(Phase 5.3)",
                 }.get(t, "TBD"),
             }
             for t in ResourceType
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Persistence-backed package history (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/resources/packages/{user_id}")
+async def list_packages(
+    user_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    since_hours: int | None = Query(None, ge=1, le=24 * 365),
+    topic: str | None = Query(None, max_length=200),
+) -> dict[str, Any]:
+    """List resource package summaries for a user (newest first).
+
+    Each entry is the lightweight summary shape returned by
+    :meth:`ResourcePackage.summary`, plus ``user_id``. Use the package
+    detail endpoint to fetch the full payload (including all resources).
+    """
+    store = get_resource_package_store()
+    since = (
+        datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        if since_hours is not None
+        else None
+    )
+    items = await store.list(
+        user_id, limit=limit, offset=offset, since=since, topic=topic
+    )
+    total = await store.count(user_id)
+    return {
+        "user_id": user_id,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": items,
+    }
+
+
+@router.get("/resources/packages/{user_id}/stats")
+async def user_stats(user_id: str) -> dict[str, Any]:
+    """Aggregate stats for one user's generated resources."""
+    store = get_resource_package_store()
+    return await store.stats(user_id)
+
+
+@router.get("/resources/packages/{user_id}/{package_id}")
+async def get_package(user_id: str, package_id: str) -> dict[str, Any]:
+    """Return one full :class:`ResourcePackage` (header + all resources)."""
+    store = get_resource_package_store()
+    pkg = await store.get(package_id)
+    if pkg is None:
+        raise HTTPException(status_code=404, detail="package not found")
+    if (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
+        # Don't leak across users
+        raise HTTPException(status_code=404, detail="package not found")
+    return pkg.model_dump(mode="json")
+
+
+@router.get(
+    "/resources/packages/{user_id}/{package_id}/resources/{resource_id}"
+)
+async def get_resource(
+    user_id: str, package_id: str, resource_id: str
+) -> dict[str, Any]:
+    """Return one resource inside a package (lighter than the full package)."""
+    store = get_resource_package_store()
+    res: Resource | None = await store.get_resource(resource_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="resource not found")
+    pkg = await store.get(package_id)
+    if pkg is None or (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
+        raise HTTPException(status_code=404, detail="resource not found")
+    return res.model_dump(mode="json")
+
+
+@router.delete("/resources/packages/{user_id}/{package_id}")
+async def delete_package(user_id: str, package_id: str) -> dict[str, Any]:
+    """Delete one package (and its child resources)."""
+    store = get_resource_package_store()
+    pkg = await store.get(package_id)
+    if pkg is None or (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
+        raise HTTPException(status_code=404, detail="package not found")
+    deleted = await store.delete(package_id)
+    return {"deleted": deleted, "package_id": package_id}
+
+
+@router.delete("/resources/packages/{user_id}")
+async def delete_all_packages(user_id: str) -> dict[str, Any]:
+    """Delete **all** packages for a user (use with care)."""
+    store = get_resource_package_store()
+    count = await store.delete_user(user_id)
+    return {"deleted": count, "user_id": user_id}
 
 
 __all__ = ["router"]

@@ -65,6 +65,10 @@ from tutor.services.resource_package.schema import (
     ResourceType,
     ReviewVerdict,
 )
+from tutor.services.resource_package.store import (
+    ResourcePackageStore,
+    get_resource_package_store,
+)
 
 
 class ResourceGenerationCapability(BaseCapability):
@@ -84,6 +88,7 @@ class ResourceGenerationCapability(BaseCapability):
             "anti_hallucination",
             "package_assembly",
             "path_integration",
+            "persistence",
         ],
         tools_used=["rag", "web_search"],
         cli_aliases=["resource", "learn", "study"],
@@ -103,6 +108,7 @@ class ResourceGenerationCapability(BaseCapability):
         code_sandbox: CodeSandboxAgent | None = None,
         quality_reviewer: QualityReviewerAgent | None = None,
         anti_hallucination: AntiHallucinationAgent | None = None,
+        package_store: ResourcePackageStore | None = None,
     ) -> None:
         super().__init__()
         self.builder = builder
@@ -116,12 +122,19 @@ class ResourceGenerationCapability(BaseCapability):
         self.code_sandbox = code_sandbox or CodeSandboxAgent()
         self.quality_reviewer = quality_reviewer or QualityReviewerAgent()
         self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
+        self.package_store = package_store
 
     @property
     def _builder(self) -> ProfileBuilder:
         if self.builder is None:
             self.builder = get_profile_builder()
         return self.builder
+
+    @property
+    def _store(self) -> ResourcePackageStore:
+        if self.package_store is None:
+            self.package_store = get_resource_package_store()
+        return self.package_store
 
     # ------------------------------------------------------------------
     # Entry point
@@ -376,6 +389,30 @@ class ResourceGenerationCapability(BaseCapability):
                 await self._builder.store.replace(profile, source="resource_capability")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"Profile metadata update failed: {exc!r}")
+
+        # ------------------------------------------------------------------
+        # Stage 11: Persistence — write the package to the persistent store
+        # ------------------------------------------------------------------
+        async with stream.stage("persistence", source="resource_capability"):
+            try:
+                await self._store.save(package, user_id=context.user_id)
+                await stream.observation(
+                    f"资源包已持久化: pkg={package.package_id[:12]}… "
+                    f"user={context.user_id} resources={len(package.resources)}",
+                    source="resource_capability",
+                    stage="persistence",
+                    metadata={
+                        "package_id": package.package_id,
+                        "user_id": context.user_id,
+                        "resource_count": len(package.resources),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(f"ResourcePackage persistence failed: {exc!r}")
+                await stream.error(
+                    f"资源包持久化失败 (不影响本轮): {exc}",
+                    source="resource_capability",
+                )
 
         # ------------------------------------------------------------------
         # Emit final result
