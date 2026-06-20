@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AppShell } from "@/components/layout/AppShell";
+import { SettingsModal } from "@/components/layout/SettingsModal";
+import { ThemeHydrator } from "@/components/layout/ThemeHydrator";
 
 export const metadata: Metadata = {
   title: "Tutor — Multi-Agent Learning",
@@ -21,7 +24,11 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN" suppressHydrationWarning>
-      <body className="bg-bg text-fg antialiased min-h-screen">{children}</body>
+      <body className="bg-bg text-fg antialiased min-h-screen">
+        <ThemeHydrator />
+        <AppShell>{children}</AppShell>
+        <SettingsModal />
+      </body>
     </html>
   );
 }

@@ -30,6 +30,8 @@ import type {
   Resource,
   ResourcePackage,
   ResourcePackageSummary,
+  ResourcePlan,
+  ResourcePlanConfirmResponse,
   RuntimeConfig,
   StrategyDecision,
   WebSearchSectionPatch,
@@ -310,6 +312,52 @@ export const deleteKnowledgeDocument = (libId: string, docId: string) =>
   request<{ deleted: boolean; id: string }>(
     `/knowledge-bases/${encodeURIComponent(libId)}/documents/${encodeURIComponent(docId)}`,
     { method: "DELETE" },
+  );
+
+// ---------------------------------------------------------------------------
+// Plans (Task 4)
+// ---------------------------------------------------------------------------
+
+export const createPlan = (req: {
+  message: string;
+  user_id?: string;
+  language?: string;
+}) =>
+  request<ResourcePlan>("/plans", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+
+export const confirmPlan = (
+  planId: string,
+  selectedTypes: string[],
+  metadata: Record<string, unknown> = {},
+) =>
+  request<ResourcePlanConfirmResponse>(
+    `/plans/${encodeURIComponent(planId)}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        selected_types: { types: selectedTypes },
+        metadata,
+      }),
+    },
+  );
+
+export const retryJob = (userId: string, jobId: string, resourceTypes: string[]) =>
+  request<{
+    job_id: string;
+    parent_job_id: string;
+    selected_types: string[];
+    preserved_artifacts: string[];
+    topic: string;
+    status: string;
+  }>(
+    `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}/retry`,
+    {
+      method: "POST",
+      body: JSON.stringify({ resource_types: resourceTypes }),
+    },
   );
 
 // ---------------------------------------------------------------------------

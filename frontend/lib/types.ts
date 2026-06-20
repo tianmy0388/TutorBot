@@ -318,6 +318,29 @@ export interface PackageListResponse {
   items: ResourcePackageSummary[];
 }
 
+// ============================================================================
+// Resource plan (Task 4)
+// ============================================================================
+
+export interface ResourcePlan {
+  plan_id: string;
+  intent: string;
+  topic: string;
+  recommended: string[];
+  optional: string[];
+  estimated_seconds: number;
+  rationale: string;
+}
+
+export interface ResourcePlanConfirmResponse {
+  job_id: string;
+  plan_id: string;
+  selected_types: string[];
+  topic: string;
+  estimated_seconds: number;
+  status: string;
+}
+
 export interface PackageStatsResponse {
   package_count: number;
   resource_count: number;
