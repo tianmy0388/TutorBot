@@ -130,3 +130,6 @@ desktop.ini
 *.local
 *.bak
 *.tmp
+
+# Isolated feature worktrees
+.worktrees/
