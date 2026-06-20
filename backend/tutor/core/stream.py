@@ -54,6 +54,7 @@ class StreamEventType(str, Enum):
     # Session
     SESSION = "session"             # Session-level info (e.g. session_id)
     DONE = "done"                   # Terminal marker for the turn
+    JOB_TERMINAL = "job_terminal"   # JobRunner: normalized result contract
 
 
 @dataclass
