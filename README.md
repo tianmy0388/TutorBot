@@ -161,10 +161,23 @@ Tutor/
 ## 路线图
 
 - [x] **Phase 1** — 项目脚手架 + 核心基础设施（BaseAgent / StreamBus / Orchestrator / FastAPI）
-- [x] **Phase 2** — 画像系统 + 知识图谱 + 6 类资源生成 + Manim 视频 + 防幻觉
+- [x] **Phase 2** — 画像系统 + 知识图谱 + 7 类资源生成（含 PPT 教案）+ Manim 视频 + 防幻觉
 - [x] **Phase 3** — 学习路径规划 + 即时智能辅导 + 多维效果评估 + 自适应策略
 - [x] **Phase 4** — 前端 UI 完整实现（Chat / Profile / Resource Cards / KG Path / Tutor / Assessment）
-- [ ] **Phase 5** — 知识库扩充 + 单元测试 + README 完善 + Docker Compose（可选）
+- [x] **Phase 5** — 资源持久化 + 异步后台任务 + PPT 生成（python-pptx）
+- [ ] **Phase 6（可选）** — 知识库扩充 + 单元测试 + Docker Compose
+
+## 完整能力一览（Phase 5 后）
+
+| 能力 | 阶段 | 关键特性 |
+|---|---|---|
+| **profile** | 5 | 6 维画像（认知风格/节奏/动机/模态/知识/错误）+ ProfileStore 持久化 |
+| **resource_generation** | 12 | 7 类资源（document / mindmap / exercise / reading / video / code / **ppt**）+ 资源包持久化 + 异步执行 |
+| **path_planning** | 5 | YAML 知识图谱 + NetworkX 拓扑排序 + 画像剪枝 |
+| **tutoring** | 5 | 4 层答案（TL;DR / 直觉 / 原理 / 示例）+ 多模态补充 |
+| **assessment** | 5 | 6 维评分 + trajectory + 自适应策略 |
+| **jobs (Phase 5.2)** | — | 异步任务队列：submit / subscribe / cancel / replay |
+| **persistence (Phase 5.1)** | — | 资源包 + jobs + profile + events 全 SQLite 持久化 |
 
 ## 常见问题
 
@@ -187,7 +200,13 @@ pip install -e .
 - 浏览器控制台是否有 CORS 错误
 
 ### 没有 LLM API Key 能跑吗？
-可以。系统会优雅降级：部分 sub-agent 报错但不影响整条 pipeline 跑通，仍会产出 result 事件，前端能看到流式轨迹和最终结果结构。
+可以，但部分 sub-agent 会报错并优雅降级。**完整功能需要至少一个 LLM Provider 的 API Key**（OpenAI / Anthropic / DeepSeek 任选），在 `.env` 中设置：
+```bash
+TUTOR_LLM_PROVIDER=openai
+TUTOR_LLM_API_KEY=sk-...
+TUTOR_LLM_MODEL=gpt-4o-mini
+```
+Agent 默认用 `gpt-4o-mini`，对中文支持足够；要更好的输出质量可设 `gpt-4o` 或 `claude-sonnet`。
 
 ### Manim 视频生成失败？
 确认已安装：
@@ -196,6 +215,9 @@ python -c "import manim; print(manim.__version__)"   # 期望 0.20.x
 ffmpeg -version                                       # 任意较新版本
 latex --version                                       # 可选，用于公式渲染
 ```
+
+### 任务一直 "pending" / "running" 不结束？
+查看后端日志是否有 LLM 调用错误（最常见的：`401 invalid api key`）。Job 会跑完所有 stage 直到 done/error，单个 stage 失败不会终止整个 job，但最终 result 事件中可能缺一些子资源。
 
 ## 许可证
 
