@@ -133,6 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     # Routers
+    from tutor.api.routers.config import router as config_router
     from tutor.api.routers.health import router as health_router
     from tutor.api.routers.jobs import router as jobs_router
     from tutor.api.routers.knowledge_graph import router as kg_router
@@ -145,6 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(resources_router, prefix="/api/v1", tags=["resources"])
     app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
     app.include_router(plans_router, prefix="/api/v1", tags=["plans"])
+    app.include_router(config_router, prefix="/api/v1", tags=["config"])
     app.include_router(ws_router, prefix="/api/v1", tags=["websocket"])
 
     # Root info
