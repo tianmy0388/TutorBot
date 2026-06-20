@@ -63,6 +63,16 @@ test-results/
 .env.local
 .env.*.local
 
+# MCP config — the template is committed (.mcp.json.example); the real
+# .mcp.json is git-ignored because users may put secrets in env values.
+# ${VAR} substitution is supported, so ignoring is a safety net, not a
+# requirement.
+.mcp.json
+!.mcp.json.example
+
+# MCP subprocess working dirs
+data/mcp_output/
+
 # IDEs
 .idea/
 .vscode/

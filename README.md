@@ -82,7 +82,7 @@ python -m tutor api
 cd frontend
 npm install
 npm run dev
-# 浏览器访问 http://localhost:3000
+# 浏览器访问 http://localhost:3010
 ```
 
 ### 3. 验证
@@ -102,7 +102,7 @@ curl http://localhost:8000/api/v1/capabilities
 
 ### 4. 第一条对话
 
-打开 `http://localhost:3000`,在聊天框输入:
+打开 `http://localhost:3010`,在聊天框输入:
 
 - **画像构建**: `我是计算机专业大二学生,想系统学习深度学习,目标是做毕业项目`
 - **资源生成**: `系统学习 Transformer 注意力机制`(等待 30-60 秒,生成 6 类资源)
@@ -196,7 +196,7 @@ pip install -e .
 ### 前端启动报 `Cannot connect to backend`
 检查：
 - 后端是否在 `http://localhost:8000` 正常监听
-- `.env` 中 `TUTOR_CORS_ORIGINS` 是否包含 `http://localhost:3000`
+- `.env` 中 `TUTOR_CORS_ORIGINS` 是否包含 `http://localhost:3010`
 - 浏览器控制台是否有 CORS 错误
 
 ### 没有 LLM API Key 能跑吗？

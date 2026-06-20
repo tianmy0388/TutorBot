@@ -7,13 +7,14 @@ process-wide.
 
 from __future__ import annotations
 
+import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -25,12 +26,34 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="TUTOR_",
-        env_file=".env",
+        # pydantic-settings resolves ``env_file`` relative to the process
+        # cwd, so running from ``backend/`` would miss the project-root
+        # .env. Pass a tuple to try both locations.
+        env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         case_sensitive=False,
         extra="ignore",
     )
+
+    @classmethod
+    def parse_env_var(cls, field_name: str, raw_value: Any) -> Any:
+        """Override pydantic-settings' env-var parser to accept comma-separated
+        lists in addition to JSON-style lists.
+
+        The ``.env`` file convention in this project uses
+        ``TUTOR_CORS_ORIGINS=http://a,http://b``; pydantic-settings
+        otherwise expects a JSON array. We split on commas and strip
+        whitespace so the human-friendly form keeps working.
+        """
+        # Defer to the default for non-list fields.
+        hint = cls.model_fields[field_name].annotation
+        origin = getattr(hint, "__origin__", None)
+        if origin is list and isinstance(raw_value, str) and not raw_value.lstrip().startswith(
+            ("[", "{")
+        ):
+            return [item.strip() for item in raw_value.split(",") if item.strip()]
+        return super().parse_env_var(field_name, raw_value)
 
     # ---------- General ----------
     env: Literal["development", "staging", "production", "test"] = "development"
@@ -41,9 +64,27 @@ class Settings(BaseSettings):
     # ---------- Server ----------
     host: str = "0.0.0.0"
     port: int = 8000
-    cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
+    # ``NoDecode`` (via Field metadata) tells pydantic-settings NOT to call
+    # ``json.loads()`` on the raw env-string; the field_validator below
+    # then handles both the human-friendly comma-separated form (``a,b``)
+    # and the JSON form (``["a","b"]``).
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:3010", "http://127.0.0.1:3010"],
     )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_cors_origins(cls, value: Any) -> Any:
+        """Allow comma-separated strings in ``.env`` (the common form),
+        not just JSON arrays which pydantic-settings expects by default."""
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith(("[", "{")):
+                return json.loads(stripped)
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        return value
 
     # ---------- LLM ----------
     llm_provider: Literal["openai", "anthropic", "deepseek", "azure_openai", "ollama", "custom"] = "openai"
@@ -64,6 +105,7 @@ class Settings(BaseSettings):
     embed_model: str = "text-embedding-3-small"
     embed_api_key: str = ""
     embed_base_url: str = "https://api.openai.com/v1"
+    embed_dimensions: int = 0  # 0 = use provider default; only some models support override
 
     # ---------- RAG ----------
     rag_provider: Literal["llamaindex"] = "llamaindex"
@@ -89,8 +131,16 @@ class Settings(BaseSettings):
 
     # ---------- Web Search ----------
     web_search_enabled: bool = False
-    web_search_provider: Literal["duckduckgo", "searxng", "bing"] = "duckduckgo"
+    web_search_provider: Literal["duckduckgo", "searxng", "bing", "mcp"] = "duckduckgo"
     web_search_max_results: int = 5
+
+    # ---------- MCP ----------
+    # Path to the MCP config file (JSON). When None, defaults to "./.mcp.json".
+    mcp_config_path: Path | None = None
+    # Web-search-via-MCP bindings: which server + which tool to call when
+    # ``TUTOR_WEB_SEARCH_PROVIDER=mcp``.
+    web_search_mcp_server: str = "MiniMax"
+    web_search_mcp_tool: str = "web_search"
 
     # ---------- Anti-Hallucination ----------
     anti_hallucination_enabled: bool = True

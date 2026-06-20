@@ -4,9 +4,9 @@
   "private": true,
   "description": "Tutor — 多智能体学习系统前端 (Next.js 16 + React 19 + Tailwind)",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p 3010",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 3010",
     "lint": "next lint",
     "type-check": "tsc --noEmit"
   },

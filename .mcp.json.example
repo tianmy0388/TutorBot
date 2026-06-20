@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "MiniMax": {
+      "_comment": "Template — copy to .mcp.json and fill in secrets. ${VAR} references are resolved from process env at load time.",
+      "command": "uvx",
+      "args": ["minimax-coding-plan-mcp"],
+      "env": {
+        "MINIMAX_API_KEY": "${MINIMAX_API_KEY}",
+        "MINIMAX_API_HOST": "https://api.minimaxi.com",
+        "MINIMAX_MCP_BASE_PATH": "./data/mcp_output",
+        "MINIMAX_API_RESOURCE_MODE": "url"
+      }
+    }
+  }
+}

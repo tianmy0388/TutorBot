@@ -17,10 +17,29 @@ from tutor.core.tool_protocol import BaseTool
 
 BUILTIN_TOOL_CLASSES: dict[str, str] = {
     "rag": "tutor.tools.rag_tool:RAGTool",
-    "web_search": "tutor.tools.web_search_tool:WebSearchTool",
+    # ``web_search`` is resolved dynamically at load time — see
+    # ``_resolve_web_search_class`` — because which implementation runs
+    # depends on ``TUTOR_WEB_SEARCH_PROVIDER``.
     "code_execution": "tutor.tools.code_execution_tool:CodeExecutionTool",
     "paper_search": "tutor.tools.paper_search_tool:PaperSearchTool",
 }
+
+
+def _resolve_web_search_class() -> str:
+    """Pick the right ``web_search`` backend based on settings.
+
+    Returns a fully-qualified ``"module:Class"`` import path.
+    """
+    try:
+        from tutor.services.config.settings import get_settings
+
+        settings = get_settings()
+    except Exception:  # pragma: no cover — fallback for first-import races
+        return "tutor.tools.web_search_tool:WebSearchTool"
+
+    if settings.web_search_provider == "mcp":
+        return "tutor.tools.mcp_web_search_tool:MCPWebSearchTool"
+    return "tutor.tools.web_search_tool:WebSearchTool"
 
 
 class ToolRegistry:
@@ -98,6 +117,23 @@ class ToolRegistry:
                 logger.warning(f"Tool {name!r}: failed to load ({exc})")
             except Exception as exc:
                 logger.error(f"Tool {name!r}: unexpected error ({exc!r})")
+
+        # ``web_search`` is the one name that may resolve to one of two
+        # implementations depending on the active provider. Resolve it
+        # last so any settings overrides are visible.
+        if "web_search" not in self._registry:
+            try:
+                path = _resolve_web_search_class()
+                module_name, _, class_name = path.partition(":")
+                module = importlib.import_module(module_name)
+                cls = getattr(module, class_name)
+                self.register(cls())
+            except ModuleNotFoundError as exc:
+                logger.warning(f"Tool 'web_search': module not found ({exc})")
+            except (AttributeError, TypeError) as exc:
+                logger.warning(f"Tool 'web_search': failed to load ({exc})")
+            except Exception as exc:
+                logger.error(f"Tool 'web_search': unexpected error ({exc!r})")
 
     def reset(self) -> None:
         with self._lock:
