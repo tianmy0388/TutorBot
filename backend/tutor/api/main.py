@@ -68,6 +68,18 @@ async def lifespan(app: FastAPI):
         logger.exception(f"ResourcePackageStore init failed: {exc!r}")
 
     try:
+        from tutor.services.jobs import get_job_runner, get_job_store
+
+        await get_job_store().init()
+        logger.info("JobStore initialised")
+
+        # On restart, mark any in-flight jobs as failed so they don't
+        # block the UI (the asyncio tasks are gone).
+        await get_job_runner().resume_active_jobs()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"JobStore init failed: {exc!r}")
+
+    try:
         yield
     finally:
         logger.info("Tutor shutting down")
@@ -98,6 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Routers
     from tutor.api.routers.health import router as health_router
+    from tutor.api.routers.jobs import router as jobs_router
     from tutor.api.routers.knowledge_graph import router as kg_router
     from tutor.api.routers.resources import router as resources_router
     from tutor.api.routers.unified_ws import router as ws_router
@@ -105,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router, prefix="/api/v1", tags=["health"])
     app.include_router(kg_router, prefix="/api/v1", tags=["knowledge-graph"])
     app.include_router(resources_router, prefix="/api/v1", tags=["resources"])
+    app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
     app.include_router(ws_router, prefix="/api/v1", tags=["websocket"])
 
     # Root info

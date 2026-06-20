@@ -1,25 +1,34 @@
 """Unified WebSocket endpoint — main streaming channel.
 
-The client connects, sends a JSON envelope describing the user turn, and
-receives a stream of :class:`StreamEvent` JSON frames.
+Two-phase protocol (Phase 5.2):
 
-Client → server messages
-------------------------
+    1. Client connects → may submit a job OR subscribe to an existing one.
 
-    {"type": "start_turn", "session_id": "...", "user_id": "...", "message": "..."}
-    {"type": "cancel", "turn_id": "..."}
-    {"type": "ping"}
+       Submit:
+           C → S: {"type": "submit_job", "user_id": ..., "message": ...,
+                    "capability": ..., "language": ...}
+           S → C: {"type": "job_submitted", "job_id": "..."}
+           (then S closes the WS for the submit leg)
 
-Server → client messages
-------------------------
+       Subscribe:
+           C → S: {"type": "subscribe_job", "job_id": "..."}
+           S → C: {"type": "ack", "for": "subscribe_job", "job_id": "..."}
+           S → C: <replay buffer of events>
+           S → C: <live events>
+           S → C: {"type": "done"} | {"type": "error"} | {"type": "cancelled"}
+           (server closes the WS)
 
-    StreamEvent JSON objects (see :class:`StreamEvent`):
-        {"type": "stage_start", "stage": "...", "source": "...", ...}
-        {"type": "content", "content": "chunk", ...}
-        {"type": "done", ...}
-        {"type": "error", ...}
+    2. Legacy protocol (Phase 2 — kept for back-compat):
+           C → S: {"type": "start_turn", "session_id": ..., ...}
+           S → C: <live events>
+           S → C: {"type": "done"}
+       Internally, ``start_turn`` now goes through ``JobRunner`` so the
+       job is persisted and any disconnect can be resumed via
+       ``subscribe_job``.
 
-Design inspired by DeepTutor's ``deeptutor/api/routers/unified_ws.py``.
+Other client messages:
+    {"type": "ping"}            → {"type": "pong"}
+    {"type": "cancel", "job_id": "..."} → {"type": "ack", "for": "cancel"}
 """
 
 from __future__ import annotations
@@ -32,8 +41,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from tutor.core.context import UnifiedContext
-from tutor.core.stream_bus import StreamBus
-from tutor.runtime import get_orchestrator
+from tutor.services.jobs import JobSubmit, get_job_runner
 
 router = APIRouter()
 
@@ -42,7 +50,7 @@ router = APIRouter()
 async def unified_ws(websocket: WebSocket) -> None:
     """Single WebSocket endpoint handling all client interactions."""
     await websocket.accept()
-    orchestrator = get_orchestrator()
+    runner = get_job_runner()
 
     try:
         while True:
@@ -54,20 +62,26 @@ async def unified_ws(websocket: WebSocket) -> None:
                 continue
 
             msg_type = envelope.get("type", "start_turn")
+
             if msg_type == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 continue
 
-            if msg_type == "start_turn":
-                await _handle_turn(websocket, orchestrator, envelope)
+            if msg_type == "submit_job":
+                await _handle_submit(websocket, runner, envelope)
+                continue
+
+            if msg_type == "subscribe_job":
+                await _handle_subscribe(websocket, runner, envelope)
                 continue
 
             if msg_type == "cancel":
-                # MVP: cancellation is a no-op (the orchestrator doesn't
-                # expose a cancellation token yet — Phase 2).
-                await websocket.send_text(
-                    json.dumps({"type": "ack", "for": "cancel"})
-                )
+                await _handle_cancel(websocket, runner, envelope)
+                continue
+
+            # Legacy: start_turn — internally routed through JobRunner
+            if msg_type == "start_turn":
+                await _handle_legacy_start_turn(websocket, runner, envelope)
                 continue
 
             await _send_error(websocket, f"Unknown message type: {msg_type!r}")
@@ -82,54 +96,203 @@ async def unified_ws(websocket: WebSocket) -> None:
             pass
 
 
-async def _handle_turn(
+# ---------------------------------------------------------------------------
+# submit_job
+# ---------------------------------------------------------------------------
+
+
+async def _handle_submit(
     websocket: WebSocket,
-    orchestrator,
+    runner,
     envelope: dict[str, Any],
 ) -> None:
-    """Process one user turn and stream events back to the client."""
-    session_id = envelope.get("session_id") or ""
+    """Accept a job, persist it, ack with job_id, then close the WS."""
+    try:
+        req = JobSubmit(
+            user_id=envelope.get("user_id") or "anonymous",
+            message=envelope.get("message") or "",
+            capability=envelope.get("capability") or None,
+            language=envelope.get("language") or "zh",
+            session_id=envelope.get("session_id") or None,
+            metadata=dict(envelope.get("metadata") or {}),
+        )
+        job = await runner.submit(req)
+    except ValueError as exc:
+        await _send_error(websocket, str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"submit_job failed: {exc!r}")
+        await _send_error(websocket, f"submit failed: {exc}")
+        return
+
+    try:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "job_submitted",
+                    "job_id": job.job_id,
+                    "user_id": job.user_id,
+                    "capability": job.capability,
+                    "status": job.status.value,
+                    "created_at": job.created_at.isoformat(),
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception:
+        # Best-effort: if the client already disconnected, the job is
+        # still in the store and they can subscribe later.
+        logger.warning(f"submit_job: failed to ack job={job.job_id[:12]}…")
+
+
+# ---------------------------------------------------------------------------
+# subscribe_job (live event stream)
+# ---------------------------------------------------------------------------
+
+
+async def _handle_subscribe(
+    websocket: WebSocket,
+    runner,
+    envelope: dict[str, Any],
+) -> None:
+    """Stream events for a known job until terminal."""
+    job_id = envelope.get("job_id")
+    if not job_id:
+        await _send_error(websocket, "subscribe_job requires job_id")
+        return
+
+    try:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "ack",
+                    "for": "subscribe_job",
+                    "job_id": job_id,
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception:
+        return
+
+    try:
+        async for evt in runner.subscribe(job_id):
+            try:
+                await websocket.send_text(json.dumps(evt, ensure_ascii=False))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"subscribe_job: send failed job={job_id[:12]}… exc={exc!r}"
+                )
+                return
+    except KeyError as exc:
+        await _send_error(websocket, str(exc))
+        return
+
+
+# ---------------------------------------------------------------------------
+# cancel
+# ---------------------------------------------------------------------------
+
+
+async def _handle_cancel(
+    websocket: WebSocket,
+    runner,
+    envelope: dict[str, Any],
+) -> None:
+    job_id = envelope.get("job_id") or ""
+    user_id = envelope.get("user_id")
+    if not job_id:
+        await _send_error(websocket, "cancel requires job_id")
+        return
+    ok = await runner.cancel(job_id, user_id=user_id)
+    try:
+        await websocket.send_text(
+            json.dumps(
+                {"type": "ack", "for": "cancel", "job_id": job_id, "cancelled": ok},
+                ensure_ascii=False,
+            )
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Legacy start_turn (Phase 2 compat) — now goes through JobRunner
+# ---------------------------------------------------------------------------
+
+
+async def _handle_legacy_start_turn(
+    websocket: WebSocket,
+    runner,
+    envelope: dict[str, Any],
+) -> None:
+    """Back-compat: accept a ``start_turn`` envelope, run it as a job,
+    and stream events back over the same WS until the job terminates.
+
+    The job is persisted just like a normal submit, so the client can
+    later reconnect and ``subscribe_job`` to recover.
+    """
     user_id = envelope.get("user_id") or "anonymous"
     user_message = envelope.get("message") or ""
     history = envelope.get("history") or []
     language = envelope.get("language") or "zh"
     capability = envelope.get("capability") or None
+    session_id = envelope.get("session_id") or ""
 
-    context = UnifiedContext(
-        session_id=session_id,
+    req = JobSubmit(
         user_id=user_id,
-        user_message=user_message,
-        history=history,
-        language=language,
+        message=user_message,
         capability=capability,
-        metadata=dict(envelope.get("metadata") or {}),
+        language=language,
+        session_id=session_id,
+        metadata={"history_count": len(history), "legacy": True},
     )
+    try:
+        job = await runner.submit(req)
+    except ValueError as exc:
+        await _send_error(websocket, str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        await _send_error(websocket, f"submit failed: {exc}")
+        return
 
-    bus = context.stream_bus  # creates a new bus tied to this turn
-
-    async def pump() -> None:
-        async for event in orchestrator.handle(context):
-            try:
-                await websocket.send_text(json.dumps(event.to_dict(), ensure_ascii=False))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"WebSocket send failed: {exc!r}")
-                return
+    # Tell the client the job_id so they can resume via subscribe_job
+    # if this WS drops.
+    try:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "job_submitted",
+                    "job_id": job.job_id,
+                    "user_id": job.user_id,
+                    "capability": job.capability,
+                    "legacy": True,
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception:
+        return
 
     try:
-        await asyncio.wait_for(pump(), timeout=600)  # 10-minute cap
-    except asyncio.TimeoutError:
-        await bus.error("Turn timed out", source="ws")
-        await bus.done(source="ws")
-        try:
-            await websocket.send_text(json.dumps({"type": "error", "content": "timeout"}))
-        except Exception:
-            pass
+        async for evt in runner.subscribe(job.job_id):
+            try:
+                await websocket.send_text(json.dumps(evt, ensure_ascii=False))
+            except Exception:
+                return
+    except KeyError as exc:
+        await _send_error(websocket, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 async def _send_error(websocket: WebSocket, message: str) -> None:
     try:
         await websocket.send_text(
-            json.dumps({"type": "error", "content": message})
+            json.dumps({"type": "error", "content": message}, ensure_ascii=False)
         )
     except Exception:
         pass
