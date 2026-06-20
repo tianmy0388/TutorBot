@@ -51,7 +51,15 @@ import { cn } from "@/lib/utils";
 type RightPane = "profile" | "path" | "resource" | "tutor" | "assessment";
 
 export default function HomePage() {
-  const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
+  // ``sessionId`` is generated client-side only — ``crypto.randomUUID()``
+  // runs on the server during SSR and again on the client during hydration
+  // and produces different values, causing a React hydration mismatch.
+  // Defer the generation to ``useEffect`` (post-mount) so the SSR output
+  // is stable; the client takes over after hydration.
+  const [sessionId, setSessionId] = useState<string>("");
+  useEffect(() => {
+    setSessionId(crypto.randomUUID());
+  }, []);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightPane, setRightPane] = useState<RightPane>("profile");
   const userInitiatedPane = useRef(false);
@@ -162,7 +170,7 @@ export default function HomePage() {
             <div className="text-[10px] text-fg-muted hidden sm:block">
               Session:{" "}
               <code className="text-accent font-mono">
-                {sessionId.slice(0, 8)}
+                {sessionId ? sessionId.slice(0, 8) : "……"}
               </code>
             </div>
           </div>

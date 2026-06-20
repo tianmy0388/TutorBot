@@ -29,6 +29,7 @@ import { useKG } from "@/hooks/useKG";
 import { cn } from "@/lib/utils";
 
 interface SidebarProps {
+  /** May be empty during the first SSR frame — we render a placeholder. */
   sessionId: string;
   onNewSession: () => void;
   open: boolean;
@@ -172,7 +173,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
         </div>
         <div className="flex items-center justify-between gap-2">
           <div className="font-mono text-[10px] text-fg-subtle truncate flex-1">
-            {sessionId.slice(0, 8)}…
+            {sessionId ? `${sessionId.slice(0, 8)}…` : "connecting…"}
           </div>
           <button
             onClick={() => {

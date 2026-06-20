@@ -293,6 +293,7 @@ class ResourceGenerationCapability(BaseCapability):
             "parallel_resource_generation", source="resource_capability"
         ):
             parallel_resources = await self._generate_parallel(
+                context=context,
                 intent=intent,
                 profile_snapshot=profile_snapshot,
                 source_content=pedagogy_resource.content if pedagogy_resource else "",
@@ -565,6 +566,7 @@ class ResourceGenerationCapability(BaseCapability):
     async def _generate_parallel(
         self,
         *,
+        context: UnifiedContext,
         intent: Intent,
         profile_snapshot: dict[str, Any],
         source_content: str,
@@ -590,7 +592,7 @@ class ResourceGenerationCapability(BaseCapability):
                 ResourceType.MINDMAP,
                 asyncio.create_task(_safe(
                     self.multimedia.process(
-                        context=None,  # type: ignore[arg-type]
+                        context,
                         stream=stream,
                         topic=intent.topic,
                         source_content=source_content,
@@ -604,7 +606,7 @@ class ResourceGenerationCapability(BaseCapability):
                 ResourceType.EXERCISE,
                 asyncio.create_task(_safe(
                     self.exercise_generator.process(
-                        context=None,  # type: ignore[arg-type]
+                        context,
                         stream=stream,
                         topic=intent.topic,
                         source_content=source_content,
@@ -618,7 +620,7 @@ class ResourceGenerationCapability(BaseCapability):
                 ResourceType.VIDEO,
                 asyncio.create_task(_safe(
                     self.manim_video.process(
-                        context=None,  # type: ignore[arg-type]
+                        context,
                         stream=stream,
                         topic=intent.topic,
                         source_content=source_content,
@@ -632,7 +634,7 @@ class ResourceGenerationCapability(BaseCapability):
                 ResourceType.CODE,
                 asyncio.create_task(_safe(
                     self.code_sandbox.process(
-                        context=None,  # type: ignore[arg-type]
+                        context,
                         stream=stream,
                         topic=intent.topic,
                         source_content=source_content,

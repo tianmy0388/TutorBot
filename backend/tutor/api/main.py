@@ -30,6 +30,21 @@ from tutor.services.config.settings import Settings, get_settings
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown hooks."""
+    # Push .env into os.environ. pydantic-settings reads its own copy when
+    # it builds ``Settings``, but the MCP config loader substitutes
+    # ``${VAR}`` references from ``os.environ`` only — without this, keys
+    # defined in .env (e.g. MINIMAX_API_KEY) would be missing when the
+    # subprocess is spawned.
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path
+
+        for candidate in (Path.cwd() / ".env", Path.cwd().parent / ".env"):
+            if candidate.is_file():
+                load_dotenv(candidate, override=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"load_dotenv skipped: {exc!r}")
+
     settings = get_settings()
 
     # Eager-load singletons
