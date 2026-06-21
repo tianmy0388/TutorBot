@@ -97,6 +97,59 @@ def test_ingestion_fails_for_missing_source(
     final = service.run_ingestion(doc.id)
     assert final is not None
     assert final.status == IngestionStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Stage 0 — async ingestion contract (Task from the 2026-06-21 plan)
+# ---------------------------------------------------------------------------
+
+
+def test_upload_does_not_run_ingestion_inline(
+    service: KnowledgeBaseService, tmp_path: Path
+) -> None:
+    """The router must decouple upload from ingestion: ``upload_document``
+    must return the document in ``UPLOADED`` state and a separate
+    ``enqueue_ingestion`` (or equivalent) call drives the state machine.
+
+    Today ``upload_document`` returns ``UPLOADED`` and the router
+    immediately calls ``run_ingestion`` synchronously. After the
+    fix the upload itself should still leave the doc in UPLOADED and
+    ingestion happens through a queue the router can await without
+    blocking the response.
+    """
+    lib = service.create_library(name="Async")
+    src = _write_tmp_file(tmp_path / "doc.txt", "Transformer attention.\n")
+    doc = service.upload_document(
+        knowledge_base_id=lib.id, source_path=src, original_filename="doc.txt"
+    )
+    # Upload alone must land in UPLOADED.
+    assert doc.status == IngestionStatus.UPLOADED
+    # The service must expose an enqueue_ingestion method.
+    assert hasattr(service, "enqueue_ingestion"), (
+        "service should expose an async dispatch entry point"
+    )
+
+
+def test_enqueue_ingestion_dispatches_background(
+    service: KnowledgeBaseService, tmp_path: Path
+) -> None:
+    """``enqueue_ingestion`` must return quickly and let the caller
+    continue; the actual state transitions happen out-of-band.
+
+    This is the regression test for the synchronous PDF-upload timeout
+    that the Next.js dev proxy was dropping.
+    """
+    import time
+
+    lib = service.create_library(name="Async2")
+    src = _write_tmp_file(tmp_path / "doc.txt", "hello\n")
+    doc = service.upload_document(
+        knowledge_base_id=lib.id, source_path=src, original_filename="doc.txt"
+    )
+    started = time.monotonic()
+    service.enqueue_ingestion(doc.id)  # must not block
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.2, f"enqueue_ingestion took {elapsed:.3f}s — should be < 200ms"
     assert final.error_code == "MISSING_SOURCE"
 
 

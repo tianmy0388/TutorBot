@@ -26,10 +26,12 @@ from tutor.services.resource_package.store import (
 
 
 @pytest.fixture
-def fresh_store(tmp_path, monkeypatch):
+async def fresh_store(tmp_path, monkeypatch):
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
     reset_resource_package_store()
-    yield ResourcePackageStore()
+    store = ResourcePackageStore()
+    await store.init()
+    yield store
     reset_resource_package_store()
 
 
