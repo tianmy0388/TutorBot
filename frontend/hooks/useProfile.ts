@@ -5,13 +5,19 @@
  * for Phase 4). This hook exposes a refresh helper that consumers can
  * trigger after a turn completes; once the backend exposes
  * `GET /api/v1/profile/{user_id}` we'll wire it here.
+ *
+ * A 404 from the backend means the user has no profile yet — treat
+ * that as "loaded with no data" instead of a loud error. The previous
+ * version used the literal string "anonymous" as the default userId,
+ * which never matched a real profile and produced 404s in the server
+ * log on every page load.
  */
 
 "use client";
 
 import { useEffect, useState } from "react";
 import { useTutorStore } from "@/lib/store";
-import { getProfile } from "@/lib/api";
+import { ApiError, getProfile } from "@/lib/api";
 import type { LearnerProfileDetail } from "@/lib/types";
 
 export function useProfile(userId?: string): {
@@ -38,6 +44,13 @@ export function useProfile(userId?: string): {
       const p = await getProfile(target);
       setProfile(p);
     } catch (e: any) {
+      // 404 = the user simply has no profile yet. That's a normal
+      // first-load state, not a failure; surface it as no profile
+      // instead of an error.
+      if (e instanceof ApiError && e.status === 404) {
+        setProfile(null);
+        return;
+      }
       setError(e?.message || String(e));
     } finally {
       setLoading(false);

@@ -99,8 +99,13 @@ def _extract_pdf(path: Path) -> list[ExtractedChunk]:
                     "utf-8", errors="replace"
                 )
             chunks.append(ExtractedChunk(text=text, anchor=f"page {i}"))
-    if not chunks:
-        raise LoaderError("EMPTY_DOCUMENT", "PDF 无可提取文本")
+    # A PDF with no extractable text (image-only, blank, scanned with
+    # no OCR) is a valid input — return an empty chunk list and let
+    # the caller decide whether that's a failure (the service
+    # currently treats it as EMPTY_DOCUMENT, but downstream code can
+    # also choose to skip such files). Previously the loader raised
+    # unconditionally, which made it impossible to distinguish a
+    # "nothing to extract" page from a corrupt one in unit tests.
     return chunks
 
 

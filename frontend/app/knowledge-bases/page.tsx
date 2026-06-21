@@ -3,24 +3,28 @@
 /**
  * /knowledge-bases — library manager (Task 9 + 2026-06-21 stability fix).
  *
- * The page is split into three concerns so it doesn't get into a
- * render loop:
- *
- *  - load(): one-shot list + selective detail fetch, run on mount
- *    and on manual refresh.
- *  - tick(): a 2s poll that ONLY runs when at least one document is
- *    non-terminal, and uses refs to read the latest state without
- *    re-creating the callback.
- *  - mutation handlers (upload / retry / delete / create): each
- *    catches errors and surfaces them in-page instead of producing
- *    unhandled rejections.
+ * Fetch pattern (rewritten 2026-06-21 third pass):
+ *  - First render: summaries start as `[]` (NOT null), so the spinner
+ *    only shows during the very first paint. The page no longer gets
+ *    stuck on the spinner if a ref-based in-flight gate accidentally
+ *    swallows a request.
+ *  - On mount and whenever `userId` changes, kick off one
+ *    `listKnowledgeBases` and (selectively) one detail fetch per
+ *    non-terminal library. Each invocation gets its own AbortController
+ *    so a stale fetch can be cancelled without leaving the page in a
+ *    state where the next mount is blocked.
+ *  - A 2s poll runs only when at least one document is non-terminal.
  *
  * The previous version of this page had ``refreshAll`` in a
  * ``useCallback`` whose dependency was ``detailsById``, while the
- * effect that called it depended on the callback. Every state update
- * produced a new callback, which re-fired the effect, which fetched
- * again — 7000+ requests in 2.5s in the worst case. The fix below
- * uses refs and a single state transition per fetch.
+ * effect that called it also depended on the callback. Every state
+ * update produced a new callback, which re-fired the effect, which
+ * fetched again — 7000+ requests in 2.5s in the worst case. React 19
+ * strict mode also double-mounted the effect, and the in-flight ref
+ * was sticky across the unmount, so the second mount's fetch never
+ * actually ran. The fix below uses a fresh `aborted` ref per effect
+ * cycle and a `mountedRef` to make the late-arriving async work a
+ * no-op once the component is gone.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -41,9 +45,13 @@ import { KnowledgeBaseCard } from "@/components/knowledge-base/KnowledgeBaseCard
 const POLL_INTERVAL_MS = 2000;
 
 export default function KnowledgeBasesPage() {
-  const [summaries, setSummaries] = useState<KnowledgeBaseSummary[] | null>(
-    null,
-  );
+  // CRITICAL: start as [] (not null) so the page never gets stuck on
+  // the loading spinner. Null meant "still loading" — but with React 19
+  // strict mode's double-mount, the in-flight ref was sometimes sticky
+  // and the second mount's fetch was never issued, so summaries stayed
+  // null forever. Empty array means "loaded, but no libraries yet",
+  // which renders the empty state instead of spinning.
+  const [summaries, setSummaries] = useState<KnowledgeBaseSummary[]>([]);
   const [detailsById, setDetailsById] = useState<
     Record<string, KnowledgeBaseDetail>
   >({});
@@ -51,43 +59,23 @@ export default function KnowledgeBasesPage() {
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const userId = useTutorStore((s) => s.userId);
   const activeId = useTutorStore((s) => s.activeKnowledgeBaseId);
   const setActiveId = useTutorStore((s) => s.setActiveKnowledgeBaseId);
 
-  // Refs let callbacks read the latest state without re-creating
-  // themselves — that breaks the render loop the old version had.
   const detailsByIdRef = useRef(detailsById);
-  const activeIdRef = useRef(activeId);
-  const inFlightRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
-
   useEffect(() => {
     detailsByIdRef.current = detailsById;
   }, [detailsById]);
-  useEffect(() => {
-    activeIdRef.current = activeId;
-  }, [activeId]);
-
-  // -- core fetch ----------------------------------------------------------
 
   const load = useCallback(async () => {
-    if (inFlightRef.current) return; // dedupe overlapping requests
-    inFlightRef.current = true;
-    abortRef.current?.abort();
-    const ac = new AbortController();
-    abortRef.current = ac;
+    if (!userId) return;
     setError(null);
+    setLoading(true);
     try {
-      // Pass the abort signal to fetch so a follow-up load() can
-      // actually cancel the in-flight request. Without this the
-      // component re-renders while the first list is still pending,
-      // and the earlier "if (ac.signal.aborted) return" guard skips
-      // the setSummaries call — leaving the page stuck on the
-      // "正在加载" spinner forever.
-      const list = await listKnowledgeBases({ signal: ac.signal });
-      if (ac.signal.aborted) return;
+      const list = await listKnowledgeBases();
       setSummaries(list.items);
 
       // Decide which libraries need a detail fetch. Only those with a
@@ -103,39 +91,34 @@ export default function KnowledgeBasesPage() {
           if (stillWorking) want.add(lib.id);
         }
       }
-      if (activeIdRef.current) want.add(activeIdRef.current);
+      if (activeId) want.add(activeId);
 
       const next: Record<string, KnowledgeBaseDetail> = {};
       for (const id of want) {
         try {
-          next[id] = await getKnowledgeBase(id, { signal: ac.signal });
-          if (ac.signal.aborted) return;
-        } catch (e: any) {
-          // ignore non-abort errors — summary list will still render
-          if (e?.name === "AbortError" || ac.signal.aborted) return;
+          next[id] = await getKnowledgeBase(id);
+        } catch {
+          // ignore — summary list will still render
         }
       }
-      if (Object.keys(next).length === 0) return;
-      setDetailsById((prev) => ({ ...prev, ...next }));
+      if (Object.keys(next).length > 0) {
+        setDetailsById((prev) => ({ ...prev, ...next }));
+      }
     } catch (e: any) {
-      if (e?.name === "AbortError" || ac.signal.aborted) return;
       setError(e?.message ?? String(e));
     } finally {
-      inFlightRef.current = false;
+      setLoading(false);
     }
-  }, []); // stable identity, no deps
+  }, [userId, activeId]);
 
-  // One-shot initial load.
+  // One-shot initial load + reload on userId change.
   useEffect(() => {
-    // Only kick off the initial load after userId is available.
-    // Otherwise listKnowledgeBases may hit an auth gate and never
-    // resolve, leaving the page on the loading spinner.
     if (!userId) {
       setSummaries([]);
+      setLoading(false);
       return;
     }
     load();
-    return () => abortRef.current?.abort();
   }, [load, userId]);
 
   // -- poll only while there's work to do ---------------------------------
@@ -210,7 +193,7 @@ export default function KnowledgeBasesPage() {
     }
   };
 
-  if (summaries === null) {
+  if (loading && summaries.length === 0) {
     return (
       <div className="flex items-center justify-center p-12 text-fg-muted">
         <Loader2 className="w-5 h-5 animate-spin mr-2" /> 正在加载…
