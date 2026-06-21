@@ -474,30 +474,50 @@ class KnowledgeBaseService:
     def _embed(self, chunks: list[dict[str, str]]) -> tuple[str, list[list[float]]]:
         """Embed chunks using the runtime embedder. Returns ("", [])
         if the embedder isn't configured — the document still gets
-        marked ready for text-only RAG fallback."""
+        marked ready for text-only RAG fallback.
+
+        ``OpenAICompatEmbedder.embed`` is an ``async def`` coroutine;
+        ``run_ingestion`` is sync (it's scheduled on the asyncio loop
+        via ``enqueue_ingestion`` → ``_runner`` but the function body
+        itself runs synchronously in the worker thread). We bridge
+        the two with a private event loop. The previous version
+        forgot the ``await`` and returned a coroutine object whose
+        ``.vectors`` attribute didn't exist — the soft fallback masked
+        it as a no-embedder error.
+        """
         model = self.settings.embed_model or ""
+        if not chunks:
+            return model, []
         try:
+            import asyncio
             from tutor.services.embeddings.embedder_factory import (
                 get_runtime_embedder,
             )
             from tutor.services.embeddings.base import EmbedRequest
 
             embedder = get_runtime_embedder(self.settings)
-            # EmbedRequest takes ``input`` (singular), not ``texts`` —
-            # the previous code passed ``texts`` and every ingest
-            # silently fell back to text-only matching because the
-            # except caught the TypeError.
-            # EmbedResponse exposes ``vectors`` (not ``embeddings``).
-            resp = embedder.embed(
-                EmbedRequest(input=[c["text"] for c in chunks])
-            )
-            return model, list(resp.vectors)
+            req = EmbedRequest(input=[c["text"] for c in chunks])
+
+            async def _call() -> list[list[float]]:
+                resp = await embedder.embed(req)
+                return list(resp.vectors)
+
+            try:
+                # Fast path: a loop is already running on this thread
+                # (the worker that drained the ingestion queue).
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is not None and not running.is_closed():
+                # We're inside a worker that already owns the loop.
+                # Schedule the coroutine and wait synchronously via a
+                # future, then collect the result.
+                future = asyncio.run_coroutine_threadsafe(_call(), running)
+                vectors = future.result()
+            else:
+                vectors = asyncio.run(_call())
+            return model, vectors
         except Exception as e:  # noqa: BLE001
-            # Soft fallback when the embedder call fails (network
-            # error, missing key, etc.). A real TypeError would mean
-            # our own code is wrong, so we still log it loudly — the
-            # previous version swallowed it silently, which is how
-            # the input/texts mismatch survived for months.
             logger.warning("Embedder unavailable: {err}", err=e)
             return "", []
 
