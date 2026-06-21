@@ -289,7 +289,16 @@ class KnowledgeBaseService:
         queue = self._queue or get_ingestion_queue()
 
         async def _runner() -> KnowledgeDocument | None:
-            return self.run_ingestion(doc_id)
+            # Push the sync run_ingestion onto a worker thread. This is
+            # what makes the async/sync bridge in _embed safe: the
+            # worker thread has no event loop, so _embed's
+            # ``asyncio.run(_call())`` spins up its own private loop
+            # instead of trying to call ``run_coroutine_threadsafe``
+            # against the loop that's currently waiting on us (which
+            # deadlocks — the future never completes because we never
+            # yield). Symptom of the old bug was every backend route
+            # hanging with ECONNRESET on the proxy.
+            return await asyncio.to_thread(self.run_ingestion, doc_id)
 
         return queue.enqueue(_runner)
 
@@ -476,14 +485,17 @@ class KnowledgeBaseService:
         if the embedder isn't configured — the document still gets
         marked ready for text-only RAG fallback.
 
-        ``OpenAICompatEmbedder.embed`` is an ``async def`` coroutine;
-        ``run_ingestion`` is sync (it's scheduled on the asyncio loop
-        via ``enqueue_ingestion`` → ``_runner`` but the function body
-        itself runs synchronously in the worker thread). We bridge
-        the two with a private event loop. The previous version
-        forgot the ``await`` and returned a coroutine object whose
-        ``.vectors`` attribute didn't exist — the soft fallback masked
-        it as a no-embedder error.
+        ``OpenAICompatEmbedder.embed`` is an ``async def`` coroutine
+        but ``run_ingestion`` is sync, so we drive it with
+        ``asyncio.run`` on a private loop. ``run_ingestion`` must be
+        invoked from a thread that does NOT own an event loop —
+        callers running under the FastAPI loop go through
+        ``asyncio.to_thread`` in ``_runner`` (see ``enqueue_ingestion``)
+        for that reason. An earlier version tried
+        ``run_coroutine_threadsafe(...).result()`` against the running
+        loop; that deadlocks the loop because the current task is
+        blocking on ``.result()`` and the loop can never schedule the
+        submitted coroutine.
         """
         model = self.settings.embed_model or ""
         if not chunks:
@@ -502,20 +514,7 @@ class KnowledgeBaseService:
                 resp = await embedder.embed(req)
                 return list(resp.vectors)
 
-            try:
-                # Fast path: a loop is already running on this thread
-                # (the worker that drained the ingestion queue).
-                running = asyncio.get_running_loop()
-            except RuntimeError:
-                running = None
-            if running is not None and not running.is_closed():
-                # We're inside a worker that already owns the loop.
-                # Schedule the coroutine and wait synchronously via a
-                # future, then collect the result.
-                future = asyncio.run_coroutine_threadsafe(_call(), running)
-                vectors = future.result()
-            else:
-                vectors = asyncio.run(_call())
+            vectors = asyncio.run(_call())
             return model, vectors
         except Exception as e:  # noqa: BLE001
             logger.warning("Embedder unavailable: {err}", err=e)
