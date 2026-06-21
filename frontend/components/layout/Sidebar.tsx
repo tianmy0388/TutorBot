@@ -71,6 +71,11 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
   const loadConversationIntoStore = useTutorStore(
     (s) => s.loadConversationIntoStore,
   );
+  // Subscribe to the live message count so the sidebar's
+  // message_count badge updates as the user types / a job completes.
+  // DeepSeek-style: open the conversation and the count ticks up in
+  // place; no manual refresh.
+  const messageCount = useTutorStore((s) => s.messages.length);
   const { courses, currentCourse, plannedPath } = useKG();
 
   // ---- conversation list state ----------------------------------------
@@ -94,6 +99,24 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
   useEffect(() => {
     refreshConvs();
   }, [refreshConvs]);
+
+  // Live refresh: when the user types a message in the chat composer
+  // and ChatComposer.appendConversationMessage lands on the server,
+  // the conversation's message_count on disk is now ahead of the
+  // cached list. Re-pull the list so the badge updates without
+  // waiting for a manual refresh. Debounced to coalesce bursty
+  // updates (e.g. one user message + one assistant message arriving
+  // back-to-back).
+  useEffect(() => {
+    if (!userId) return;
+    const t = setTimeout(() => {
+      void refreshConvs();
+    }, 300);
+    return () => clearTimeout(t);
+    // refreshConvs is stable per userId; we intentionally key on
+    // messageCount so a chat message triggers a re-pull.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, messageCount]);
 
   const handleNewConv = async () => {
     if (!userId || convBusy) return;
@@ -181,19 +204,25 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
 
   return (
     <aside className="w-64 bg-bg-panel border-r border-fg/10 flex flex-col h-full">
-      {/* Top: new session + collapse */}
+      {/* Top: new conversation (DeepSeek-style: one canonical entry
+          point that both clears the local chat and persists a fresh
+          conversation on the server). The old version had a separate
+          "新会话" button that didn't talk to the server, so users
+          saw the same action appear twice. */}
       <div className="p-3 border-b border-fg/10 flex items-center justify-between shrink-0">
         <button
-          onClick={() => {
-            resetSession();
-            onNewSession();
-          }}
-          className="btn-ghost flex-1 mr-2 text-sm"
-          title="开始新会话 (清空当前聊天历史)"
-          data-testid="sidebar-new-session"
+          onClick={handleNewConv}
+          disabled={convBusy}
+          className="btn-primary flex-1 mr-2 text-sm h-9 flex items-center justify-center gap-1.5"
+          title="新建对话 (清空当前聊天，持久化到服务端)"
+          data-testid="sidebar-conv-new-primary"
         >
-          <Plus className="w-4 h-4" />
-          新会话
+          {convBusy ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Plus className="w-4 h-4" />
+          )}
+          新建对话
         </button>
         <button
           onClick={onToggle}
@@ -285,20 +314,12 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
             <MessageSquare className="w-3 h-3" />
             对话历史
           </div>
-          <button
-            onClick={handleNewConv}
-            disabled={convBusy}
-            className="text-[10px] text-brand-300 hover:text-brand-200 disabled:opacity-50 flex items-center gap-0.5"
-            data-testid="sidebar-conv-new"
-            title="新建对话"
+          <span
+            className="text-[9px] text-fg-subtle"
+            data-testid="sidebar-conv-count"
           >
-            {convBusy ? (
-              <Loader2 className="w-3 h-3 animate-spin" />
-            ) : (
-              <Plus className="w-3 h-3" />
-            )}
-            新建
-          </button>
+            {convs?.length ?? 0} 个
+          </span>
         </div>
 
         {convError && (
@@ -425,7 +446,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
               }
             }}
             className="p-1.5 text-fg-subtle hover:text-red-400 transition-colors"
-            title="清空会话"
+            title="清空当前会话（不影响已持久化的历史对话）"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>

@@ -89,6 +89,7 @@ class KnowledgeBaseStore:
         status: IngestionStatus,
         chunk_count: int | None = None,
         embedding_model: str | None = None,
+        embedding_warning: str | None = None,
         error: str | None = None,
         error_code: str | None = None,
     ) -> KnowledgeDocument | None:
@@ -101,6 +102,8 @@ class KnowledgeBaseStore:
                 doc.chunk_count = chunk_count
             if embedding_model is not None:
                 doc.embedding_model = embedding_model
+            if embedding_warning is not None:
+                doc.embedding_warning = embedding_warning
             if error is not None:
                 doc.error = error
             if error_code is not None:

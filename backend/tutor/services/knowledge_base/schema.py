@@ -65,6 +65,12 @@ class KnowledgeDocument(BaseModel):
     status: IngestionStatus = IngestionStatus.UPLOADED
     chunk_count: int = 0
     embedding_model: str = ""
+    # Non-fatal embedding warning (e.g. "embedder not configured, using
+    # text-only fallback"). The document is still ``ready`` for RAG,
+    # but downstream consumers should know they have no vectors to
+    # match against. Distinct from ``error_code`` which marks the
+    # whole ingestion as failed.
+    embedding_warning: str | None = None
     error: str | None = None
     error_code: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -13,6 +13,7 @@
 
 import { useState } from "react";
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronRight,
   Database,
@@ -218,6 +219,19 @@ export function KnowledgeBaseCard({
                     </span>
                     {doc.chunk_count > 0 && (
                       <span className="text-fg-subtle">{doc.chunk_count} 块</span>
+                    )}
+                    {/* Non-fatal warning: doc is ready but no vectors
+                        were produced (e.g. embedder not configured).
+                        Surface it so the user knows retrieval will be
+                        text-only, not semantic. */}
+                    {doc.embedding_warning && isReady && (
+                      <span
+                        className="text-yellow-300 truncate max-w-[24ch] inline-flex items-center gap-0.5"
+                        title={doc.embedding_warning}
+                        data-testid={`kb-doc-${doc.id}-embed-warning`}
+                      >
+                        <AlertTriangle className="w-3 h-3 inline" /> 无向量
+                      </span>
                     )}
                     {doc.error && (
                       <span

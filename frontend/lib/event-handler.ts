@@ -95,6 +95,39 @@ export function dispatchStreamEvent(
       if (contract && typeof contract === "object") {
         routeResult(contract, streamEv);
       }
+      // Persist the assistant message into the active conversation
+      // so the sidebar's message_count updates in real time
+      // (DeepSeek-style). The contract is the canonical job result
+      // payload from JobRunner; its ``assistant_message`` field is
+      // what we want to show in the conversation history.
+      const assistantText =
+        contract && typeof contract === "object"
+          ? typeof contract.assistant_message === "string"
+            ? (contract.assistant_message as string)
+            : typeof contract.message === "string"
+              ? (contract.message as string)
+              : ""
+          : "";
+      const state = useTutorStore.getState();
+      if (assistantText && state.userId && state.sessionId) {
+        const cap =
+          typeof contract?.capability === "string"
+            ? (contract.capability as string)
+            : null;
+        void import("./api")
+          .then(({ appendConversationMessage }) =>
+            appendConversationMessage(state.userId, state.sessionId, {
+              role: "assistant",
+              content: assistantText,
+              job_id: jobId,
+              capability: cap,
+              metadata: { job_id: jobId, capability: cap },
+            }),
+          )
+          .catch((e) => {
+            console.warn("appendConversationMessage(assistant) failed", e);
+          });
+      }
       // Always clear the legacy single-activeTurn indicator. The new
       // job-reducer model doesn't touch activeTurn.phase, but
       // ChatMessages still shows "正在调用 Agent…" while phase !==

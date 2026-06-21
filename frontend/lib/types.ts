@@ -553,6 +553,9 @@ export interface KnowledgeDocument {
   status: IngestionStatus;
   chunk_count: number;
   embedding_model: string;
+  /** Non-fatal embedding warning. The document is still ``ready`` but
+      retrieval will be text-only. */
+  embedding_warning: string | null;
   error: string | null;
   error_code: string | null;
   created_at: string;

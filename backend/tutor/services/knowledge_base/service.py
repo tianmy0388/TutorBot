@@ -419,6 +419,16 @@ class KnowledgeBaseService:
             status=IngestionStatus.READY,
             chunk_count=len(chunk_records),
             embedding_model=embedding_model,
+            # Surface the "no vectors" case as a non-fatal warning so
+            # the UI can show a chip and the operator knows their
+            # runtime config needs an embedder for real RAG. The doc
+            # is still ``ready`` and text-only retrieval still works.
+            embedding_warning=(
+                "embedder_unavailable: storing chunks without vectors; "
+                "RAG will use text-only matching"
+            )
+            if not embedding_model
+            else None,
         )
         self._log_outcome(doc_id, lib_id, "READY", started)
         return self.store.get_document(doc_id)

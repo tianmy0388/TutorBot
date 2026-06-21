@@ -19,6 +19,7 @@ import { Send, Sparkles, MessageCircle, BarChart3, Compass, X } from "lucide-rea
 import { useTutorStore } from "@/lib/store";
 import { useJobQueue } from "@/hooks/useJobQueue";
 import { cn } from "@/lib/utils";
+import { appendConversationMessage } from "@/lib/api";
 
 const CAPABILITY_OPTIONS = [
   { id: "resource_generation", label: "生成资源", icon: Sparkles, hint: "例如:系统学习 LSTM" },
@@ -32,6 +33,7 @@ export function ChatComposer() {
   const [submitting, setSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const userId = useTutorStore((s) => s.userId);
+  const sessionId = useTutorStore((s) => s.sessionId);
   const currentCapability = useTutorStore((s) => s.currentCapability);
   const setCapability = useTutorStore((s) => s.setCurrentCapability);
   const addMessage = useTutorStore((s) => s.addMessage);
@@ -53,6 +55,23 @@ export function ChatComposer() {
 
     // Add user message to chat immediately
     addMessage({ role: "user", content: msg });
+
+    // Persist the user message into the active conversation so the
+    // sidebar's message_count updates in real time (DeepSeek-style).
+    // Fire-and-forget — a failure to persist must NOT block the user
+    // from submitting. The session id may still be empty during the
+    // very first SSR frame; skip the persist in that case.
+    if (userId && sessionId) {
+      void appendConversationMessage(userId, sessionId, {
+        role: "user",
+        content: msg,
+        metadata: { source: "chat_composer" },
+      }).catch((e) => {
+        // Swallow — UI already has the message; the persist is a
+        // best-effort background write.
+        console.warn("appendConversationMessage(user) failed", e);
+      });
+    }
 
     try {
       const result = await queue.submit(msg, currentCapability || undefined);
