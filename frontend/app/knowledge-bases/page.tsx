@@ -1,11 +1,26 @@
 "use client";
 
 /**
- * /knowledge-bases — library manager (Task 9).
+ * /knowledge-bases — library manager (Task 9 + 2026-06-21 stability fix).
  *
- * Polls each non-terminal library every 2 seconds (single fetch, not
- * per-library) so the UI shows live ingestion progress without flooding
- * the backend.
+ * The page is split into three concerns so it doesn't get into a
+ * render loop:
+ *
+ *  - load(): one-shot list + selective detail fetch, run on mount
+ *    and on manual refresh.
+ *  - tick(): a 2s poll that ONLY runs when at least one document is
+ *    non-terminal, and uses refs to read the latest state without
+ *    re-creating the callback.
+ *  - mutation handlers (upload / retry / delete / create): each
+ *    catches errors and surfaces them in-page instead of producing
+ *    unhandled rejections.
+ *
+ * The previous version of this page had ``refreshAll`` in a
+ * ``useCallback`` whose dependency was ``detailsById``, while the
+ * effect that called it depended on the callback. Every state update
+ * produced a new callback, which re-fired the effect, which fetched
+ * again — 7000+ requests in 2.5s in the worst case. The fix below
+ * uses refs and a single state transition per fetch.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -20,7 +35,6 @@ import {
   uploadKnowledgeDocument,
 } from "@/lib/api";
 import { useTutorStore } from "@/lib/store";
-import { cn } from "@/lib/utils";
 import type { KnowledgeBaseDetail, KnowledgeBaseSummary } from "@/lib/types";
 import { KnowledgeBaseCard } from "@/components/knowledge-base/KnowledgeBaseCard";
 
@@ -41,50 +55,77 @@ export default function KnowledgeBasesPage() {
   const activeId = useTutorStore((s) => s.activeKnowledgeBaseId);
   const setActiveId = useTutorStore((s) => s.setActiveKnowledgeBaseId);
 
-  const refreshAll = useCallback(async () => {
+  // Refs let callbacks read the latest state without re-creating
+  // themselves — that breaks the render loop the old version had.
+  const detailsByIdRef = useRef(detailsById);
+  const activeIdRef = useRef(activeId);
+  const inFlightRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    detailsByIdRef.current = detailsById;
+  }, [detailsById]);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
+  // -- core fetch ----------------------------------------------------------
+
+  const load = useCallback(async () => {
+    if (inFlightRef.current) return; // dedupe overlapping requests
+    inFlightRef.current = true;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     setError(null);
     try {
       const list = await listKnowledgeBases();
+      if (ac.signal.aborted) return;
       setSummaries(list.items);
-      // Always refresh the details for any library that still has
-      // non-terminal documents. If everything is terminal, we skip
-      // the extra GETs.
-      const nonTerminalIds = new Set<string>();
-      // Use the existing in-memory details to avoid a flash of
-      // "empty" between polls.
+
+      // Decide which libraries need a detail fetch. Only those with a
+      // known non-terminal document, plus the active library if any.
+      const cached = detailsByIdRef.current;
+      const want = new Set<string>();
       for (const lib of list.items) {
-        const cached = detailsById[lib.id];
-        if (cached) {
-          const stillWorking = cached.documents.some(
-            (d) =>
-              d.status !== "ready" && d.status !== "failed",
+        const detail = cached[lib.id];
+        if (detail) {
+          const stillWorking = detail.documents.some(
+            (d) => d.status !== "ready" && d.status !== "failed",
           );
-          if (stillWorking) nonTerminalIds.add(lib.id);
+          if (stillWorking) want.add(lib.id);
         }
       }
-      // Always include the active library so the user sees fresh state
-      // when they revisit the page.
-      if (activeId) nonTerminalIds.add(activeId);
+      if (activeIdRef.current) want.add(activeIdRef.current);
+
       const next: Record<string, KnowledgeBaseDetail> = {};
-      for (const id of nonTerminalIds) {
+      for (const id of want) {
         try {
           next[id] = await getKnowledgeBase(id);
-        } catch (e) {
-          // skip — the summary list will still render
+          if (ac.signal.aborted) return;
+        } catch {
+          // ignore — summary list will still render
         }
       }
+      if (Object.keys(next).length === 0) return;
       setDetailsById((prev) => ({ ...prev, ...next }));
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      if (!ac.signal.aborted) {
+        setError(e?.message ?? String(e));
+      }
+    } finally {
+      inFlightRef.current = false;
     }
-  }, [activeId, detailsById]);
+  }, []); // stable identity, no deps
 
-  // Initial fetch
+  // One-shot initial load.
   useEffect(() => {
-    refreshAll();
-  }, [refreshAll]);
+    load();
+    return () => abortRef.current?.abort();
+  }, [load]);
 
-  // Poll only while at least one detail has a non-terminal document.
+  // -- poll only while there's work to do ---------------------------------
+
   const anyWorking = useMemo(
     () =>
       Object.values(detailsById).some((d) =>
@@ -96,39 +137,63 @@ export default function KnowledgeBasesPage() {
   );
   useEffect(() => {
     if (!anyWorking) return;
-    const t = setInterval(refreshAll, POLL_INTERVAL_MS);
+    const t = setInterval(() => {
+      load();
+    }, POLL_INTERVAL_MS);
     return () => clearInterval(t);
-  }, [anyWorking, refreshAll]);
+  }, [anyWorking, load]);
+
+  // -- mutation handlers --------------------------------------------------
 
   const handleUpload = async (libId: string, file: File) => {
-    await uploadKnowledgeDocument(libId, file);
-    await refreshAll();
+    try {
+      await uploadKnowledgeDocument(libId, file);
+      await load();
+    } catch (e: any) {
+      setError(`上传失败：${e?.message ?? String(e)}`);
+    }
   };
 
   const handleRetry = async (libId: string, docId: string) => {
-    await retryKnowledgeDocument(libId, docId);
-    await refreshAll();
+    try {
+      await retryKnowledgeDocument(libId, docId);
+      await load();
+    } catch (e: any) {
+      setError(`重试失败：${e?.message ?? String(e)}`);
+    }
   };
 
   const handleDelete = async (libId: string, docId: string) => {
-    await deleteKnowledgeDocument(libId, docId);
-    await refreshAll();
+    try {
+      await deleteKnowledgeDocument(libId, docId);
+      await load();
+    } catch (e: any) {
+      setError(`删除失败：${e?.message ?? String(e)}`);
+    }
   };
 
   const handleDeleteLibrary = async (libId: string) => {
-    await deleteKnowledgeBase(libId);
-    if (activeId === libId) setActiveId("ai_introduction");
-    await refreshAll();
+    try {
+      await deleteKnowledgeBase(libId);
+      if (activeId === libId) setActiveId("ai_introduction");
+      await load();
+    } catch (e: any) {
+      setError(`删除知识库失败：${e?.message ?? String(e)}`);
+    }
   };
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
-    const lib = await createKnowledgeBase(newName.trim(), newDesc.trim());
-    setNewName("");
-    setNewDesc("");
-    setCreating(false);
-    setActiveId(lib.id);
-    await refreshAll();
+    try {
+      const lib = await createKnowledgeBase(newName.trim(), newDesc.trim());
+      setNewName("");
+      setNewDesc("");
+      setCreating(false);
+      setActiveId(lib.id);
+      await load();
+    } catch (e: any) {
+      setError(`创建失败：${e?.message ?? String(e)}`);
+    }
   };
 
   if (summaries === null) {
@@ -159,8 +224,9 @@ export default function KnowledgeBasesPage() {
           </button>
           <button
             className="btn-secondary text-sm h-9"
-            onClick={refreshAll}
+            onClick={() => load()}
             title="刷新"
+            data-testid="kb-refresh"
           >
             <RefreshCw className="w-4 h-4" />
           </button>
@@ -204,8 +270,17 @@ export default function KnowledgeBasesPage() {
       )}
 
       {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-          加载失败：{error}
+        <div
+          className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300"
+          data-testid="kb-error"
+        >
+          {error}
+          <button
+            className="ml-2 underline"
+            onClick={() => setError(null)}
+          >
+            关闭
+          </button>
         </div>
       )}
 

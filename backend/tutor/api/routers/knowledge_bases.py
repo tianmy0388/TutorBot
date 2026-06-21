@@ -7,7 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 
 from tutor.services.knowledge_base import (
     IngestionStatus,
@@ -22,6 +23,11 @@ router = APIRouter()
 _service = KnowledgeBaseService()
 
 
+class CreateLibraryRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+
+
 def _ensure_seeded() -> None:
     seed_default_libraries(_service)
 
@@ -33,10 +39,10 @@ async def list_knowledge_bases() -> dict[str, Any]:
     return {"items": [lib.model_dump(mode="json") for lib in libs], "total": len(libs)}
 
 
-@router.post("/knowledge-bases")
-async def create_knowledge_base(name: str = Form(...), description: str = Form("")) -> dict[str, Any]:
+@router.post("/knowledge-bases", status_code=201)
+async def create_knowledge_base(req: CreateLibraryRequest) -> dict[str, Any]:
     _ensure_seeded()
-    lib = _service.create_library(name=name, description=description)
+    lib = _service.create_library(name=req.name, description=req.description)
     return lib.model_dump(mode="json")
 
 

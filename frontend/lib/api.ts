@@ -45,10 +45,32 @@ const API_BASE =
 export class ApiError extends Error {
   status: number;
   body: unknown;
+  /**
+   * The backend's structured error code (e.g. ``EMPTY_DOCUMENT``).
+   * Comes from ``body.detail.code`` when FastAPI returns a detail dict.
+   */
+  code: string | null;
+  /** The backend's human-readable detail, when present. */
+  detail: string | null;
+  /** A per-request correlation id from the backend, when present. */
+  requestId: string | null;
+
   constructor(status: number, message: string, body?: unknown) {
     super(message);
     this.status = status;
     this.body = body;
+    const detail = (body as { detail?: unknown } | null)?.detail;
+    if (detail && typeof detail === "object") {
+      const d = detail as Record<string, unknown>;
+      this.code = typeof d.code === "string" ? d.code : null;
+      this.detail = typeof d.message === "string" ? d.message : null;
+      this.requestId =
+        typeof d.request_id === "string" ? d.request_id : null;
+    } else {
+      this.code = null;
+      this.detail = typeof detail === "string" ? detail : null;
+      this.requestId = null;
+    }
   }
 }
 
@@ -56,20 +78,38 @@ async function request<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  // Build a safe header set: caller-supplied headers win, but we never
+  // inject a JSON Content-Type when the body is FormData (the browser
+  // must set the multipart boundary itself).
+  const baseHeaders: Record<string, string> = {};
+  const body = init?.body;
+  if (!(body instanceof FormData) && body !== undefined && body !== null) {
+    baseHeaders["Content-Type"] = "application/json";
+  }
+  const headers: Record<string, string> = {
+    ...baseHeaders,
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  // If the caller explicitly set Content-Type, honour it.
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
-    cache: "no-store",
     ...init,
+    headers,
+    cache: "no-store",
   });
   if (!res.ok) {
     let body: unknown = null;
+    let text: string | null = null;
     try {
-      body = await res.json();
+      text = await res.text();
     } catch {
       // ignore
+    }
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = { detail: text };
+      }
     }
     throw new ApiError(res.status, `${res.status} ${res.statusText}`, body);
   }
