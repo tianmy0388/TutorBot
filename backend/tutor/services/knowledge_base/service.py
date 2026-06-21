@@ -483,10 +483,22 @@ class KnowledgeBaseService:
             from tutor.services.embeddings.base import EmbedRequest
 
             embedder = get_runtime_embedder(self.settings)
-            resp = embedder.embed(EmbedRequest(texts=[c["text"] for c in chunks]))
-            return model, resp.embeddings
-        except Exception:  # noqa: BLE001
-            logger.warning("Embedder unavailable; storing chunks without vectors")
+            # EmbedRequest takes ``input`` (singular), not ``texts`` —
+            # the previous code passed ``texts`` and every ingest
+            # silently fell back to text-only matching because the
+            # except caught the TypeError.
+            # EmbedResponse exposes ``vectors`` (not ``embeddings``).
+            resp = embedder.embed(
+                EmbedRequest(input=[c["text"] for c in chunks])
+            )
+            return model, list(resp.vectors)
+        except Exception as e:  # noqa: BLE001
+            # Soft fallback when the embedder call fails (network
+            # error, missing key, etc.). A real TypeError would mean
+            # our own code is wrong, so we still log it loudly — the
+            # previous version swallowed it silently, which is how
+            # the input/texts mismatch survived for months.
+            logger.warning("Embedder unavailable: {err}", err=e)
             return "", []
 
     def _write_chunk_index(
