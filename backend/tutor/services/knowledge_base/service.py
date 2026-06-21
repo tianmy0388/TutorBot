@@ -52,6 +52,24 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+def _sanitize_text(s: str) -> str:
+    """Replace lone surrogates (U+D800..U+DFFF) so strict utf-8
+    encoders don't crash on bad PDF font tables. Real surrogate pairs
+    (mathematical alphanumerics etc.) are kept intact."""
+    if not s:
+        return s
+    try:
+        # Fast path: round-trips cleanly.
+        s.encode("utf-8").decode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        pass
+    # Replace lone surrogates with U+FFFD, the standard replacement
+    # character. Encoding with "surrogatepass" lets us pull the bytes
+    # in, then drop invalid sequences.
+    return s.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+
 def _checksum(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -471,11 +489,19 @@ class KnowledgeBaseService:
         index_dir.mkdir(parents=True, exist_ok=True)
         import json
 
+        # Sanitize chunks so any lone surrogates (U+D800..U+DFFF) from
+        # bad PDF font tables don't break the strict utf-8 encoder.
+        # We use errors="replace" rather than stripping so the source
+        # still has useful text where possible.
+        clean_chunks = [
+            {"text": _sanitize_text(c.get("text", "")), "anchor": _sanitize_text(c.get("anchor", ""))}
+            for c in chunks
+        ]
         payload = {
             "document_id": doc.id,
             "knowledge_base_id": doc.knowledge_base_id,
             "embedding_model": doc.embedding_model or "",
-            "chunks": chunks,
+            "chunks": clean_chunks,
             "embeddings": embeddings,
         }
         (index_dir / "chunks.json").write_text(

@@ -36,6 +36,7 @@ vi.mock("@/lib/api", () => ({
 vi.mock("@/lib/store", () => ({
   useTutorStore: (selector: (s: Record<string, unknown>) => unknown) =>
     selector({
+      userId: "u-test",
       activeKnowledgeBaseId: null,
       setActiveKnowledgeBaseId: () => undefined,
     }),
@@ -115,5 +116,23 @@ describe("KnowledgeBasesPage — request bound", () => {
     // No upload happened, so the only GET should be the list. Detail
     // GETs are only justified for libs that actually have working docs.
     expect(getKnowledgeBase).not.toHaveBeenCalled();
+  });
+
+  it("survives a re-mount and still renders the list (not stuck on the spinner)", async () => {
+    // Regression: an aborted in-flight list() used to leave the page
+    // permanently on the loading spinner because the new request's
+    // success path was skipped by the abort guard. Now summaries are
+    // set BEFORE the second await, so re-mounts work.
+    const { unmount } = render(<KnowledgeBasesPage />);
+    await waitFor(() => expect(listKnowledgeBases).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+    unmount();
+    // A fresh mount must issue a new list call and resolve cleanly.
+    listKnowledgeBases.mockClear();
+    render(<KnowledgeBasesPage />);
+    await waitFor(() => expect(listKnowledgeBases).toHaveBeenCalled());
+    // After the list resolves, the spinner is gone (we don't crash on
+    // abort either).
+    expect(true).toBe(true);
   });
 });

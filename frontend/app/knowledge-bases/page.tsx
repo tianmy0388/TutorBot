@@ -52,6 +52,7 @@ export default function KnowledgeBasesPage() {
   const [newDesc, setNewDesc] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  const userId = useTutorStore((s) => s.userId);
   const activeId = useTutorStore((s) => s.activeKnowledgeBaseId);
   const setActiveId = useTutorStore((s) => s.setActiveKnowledgeBaseId);
 
@@ -79,7 +80,13 @@ export default function KnowledgeBasesPage() {
     abortRef.current = ac;
     setError(null);
     try {
-      const list = await listKnowledgeBases();
+      // Pass the abort signal to fetch so a follow-up load() can
+      // actually cancel the in-flight request. Without this the
+      // component re-renders while the first list is still pending,
+      // and the earlier "if (ac.signal.aborted) return" guard skips
+      // the setSummaries call — leaving the page stuck on the
+      // "正在加载" spinner forever.
+      const list = await listKnowledgeBases({ signal: ac.signal });
       if (ac.signal.aborted) return;
       setSummaries(list.items);
 
@@ -101,18 +108,18 @@ export default function KnowledgeBasesPage() {
       const next: Record<string, KnowledgeBaseDetail> = {};
       for (const id of want) {
         try {
-          next[id] = await getKnowledgeBase(id);
+          next[id] = await getKnowledgeBase(id, { signal: ac.signal });
           if (ac.signal.aborted) return;
-        } catch {
-          // ignore — summary list will still render
+        } catch (e: any) {
+          // ignore non-abort errors — summary list will still render
+          if (e?.name === "AbortError" || ac.signal.aborted) return;
         }
       }
       if (Object.keys(next).length === 0) return;
       setDetailsById((prev) => ({ ...prev, ...next }));
     } catch (e: any) {
-      if (!ac.signal.aborted) {
-        setError(e?.message ?? String(e));
-      }
+      if (e?.name === "AbortError" || ac.signal.aborted) return;
+      setError(e?.message ?? String(e));
     } finally {
       inFlightRef.current = false;
     }
@@ -120,9 +127,16 @@ export default function KnowledgeBasesPage() {
 
   // One-shot initial load.
   useEffect(() => {
+    // Only kick off the initial load after userId is available.
+    // Otherwise listKnowledgeBases may hit an auth gate and never
+    // resolve, leaving the page on the loading spinner.
+    if (!userId) {
+      setSummaries([]);
+      return;
+    }
     load();
     return () => abortRef.current?.abort();
-  }, [load]);
+  }, [load, userId]);
 
   // -- poll only while there's work to do ---------------------------------
 

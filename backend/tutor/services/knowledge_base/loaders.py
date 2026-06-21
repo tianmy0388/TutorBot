@@ -90,6 +90,14 @@ def _extract_pdf(path: Path) -> list[ExtractedChunk]:
             raise LoaderError("EXTRACTION_FAILED", f"PDF 第 {i} 页失败: {e}") from e
         text = text.strip()
         if text:
+            # Replace lone surrogates so the chunks json write
+            # doesn't trip the strict utf-8 encoder later.
+            try:
+                text.encode("utf-8").decode("utf-8")
+            except UnicodeEncodeError:
+                text = text.encode("utf-8", errors="replace").decode(
+                    "utf-8", errors="replace"
+                )
             chunks.append(ExtractedChunk(text=text, anchor=f"page {i}"))
     if not chunks:
         raise LoaderError("EMPTY_DOCUMENT", "PDF 无可提取文本")

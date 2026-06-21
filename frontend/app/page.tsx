@@ -147,7 +147,6 @@ export default function HomePage() {
           lastPackageId.current = null;
           lastTutorId.current = null;
           lastAssessmentId.current = null;
-          setSessionId(crypto.randomUUID());
         }}
         open={sidebarOpen}
         onToggle={() => setSidebarOpen((o) => !o)}

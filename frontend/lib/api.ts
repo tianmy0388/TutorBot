@@ -117,6 +117,18 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
+/**
+ * Type guard for AbortError so call sites can check without TS warnings.
+ */
+function isAbortError(e: unknown): boolean {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    "name" in e &&
+    (e as { name: string }).name === "AbortError"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Health / capabilities
 // ---------------------------------------------------------------------------
@@ -309,23 +321,20 @@ export const testWebSearchConnection = () =>
 // Knowledge bases (Task 8 / Task 9)
 // ---------------------------------------------------------------------------
 
-export const listKnowledgeBases = () =>
-  request<KnowledgeBaseListResponse>("/knowledge-bases");
+export const listKnowledgeBases = (init?: RequestInit) =>
+  request<KnowledgeBaseListResponse>("/knowledge-bases", init);
 
-export const getKnowledgeBase = (id: string) =>
+export const getKnowledgeBase = (id: string, init?: RequestInit) =>
   request<KnowledgeBaseDetail>(
     `/knowledge-bases/${encodeURIComponent(id)}`,
+    init,
   );
 
-export const createKnowledgeBase = (name: string, description: string) => {
-  const form = new FormData();
-  form.append("name", name);
-  form.append("description", description);
-  return request<KnowledgeBaseSummary>("/knowledge-bases", {
+export const createKnowledgeBase = (name: string, description: string) =>
+  request<KnowledgeBaseSummary>("/knowledge-bases", {
     method: "POST",
-    body: form,
+    body: JSON.stringify({ name, description }),
   });
-};
 
 export const deleteKnowledgeBase = (id: string) =>
   request<{ deleted: boolean; id: string }>(

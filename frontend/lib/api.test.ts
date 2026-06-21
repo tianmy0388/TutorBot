@@ -2,10 +2,12 @@
  * Stage 0 — request protocol regression tests.
  *
  * Pins down the bug from the plan: the request helper forces
- * `Content-Type: application/json` for every request, but upload and
- * knowledge-base-create calls send FormData. The browser will set the
- * correct Content-Type for FormData only if the helper does not
- * override it.
+ * `Content-Type: application/json` for every request. After the
+ * stage-1 protocol change, ``createKnowledgeBase`` sends a JSON body
+ * (the backend uses a Pydantic ``BaseModel``), but document uploads
+ * still send ``FormData`` (the backend takes ``File(...)``). The
+ * helper must NOT override the Content-Type on multipart — the
+ * browser sets the boundary.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,7 +32,9 @@ afterEach(() => {
 });
 
 describe("request() Content-Type", () => {
-  it("does NOT set Content-Type when body is FormData", async () => {
+  it("sends a JSON body for createKnowledgeBase (stage 1 protocol)", async () => {
+    // After stage 1, createKnowledgeBase uses a JSON body — the
+    // router's Pydantic CreateLibraryRequest expects {name, description}.
     const { createKnowledgeBase } = await import("./api");
     try {
       await createKnowledgeBase("name", "desc");
@@ -40,18 +44,13 @@ describe("request() Content-Type", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toMatch(/\/knowledge-bases$/);
-    // The body must be FormData (or a multipart-compatible value).
-    expect(init.body).toBeInstanceOf(FormData);
-    // The Content-Type must NOT be a hard-coded JSON header. Either
-    // the header is absent (browser sets the boundary) or it is
-    // `multipart/form-data` without a boundary (browser adds it).
-    const headers = init.headers ?? {};
-    const ct =
-      (headers as Record<string, string>)["Content-Type"] ??
-      (headers as Record<string, string>)["content-type"];
-    if (ct !== undefined) {
-      expect(ct.toLowerCase()).not.toBe("application/json");
-    }
+    // The body must be a JSON-encoded string, not FormData.
+    const headers = (init.headers ?? {}) as Record<string, string>;
+    const ct = headers["Content-Type"] ?? headers["content-type"];
+    expect(ct?.toLowerCase()).toBe("application/json");
+    expect(typeof init.body).toBe("string");
+    const parsed = JSON.parse(init.body as string);
+    expect(parsed).toEqual({ name: "name", description: "desc" });
   });
 
   it("sets Content-Type to application/json for JSON bodies", async () => {
