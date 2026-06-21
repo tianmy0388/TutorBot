@@ -571,6 +571,10 @@ export interface KnowledgeBaseListResponse {
 export interface MaskedSecret {
   configured: boolean;
   preview: string;
+  /** True if this provider requires an API key to function (false for MCP). */
+  required?: boolean;
+  /** Optional human hint shown under the field (e.g. for MCP). */
+  hint?: string;
 }
 
 export interface LLMConfig {

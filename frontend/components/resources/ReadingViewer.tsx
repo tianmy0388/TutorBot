@@ -7,6 +7,8 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import { BookOpen, ExternalLink, Quote } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Resource } from "@/lib/types";
@@ -52,7 +54,10 @@ export function ReadingViewer({ resource }: { resource: Resource }) {
 
       {/* Main markdown body */}
       <div className="prose-tutor">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeKatex]}
+        >
           {resource.content || ""}
         </ReactMarkdown>
       </div>

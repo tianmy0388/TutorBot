@@ -95,6 +95,15 @@ export function dispatchStreamEvent(
       if (contract && typeof contract === "object") {
         routeResult(contract, streamEv);
       }
+      // Always clear the legacy single-activeTurn indicator. The new
+      // job-reducer model doesn't touch activeTurn.phase, but
+      // ChatMessages still shows "正在调用 Agent…" while phase !==
+      // "idle" — so a stale phase from before the merge / a phase set
+      // by a legacy code path would otherwise hang forever.
+      useTutorStore.getState().completeActiveTurn(
+        contract ?? null,
+        null,
+      );
       break;
     }
     // "done" and "cancelled" are no longer required for the visible

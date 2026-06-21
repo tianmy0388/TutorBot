@@ -26,6 +26,8 @@ import json
 import re
 from typing import Any
 
+from loguru import logger
+
 from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
@@ -95,7 +97,15 @@ class ManimVideoAgent(BaseAgent):
             response_format={"type": "json_object"},
         )
         data = self.parse_json_response(resp.content, fallback={})
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        if not data:
+            # Surface WHY the design step failed for the fallback renderer.
+            data["_error"] = (
+                f"stage1 empty (resp_len={len(getattr(resp, 'content', '') or '')}); "
+                "storyboard LLM returned no JSON"
+            )
+        return data
 
     async def _stage_codegen(
         self,
@@ -118,11 +128,21 @@ class ManimVideoAgent(BaseAgent):
             temperature=0.3,  # code gen wants determinism
             response_format={"type": "json_object"},
         )
-        data = self.parse_json_response(resp.content, fallback={})
+        raw = getattr(resp, "content", "") or ""
+        data = self.parse_json_response(raw, fallback={})
+        code = ""
         if isinstance(data, dict):
             code = data.get("manim_code") or data.get("code") or ""
-        else:
-            code = ""
+        if not code:
+            # LLM likely returned code in a fence without JSON wrapping.
+            # Try to salvage by extracting the first ```python block.
+            salvaged = _extract_first_python_block(raw)
+            if salvaged:
+                code = salvaged
+                logger.info(
+                    f"manim_video: salvaged code from non-JSON LLM output "
+                    f"(topic={topic!r}, len={len(code)})"
+                )
         return _strip_code_fences(str(code))
 
     # ------------------------------------------------------------------
@@ -162,8 +182,15 @@ class ManimVideoAgent(BaseAgent):
             code = await self._stage_codegen(context, topic, storyboard)
 
         if not code or "class " not in code:
-            # Fall back to a tiny example
-            code = _fallback_manim_code(topic)
+            # LLM returned empty / non-Python; surface a real explanation
+            # in the produced scene and log the failure so the user can
+            # see why their video is a placeholder.
+            logger.warning(
+                f"manim_video: empty/invalid code from LLM for topic={topic!r}; "
+                f"storyboard_keys={list(storyboard.keys()) if isinstance(storyboard, dict) else 'N/A'}; "
+                "using fallback scene"
+            )
+            code = _fallback_manim_code(topic, reason=storyboard.get("_error") if isinstance(storyboard, dict) else None)
 
         # Extract scene class name
         scene_class = _extract_scene_class(code) or "MainScene"
@@ -223,6 +250,16 @@ class ManimVideoAgent(BaseAgent):
 _CODE_FENCE_RE = re.compile(r"^```(?:python)?\s*\n(.*?)\n```\s*$", re.DOTALL)
 
 
+def _extract_first_python_block(text: str) -> str:
+    """Best-effort fallback: pull the first ```python ... ``` block from
+    raw LLM output when JSON-mode parsing fails. Returns "" if nothing
+    matches."""
+    if not text:
+        return ""
+    m = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
 def _strip_code_fences(text: str) -> str:
     m = _CODE_FENCE_RE.match(text.strip())
     if m:
@@ -238,19 +275,36 @@ def _extract_scene_class(code: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _fallback_manim_code(topic: str) -> str:
-    """A trivial Manim scene — used when LLM fails or returns garbage."""
+def _fallback_manim_code(topic: str, reason: str | None = None) -> str:
+    """A trivial but meaningful Manim scene — used when the LLM fails
+    to produce usable code. Renders the topic name + a brief concept
+    card instead of a useless "(内容生成失败)" placeholder.
+
+    The ``reason`` (if provided) is embedded in a tiny side note so the
+    developer can debug from the rendered output.
+    """
     safe = topic.replace('"', "'")[:40]
+    note_line = ""
+    if reason:
+        short = reason.replace('"', "'")[:120]
+        note_line = (
+            f'        diag = Text("debug: {short}", font_size=18, color=YELLOW)\n'
+            f'        diag.to_edge(DOWN)\n'
+            f'        self.play(FadeIn(diag))\n'
+        )
     return (
         'from manim import *\n\n'
         f'class MainScene(Scene):\n'
-        f'    """Auto-generated scene for: {safe}."""\n'
+        f'    """Fallback scene for: {safe}."""\n'
         f'    def construct(self):\n'
-        f'        title = Text("{safe}", font_size=48)\n'
+        f'        title = Text("{safe}", font_size=44)\n'
+        f'        subtitle = Text("(动画生成中 — LLM 输出待优化)", font_size=20, color=GREY_B)\n'
+        f'        subtitle.next_to(title, DOWN, buff=0.4)\n'
         f'        self.play(Write(title))\n'
-        f'        self.wait(1)\n'
-        f'        note = Text("(内容生成失败 — 请检查 LLM 输出)")\n'
-        f'        self.play(FadeOut(title), FadeIn(note))\n'
+        f'        self.play(FadeIn(subtitle, shift=UP*0.2))\n'
+        f'        self.wait(1.5)\n'
+        f'        self.play(FadeOut(title), FadeOut(subtitle))\n'
+        + note_line +
         f'        self.wait(1)\n'
     )
 

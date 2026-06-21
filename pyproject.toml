@@ -55,6 +55,14 @@ dependencies = [
     # Markdown / Code execution
     "markdown>=3.6",
     "pygments>=2.18.0",
+    # Common scientific libs used by CodeSandbox examples (matplotlib /
+    # numpy / pandas). The code-sandbox subprocess runs in the same
+    # interpreter as the backend, so generated snippets that import
+    # them need them to actually be installed. Bundle the trio so
+    # generated examples actually run.
+    "matplotlib>=3.8.0",
+    "numpy>=1.26.0",
+    "pandas>=2.0.0",
     # Utilities
     "pyyaml>=6.0",
     "tenacity>=8.0.0",

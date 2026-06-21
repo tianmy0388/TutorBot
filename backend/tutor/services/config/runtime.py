@@ -81,6 +81,8 @@ class MaskedSecret(BaseModel):
 
     configured: bool
     preview: str = ""  # e.g. "sk-...ab12"
+    required: bool = True  # False for providers that don't need a key (e.g. MCP)
+    hint: str = ""  # e.g. "MCP provider reads credentials from .mcp.json"
 
 
 class _BaseSection(BaseModel):
@@ -190,15 +192,32 @@ SECTION_FIELD_MAP: dict[str, dict[str, str]] = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def mask_key(value: str | None) -> MaskedSecret:
+def mask_key(
+    value: str | None,
+    *,
+    required: bool = True,
+    hint: str = "",
+) -> MaskedSecret:
     """Return a masked preview + a configured flag for an API key."""
     if not value:
-        return MaskedSecret(configured=False, preview="")
+        return MaskedSecret(
+            configured=False,
+            preview="",
+            required=required,
+            hint=hint,
+        )
     if len(value) <= 8:
-        return MaskedSecret(configured=True, preview="*" * len(value))
+        return MaskedSecret(
+            configured=True,
+            preview="*" * len(value),
+            required=required,
+            hint=hint,
+        )
     return MaskedSecret(
         configured=True,
         preview=f"{value[:3]}…{value[-4:]}",
+        required=required,
+        hint=hint,
     )
 
 
@@ -281,7 +300,19 @@ class RuntimeConfigService:
         s = get_settings()
         llm_secret = s.llm_api_key or os.environ.get("TUTOR_LLM_API_KEY", "")
         embed_secret = s.embed_api_key or os.environ.get("TUTOR_EMBED_API_KEY", "")
+        # Web-search uses a runtime-override-only model: the API key is
+        # read straight from os.environ (because MCP / SearXNG / Bing
+        # may consume it from a separate config). When the provider is
+        # ``mcp``, the API key is irrelevant — the actual credentials
+        # live in the MCP server config (.mcp.json) — so the field is
+        # marked ``required=False`` in the response shape via a hint.
         web_secret = os.environ.get("TUTOR_WEB_SEARCH_API_KEY", "")
+        web_key_required = s.web_search_provider != "mcp"
+        web_hint = (
+            "MCP provider 不需要 API Key，凭证由 .mcp.json 中的环境变量提供"
+            if s.web_search_provider == "mcp"
+            else ""
+        )
         return {
             "llm": {
                 "provider": s.llm_provider,
@@ -303,7 +334,11 @@ class RuntimeConfigService:
                 "enabled": s.web_search_enabled,
                 "provider": s.web_search_provider,
                 "max_results": s.web_search_max_results,
-                "api_key": mask_key(web_secret).model_dump(),
+                "api_key": mask_key(
+                    web_secret,
+                    required=web_key_required,
+                    hint=web_hint,
+                ).model_dump(),
             },
         }
 
@@ -455,19 +490,50 @@ async def _async_collect_one_stream(provider, req) -> str:  # type: ignore[no-un
 
 
 def _collect_one_stream(provider, req) -> str:  # type: ignore[no-untyped-def]
-    """Synchronous wrapper around :func:`_async_collect_one_stream`."""
+    """Synchronous wrapper around :func:`_async_collect_one_stream`.
+
+    When called from a running event loop (the FastAPI handler) we
+    cannot use ``asyncio.run``; instead we run the coroutine on the
+    existing loop via ``run_until_complete`` after scheduling it
+    through a worker thread. This is the same shape as
+    ``asyncio.run`` but without the "loop already running" failure.
+
+    For the typical case where no loop is running, falls back to
+    ``asyncio.run``.
+    """
     import asyncio as _asyncio
 
     try:
         loop = _asyncio.get_event_loop()
     except RuntimeError:
         loop = None
-    if loop is not None and loop.is_running():
-        # We're already inside an event loop (the FastAPI handler).
-        # Return a sentinel so the caller surfaces a real test attempt
-        # via the call() path on the next refresh.
-        return ""
-    return _asyncio.run(_async_collect_one_stream(provider, req))
+    if loop is None or not loop.is_running():
+        return _asyncio.run(_async_collect_one_stream(provider, req))
+    # We ARE inside a running loop. Run the coroutine to completion by
+    # hopping through a worker thread + a fresh event loop there.
+    import threading
+
+    result_box: list[str] = []
+    err_box: list[BaseException] = []
+
+    def _worker() -> None:
+        new_loop = _asyncio.new_event_loop()
+        try:
+            _asyncio.set_event_loop(new_loop)
+            result_box.append(
+                new_loop.run_until_complete(_async_collect_one_stream(provider, req))
+            )
+        except BaseException as exc:  # noqa: BLE001
+            err_box.append(exc)
+        finally:
+            new_loop.close()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join()
+    if err_box:
+        raise err_box[0]
+    return result_box[0] if result_box else ""
 
 
 def _test_embedding() -> dict[str, Any]:
@@ -480,8 +546,8 @@ def _test_embedding() -> dict[str, Any]:
         from tutor.services.embeddings.embedder_factory import get_runtime_embedder
 
         embedder = get_runtime_embedder(s)
-        resp = embedder.embed(EmbedRequest(texts=["ping"]))
-        vec = resp.embeddings
+        resp = embedder.embed(EmbedRequest(input=["ping"]))
+        vec = resp.vectors
         latency_ms = int((_time.monotonic() - started) * 1000)
         return {
             "ok": bool(vec) and len(vec[0]) > 0,

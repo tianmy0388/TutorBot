@@ -186,14 +186,14 @@ export default function HomePage() {
 
         {/* Center + right split */}
         <div className="flex-1 flex overflow-hidden">
-          {/* Center: chat */}
+          {/* Center: chat (1:1 with right pane) */}
           <section className="flex-1 flex flex-col min-w-0 border-r border-fg/10">
             <ChatMessages />
             <ChatComposer />
           </section>
 
-          {/* Right: tabs */}
-          <aside className="w-[420px] bg-bg-panel flex flex-col overflow-hidden">
+          {/* Right: tabs (1:1 with chat via flex-1, not fixed 420px) */}
+          <aside className="flex-1 bg-bg-panel flex flex-col overflow-hidden min-w-[360px]">
             {/* Tab bar */}
             <div className="flex items-center gap-1 px-2 py-2 border-b border-fg/10 shrink-0 bg-bg-panel/80 overflow-x-auto">
               <TabButton

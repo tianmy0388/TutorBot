@@ -31,7 +31,12 @@ export interface ServiceConfigSectionProps {
     field: string;
     type?: "text" | "number";
   }>;
-  apiKey: { configured: boolean; preview: string };
+  apiKey: {
+    configured: boolean;
+    preview: string;
+    required?: boolean;
+    hint?: string;
+  };
   onSave: (patch: Record<string, unknown>) => Promise<void>;
   onTest: () => Promise<{ ok: boolean; latency_ms: number; message: string; code?: string }>;
   providerOptions?: string[];
@@ -178,6 +183,11 @@ export function ServiceConfigSection({
       <div>
         <label className="block text-xs font-semibold text-fg-muted mb-1">
           API Key
+          {apiKey.required === false && (
+            <span className="ml-2 text-[10px] font-normal text-fg-subtle">
+              (本 Provider 不需要 Key)
+            </span>
+          )}
         </label>
         <div className="flex items-center gap-2">
           <code
@@ -186,31 +196,37 @@ export function ServiceConfigSection({
           >
             {apiKey.configured
               ? apiKey.preview || "••••••••"
+              : apiKey.required === false
+              ? "—"
               : "（未配置）"}
           </code>
-          <button
-            type="button"
-            className="btn-secondary text-sm h-9"
-            onClick={() => setShowKeyInput((v) => !v)}
-            data-testid={`${title}-toggle-key`}
-            title="修改 API Key"
-          >
-            {showKeyInput ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-          </button>
-          {apiKey.configured && (
-            <button
-              type="button"
-              className="btn-secondary text-sm h-9"
-              onClick={() => setClearKey((v) => !v)}
-              data-testid={`${title}-clear-key`}
-              title="清除现有 API Key"
-              aria-pressed={clearKey}
-            >
-              {clearKey ? "已选清除" : "清除"}
-            </button>
+          {apiKey.required !== false && (
+            <>
+              <button
+                type="button"
+                className="btn-secondary text-sm h-9"
+                onClick={() => setShowKeyInput((v) => !v)}
+                data-testid={`${title}-toggle-key`}
+                title="修改 API Key"
+              >
+                {showKeyInput ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+              {apiKey.configured && (
+                <button
+                  type="button"
+                  className="btn-secondary text-sm h-9"
+                  onClick={() => setClearKey((v) => !v)}
+                  data-testid={`${title}-clear-key`}
+                  title="清除现有 API Key"
+                  aria-pressed={clearKey}
+                >
+                  {clearKey ? "已选清除" : "清除"}
+                </button>
+              )}
+            </>
           )}
         </div>
-        {showKeyInput && (
+        {apiKey.required !== false && showKeyInput && (
           <input
             type="password"
             className="input mt-2"
@@ -221,9 +237,19 @@ export function ServiceConfigSection({
             autoComplete="off"
           />
         )}
-        <p className="text-[11px] text-fg-subtle mt-1">
-          出于安全考虑，原 Key 不会回显到界面。提交空 Key 表示保留旧值；点"清除"会移除当前 Key。
-        </p>
+        {apiKey.hint && (
+          <p
+            data-testid={`${title}-key-hint`}
+            className="text-[11px] text-yellow-300/80 mt-1"
+          >
+            💡 {apiKey.hint}
+          </p>
+        )}
+        {!apiKey.hint && (
+          <p className="text-[11px] text-fg-subtle mt-1">
+            出于安全考虑，原 Key 不会回显到界面。提交空 Key 表示保留旧值；点"清除"会移除当前 Key。
+          </p>
+        )}
       </div>
 
       <div className="flex items-center gap-2 pt-2 border-t border-fg/10">
