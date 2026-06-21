@@ -1,4 +1,4 @@
-"""Knowledge base ingestion service (Task 8).
+"""Knowledge base ingestion service (Task 8 + 2026-06-21 async fix).
 
 The service orchestrates the state machine:
 
@@ -8,10 +8,19 @@ The service orchestrates the state machine:
 The state transitions live in this module so the API router, the
 file-upload handler and the (future) async worker all call the same
 ``KnowledgeBaseService`` methods.
+
+Async dispatch
+--------------
+Stage 2 of the 2026-06-21 stability plan decouples upload from
+ingestion. The router now calls ``enqueue_ingestion`` instead of
+``run_ingestion``; the method schedules an ``asyncio.Task`` on a
+bounded queue and returns immediately. The HTTP upload response is
+no longer blocked by PDF parsing / embedding latency.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import shutil
 import uuid
@@ -51,6 +60,97 @@ def _checksum(path: Path) -> str:
     return h.hexdigest()
 
 
+# Default concurrency cap for the in-app ingestion queue. Two
+# concurrent parses is enough for a local demo without holding the
+# event loop hostage; a real deployment would push this to a
+# dedicated worker (Celery / RQ / arq).
+DEFAULT_MAX_CONCURRENT_INGESTIONS = 2
+
+
+class _IngestionQueue:
+    """Bounded asyncio task queue for knowledge-base ingestion.
+
+    Public surface is just :meth:`enqueue` and :meth:`shutdown`. The
+    class is process-singleton and shared via :func:`get_ingestion_queue`.
+    """
+
+    def __init__(self, *, max_concurrent: int = DEFAULT_MAX_CONCURRENT_INGESTIONS) -> None:
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._closed = False
+
+    def enqueue(self, coro_factory) -> asyncio.Task[Any]:
+        """Schedule ``coro_factory()`` (called with no args) on the loop.
+
+        The factory must return a coroutine (typically a bound method
+        that does ``self.run_ingestion(doc_id)``). Returns the
+        :class:`asyncio.Task` so the caller can attach callbacks or
+        keep a reference.
+        """
+        if self._closed:
+            raise RuntimeError("ingestion queue is shut down")
+        task = asyncio.create_task(self._guarded(coro_factory()))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    async def _guarded(self, coro) -> Any:
+        try:
+            async with self._semaphore:
+                return await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # The queue's job is to ensure a runaway ingestion task
+            # never escapes — log and swallow so the loop stays alive.
+            logger.exception(
+                "ingestion task failed outside the state machine: {err}",
+                err=e,
+            )
+            return None
+
+    async def drain(self, timeout: float = 5.0) -> None:
+        """Wait for in-flight tasks to complete (best effort)."""
+        if not self._tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("ingestion queue drain timed out after {t}s", t=timeout)
+
+    def shutdown(self) -> None:
+        """Cancel in-flight tasks. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        for t in list(self._tasks):
+            t.cancel()
+
+
+_queue: _IngestionQueue | None = None
+_queue_lock: asyncio.Lock | None = None
+
+
+def get_ingestion_queue() -> _IngestionQueue:
+    """Return the process-wide ingestion queue (lazy)."""
+    global _queue
+    if _queue is None:
+        _queue = _IngestionQueue()
+    return _queue
+
+
+async def reset_ingestion_queue() -> None:
+    """Cancel and drop the singleton queue (tests)."""
+    global _queue
+    if _queue is not None:
+        await _queue.drain(timeout=1.0)
+        _queue.shutdown()
+        _queue = None
+
+
 class KnowledgeBaseService:
     """High-level orchestrator for ingestion."""
 
@@ -59,9 +159,11 @@ class KnowledgeBaseService:
         *,
         store: KnowledgeBaseStore | None = None,
         settings: Settings | None = None,
+        queue: _IngestionQueue | None = None,
     ) -> None:
         self.store = store or get_kb_store()
         self.settings = settings or get_settings()
+        self._queue = queue
 
     # ---- library CRUD ----------------------------------------------------
 
@@ -157,15 +259,44 @@ class KnowledgeBaseService:
 
     # ---- ingestion --------------------------------------------------------
 
+    def enqueue_ingestion(self, doc_id: str) -> asyncio.Task[Any]:
+        """Schedule a background ingestion run for ``doc_id``.
+
+        Returns the :class:`asyncio.Task` so callers (the router) can
+        keep a reference, but the HTTP response should not wait on it.
+        The task is concurrency-capped and exceptions are caught at
+        the queue level so a single bad document cannot crash the
+        event loop.
+        """
+        queue = self._queue or get_ingestion_queue()
+
+        async def _runner() -> KnowledgeDocument | None:
+            return self.run_ingestion(doc_id)
+
+        return queue.enqueue(_runner)
+
     def run_ingestion(self, doc_id: str) -> KnowledgeDocument | None:
         """Run the full extract → chunk → embed pipeline for one document.
 
-        This is synchronous for the demo; the state machine is
-        preserved so it can be moved to a background worker later.
+        Synchronous but the state machine is fully isolated, so it
+        can be called from a background ``asyncio.Task`` (see
+        :meth:`enqueue_ingestion`) without blocking the request
+        thread. The document record is the source of truth — the
+        function reads its current status before deciding to run.
         """
+        import time
+
         doc = self.store.get_document(doc_id)
         if doc is None:
             return None
+        lib_id = doc.knowledge_base_id
+        started = time.monotonic()
+        logger.info(
+            "ingestion.start lib_id={lib_id} doc_id={doc_id} filename={filename}",
+            lib_id=lib_id,
+            doc_id=doc_id,
+            filename=doc.source_filename,
+        )
         path = self._document_path(doc)
         if not path.exists():
             self.store.set_document_status(
@@ -174,9 +305,11 @@ class KnowledgeBaseService:
                 error=f"missing source file: {path}",
                 error_code="MISSING_SOURCE",
             )
+            self._log_outcome(doc_id, lib_id, "MISSING_SOURCE", started)
             return self.store.get_document(doc_id)
 
         # Extract
+        stage_started = time.monotonic()
         self.store.set_document_status(doc_id, status=IngestionStatus.EXTRACTING)
         try:
             chunks = extract_text(path)
@@ -187,6 +320,7 @@ class KnowledgeBaseService:
                 error=e.message,
                 error_code=e.code,
             )
+            self._log_outcome(doc_id, lib_id, e.code, started)
             return self.store.get_document(doc_id)
         except Exception as e:  # noqa: BLE001
             self.store.set_document_status(
@@ -195,9 +329,18 @@ class KnowledgeBaseService:
                 error=f"{type(e).__name__}: {e}",
                 error_code="EXTRACTION_FAILED",
             )
+            self._log_outcome(doc_id, lib_id, "EXTRACTION_FAILED", started)
             return self.store.get_document(doc_id)
+        logger.info(
+            "ingestion.stage lib_id={lib_id} doc_id={doc_id} stage={stage} duration_ms={ms}",
+            lib_id=lib_id,
+            doc_id=doc_id,
+            stage="extract",
+            ms=int((time.monotonic() - stage_started) * 1000),
+        )
 
         # Chunk (re-aggregate by char count for stable counts)
+        stage_started = time.monotonic()
         self.store.set_document_status(doc_id, status=IngestionStatus.CHUNKING)
         chunk_records = self._chunk(chunks)
         if not chunk_records:
@@ -207,10 +350,19 @@ class KnowledgeBaseService:
                 error="chunking produced no chunks",
                 error_code="EMPTY_DOCUMENT",
             )
+            self._log_outcome(doc_id, lib_id, "EMPTY_DOCUMENT", started)
             return self.store.get_document(doc_id)
+        logger.info(
+            "ingestion.stage lib_id={lib_id} doc_id={doc_id} stage={stage} duration_ms={ms}",
+            lib_id=lib_id,
+            doc_id=doc_id,
+            stage="chunk",
+            ms=int((time.monotonic() - stage_started) * 1000),
+        )
 
         # Embed (best-effort: if no embedder configured, we still mark
         # the document ready as long as the text is present).
+        stage_started = time.monotonic()
         self.store.set_document_status(doc_id, status=IngestionStatus.EMBEDDING)
         try:
             embedding_model, embedded = self._embed(chunk_records)
@@ -221,7 +373,15 @@ class KnowledgeBaseService:
                 error=f"embed failed: {e}",
                 error_code="EMBED_FAILED",
             )
+            self._log_outcome(doc_id, lib_id, "EMBED_FAILED", started)
             return self.store.get_document(doc_id)
+        logger.info(
+            "ingestion.stage lib_id={lib_id} doc_id={doc_id} stage={stage} duration_ms={ms}",
+            lib_id=lib_id,
+            doc_id=doc_id,
+            stage="embed",
+            ms=int((time.monotonic() - stage_started) * 1000),
+        )
 
         # Persist the chunk store to disk.
         try:
@@ -233,6 +393,7 @@ class KnowledgeBaseService:
                 error=f"index write failed: {e}",
                 error_code="INDEX_WRITE_FAILED",
             )
+            self._log_outcome(doc_id, lib_id, "INDEX_WRITE_FAILED", started)
             return self.store.get_document(doc_id)
 
         self.store.set_document_status(
@@ -241,7 +402,19 @@ class KnowledgeBaseService:
             chunk_count=len(chunk_records),
             embedding_model=embedding_model,
         )
+        self._log_outcome(doc_id, lib_id, "READY", started)
         return self.store.get_document(doc_id)
+
+    def _log_outcome(self, doc_id: str, lib_id: str, code: str, started: float) -> None:
+        import time
+
+        logger.info(
+            "ingestion.outcome lib_id={lib_id} doc_id={doc_id} error_code={code} duration_ms={ms}",
+            lib_id=lib_id,
+            doc_id=doc_id,
+            code=code,
+            ms=int((time.monotonic() - started) * 1000),
+        )
 
     # ---- chunking / embedding helpers ------------------------------------
 

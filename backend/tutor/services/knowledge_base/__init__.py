@@ -13,6 +13,8 @@ from tutor.services.knowledge_base.schema import (
 )
 from tutor.services.knowledge_base.service import (
     KnowledgeBaseService,
+    get_ingestion_queue,
+    reset_ingestion_queue,
     seed_default_libraries,
 )
 from tutor.services.knowledge_base.store import (
@@ -31,7 +33,9 @@ __all__ = [
     "LoaderError",
     "SUPPORTED_EXTENSIONS",
     "extract_text",
+    "get_ingestion_queue",
     "get_kb_store",
+    "reset_ingestion_queue",
     "reset_kb_store",
     "seed_default_libraries",
 ]

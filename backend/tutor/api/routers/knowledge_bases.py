@@ -67,11 +67,19 @@ async def delete_knowledge_base(lib_id: str) -> dict[str, Any]:
     return {"deleted": True, "id": lib_id}
 
 
-@router.post("/knowledge-bases/{lib_id}/documents")
+@router.post("/knowledge-bases/{lib_id}/documents", status_code=202)
 async def upload_document(
     lib_id: str,
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
+    """Persist the upload, then dispatch ingestion to a background task.
+
+    Returns 202 with the document in the ``uploaded`` state. The
+    actual extraction / chunking / embedding runs in a bounded
+    ``asyncio.Task`` so the request thread is freed immediately.
+    Clients poll ``GET /knowledge-bases/{lib_id}`` to see the
+    state-machine transitions.
+    """
     _ensure_seeded()
     if _service.get_library(lib_id) is None:
         raise HTTPException(status_code=404, detail="library not found")
@@ -81,7 +89,11 @@ async def upload_document(
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
             status_code=422,
-            detail=f"unsupported extension {ext!r}; allowed: {sorted(SUPPORTED_EXTENSIONS)}",
+            detail={
+                "code": "UNSUPPORTED_EXTENSION",
+                "message": f"unsupported extension {ext!r}",
+                "allowed": sorted(SUPPORTED_EXTENSIONS),
+            },
         )
     # Save the upload to a temp file first so the service can copy it.
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
@@ -98,10 +110,12 @@ async def upload_document(
             tmp_path.unlink()
         except OSError:  # noqa: BLE001
             pass
-    # Synchronously run the ingestion pipeline for the demo. In a
-    # production deployment this would be moved to a background worker.
-    final = _service.run_ingestion(doc.id) or doc
-    return final.model_dump(mode="json")
+    # Dispatch the ingestion pipeline as a background task. The
+    # response goes back to the client immediately with the document
+    # in 'uploaded' state; subsequent state transitions land in the
+    # KB store and the client picks them up via the polling endpoint.
+    _service.enqueue_ingestion(doc.id)
+    return doc.model_dump(mode="json")
 
 
 @router.post("/knowledge-bases/{lib_id}/documents/{doc_id}/retry")

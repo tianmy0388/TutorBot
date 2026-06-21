@@ -124,9 +124,14 @@ async def test_kb_upload_then_list(tmp_path, monkeypatch) -> None:
                 "/api/v1/knowledge-bases/ai_introduction/documents",
                 files={"file": ("doc.txt", f, "text/plain")},
             )
-        assert r2.status_code == 200, r2.text
+        # Async upload (stage 2 of the 2026-06-21 plan): the router
+        # returns 202 with the document in the 'uploaded' state. The
+        # actual ingestion runs as a background task; the demo
+        # scenario is satisfied by the response itself, not by
+        # waiting for the queue to drain.
+        assert r2.status_code == 202, r2.text
         doc = r2.json()
-        assert doc["status"] in ("ready", "failed")
+        assert doc["status"] in ("uploaded", "ready", "failed")
 
 
 @pytest.mark.asyncio

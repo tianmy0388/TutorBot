@@ -130,7 +130,8 @@ def test_upload_does_not_run_ingestion_inline(
     )
 
 
-def test_enqueue_ingestion_dispatches_background(
+@pytest.mark.asyncio
+async def test_enqueue_ingestion_dispatches_background(
     service: KnowledgeBaseService, tmp_path: Path
 ) -> None:
     """``enqueue_ingestion`` must return quickly and let the caller
@@ -141,16 +142,27 @@ def test_enqueue_ingestion_dispatches_background(
     """
     import time
 
+    from tutor.services.knowledge_base import IngestionStatus
+
     lib = service.create_library(name="Async2")
     src = _write_tmp_file(tmp_path / "doc.txt", "hello\n")
     doc = service.upload_document(
         knowledge_base_id=lib.id, source_path=src, original_filename="doc.txt"
     )
     started = time.monotonic()
-    service.enqueue_ingestion(doc.id)  # must not block
+    task = service.enqueue_ingestion(doc.id)  # must not block
     elapsed = time.monotonic() - started
-    assert elapsed < 0.2, f"enqueue_ingestion took {elapsed:.3f}s — should be < 200ms"
-    assert final.error_code == "MISSING_SOURCE"
+    assert elapsed < 0.2, (
+        f"enqueue_ingestion took {elapsed:.3f}s — should be < 200ms"
+    )
+    # Let the task finish so we don't leak into other tests.
+    await task
+    final = service.get_document(doc.id)
+    assert final is not None
+    assert final.status in {
+        IngestionStatus.READY.value,
+        IngestionStatus.FAILED.value,
+    }
 
 
 def test_retry_failed_document_resets_state(
