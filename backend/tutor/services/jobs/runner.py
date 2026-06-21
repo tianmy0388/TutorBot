@@ -405,12 +405,16 @@ class JobRunner:
 
             # Persist the terminal event BEFORE the terminal status, so
             # a poll that observes the terminal status also observes the
-            # terminal event in the replay buffer.
-            terminal_evt = self._terminal_event(job, contract)
-            try:
-                await self.store.append_event(job.job_id, terminal_evt, terminal_evt["seq"])
-            except Exception:  # noqa: BLE001
-                logger.debug(f"Failed to persist job_terminal event job={job.job_id[:12]}…")
+            # terminal event in the replay buffer. The seq is computed
+            # from the current last_seq so resume-replay can deliver
+            # terminal events with their full metadata.
+            next_seq = await self._next_seq(job.job_id)
+            terminal_evt = self._terminal_event(job, contract, seq=next_seq)
+            persisted = await self._persist_terminal_once(job.job_id, terminal_evt)
+            if not persisted:
+                logger.debug(
+                    f"JobRunner terminal event already persisted job={job.job_id[:12]}…"
+                )
 
             if current is not None and current.status == JobStatus.CANCELLED:
                 await self.store.update_status(
@@ -559,22 +563,65 @@ class JobRunner:
         )
 
     @staticmethod
-    def _terminal_event(job: Job, contract: JobResultContract) -> dict[str, Any]:
+    def _terminal_event(
+        job: Job,
+        contract: JobResultContract,
+        *,
+        seq: int = 0,
+    ) -> dict[str, Any]:
+        """Build the canonical ``job_terminal`` event.
+
+        ``seq`` should be the next sequence number in the job's
+        replay buffer (the runner looks it up before calling).
+        Defaults to 0 for backward compatibility, but every caller
+        in the runner path now passes the real value.
+        """
         return {
             "type": "job_terminal",
             "source": "job_runner",
             "stage": "terminal",
             "content": contract.assistant_message,
-            "metadata": {
-                "job_id": job.job_id,
-                "contract": contract.model_dump(mode="json"),
-            },
+            "job_id": job.job_id,
             "session_id": job.session_id,
             "turn_id": "",
-            "seq": 0,
+            "seq": seq,
             "timestamp": datetime.now(timezone.utc).timestamp(),
             "event_id": uuid.uuid4().hex,
+            "metadata": {
+                "job_id": job.job_id,
+                "session_id": job.session_id,
+                "contract": contract.model_dump(mode="json"),
+            },
         }
+
+    async def _next_seq(self, job_id: str) -> int:
+        """Return the next sequence number for a job's replay buffer."""
+        job = await self.store.get(job_id)
+        if job is None:
+            return 0
+        return (job.last_seq or 0) + 1
+
+    async def _persist_terminal_once(
+        self,
+        job_id: str,
+        terminal_evt: dict[str, Any],
+    ) -> bool:
+        """Persist the terminal event idempotently.
+
+        Returns ``True`` if this call performed the write, ``False``
+        if a prior run already did. The guard is a simple
+        last-event-type check on the replay buffer — fast, and
+        good enough to prevent double-terminal broadcasts when a
+        process restarts mid-job and tries to resume.
+        """
+        job = await self.store.get(job_id)
+        if job is None:
+            return False
+        events = list(job.events or [])
+        if events and events[-1].get("type") == "job_terminal":
+            return False
+        await self.store.append_event(job_id, terminal_evt, terminal_evt["seq"])
+        return True
 
     # ------------------------------------------------------------------
     # Convenience

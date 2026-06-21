@@ -3,17 +3,20 @@
 /**
  * ChatMessages — render chat history + live streaming output.
  *
- * Features:
- *  - Auto-scroll on new content
- *  - Streaming markdown with blinking caret
- *  - Per-source agent badge
- *  - Stage indicator + step progress for active turn
- *  - Collapsible thinking + trace timeline
- *  - Tool call/result chip rendering
- *  - Empty state with quick-start suggestion cards
+ * State source: this component reads from ``jobsById`` (the per-job
+ * state managed by ``lib/job-reducer``). The legacy ``activeTurn``
+ * record is no longer the source of truth for the live-turn view;
+ * it is kept on the store for compatibility (older code paths still
+ * read it) but the chat surface derives everything — text,
+ * thinking, stage, error, and "is a turn in progress?" — from the
+ * per-job events. The "in progress" check is now
+ * ``!isTerminal(job.status)`` rather than
+ * ``activeTurn.phase !== "idle"``, which used to leave the spinner
+ * hanging after ``job_terminal`` (the regression called out in the
+ * 2026-06-21 stability plan).
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -21,6 +24,7 @@ import rehypeKatex from "rehype-katex";
 import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { StageIndicator, StageRow } from "./StageIndicator";
+import { isTerminal } from "@/lib/job-reducer";
 import {
   Bot,
   User,
@@ -37,45 +41,56 @@ import {
 
 export function ChatMessages() {
   const messages = useTutorStore((s) => s.messages);
-  const activeTurn = useTutorStore((s) => s.activeTurn);
+  const jobsById = useTutorStore((s) => s.jobsById);
+  const jobOrder = useTutorStore((s) => s.jobOrder);
   const tracePanelOpen = useTutorStore((s) => s.tracePanelOpen);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Auto-scroll to bottom on new content
+  // Pick the most recent job the user is waiting on (running, pending,
+  // or non-terminal). If everything is terminal, the view collapses
+  // to the message list — no spinner, no "正在调用 Agent" badge.
+  const liveJob = useMemo(() => {
+    for (let i = jobOrder.length - 1; i >= 0; i--) {
+      const job = jobsById[jobOrder[i]];
+      if (job && !isTerminal(job.status)) return job;
+    }
+    return null;
+  }, [jobOrder, jobsById]);
+
+  const textBuffer = liveJob?.textBuffer ?? "";
+  const thinkingBuffer = liveJob?.thinkingBuffer ?? "";
+  const errorText = liveJob?.error ?? null;
+  const events = liveJob?.events ?? [];
+  const stage =
+    events
+      .filter((e) => e.type === "stage_start")
+      .slice(-1)[0]?.stage || liveJob?.stage || "";
+
+  // Auto-scroll on new content
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [
-    messages.length,
-    activeTurn.text_buffer,
-    activeTurn.thinking_buffer,
-    activeTurn.events.length,
-  ]);
+  }, [messages.length, textBuffer, thinkingBuffer, events.length]);
 
   return (
     <div
       ref={scrollRef}
       className="flex-1 overflow-y-auto px-6 py-6 space-y-5"
     >
-      {messages.length === 0 && activeTurn.phase === "idle" ? (
-        <EmptyState />
-      ) : (
-        messages.map((m) => <MessageBubble key={m.id} message={m} />)
-      )}
+      {messages.length === 0 && !liveJob ? <EmptyState /> : null}
+      {messages.map((m) => (
+        <MessageBubble key={m.id} message={m} />
+      ))}
 
-      {activeTurn.phase !== "idle" && (
+      {liveJob && (
         <ActiveTurnView
-          textBuffer={activeTurn.text_buffer}
-          thinkingBuffer={activeTurn.thinking_buffer}
-          stage={
-            activeTurn.events
-              .filter((e) => e.type === "stage_start")
-              .slice(-1)[0]?.stage || ""
-          }
+          textBuffer={textBuffer}
+          thinkingBuffer={thinkingBuffer}
+          stage={stage}
           showTrace={tracePanelOpen}
-          events={activeTurn.events}
-          error={activeTurn.error}
+          events={events}
+          error={errorText}
         />
       )}
     </div>
