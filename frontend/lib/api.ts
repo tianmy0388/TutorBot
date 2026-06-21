@@ -418,3 +418,101 @@ export type {
   ResourcePackageSummary,
   StrategyDecision,
 };
+
+// ---------------------------------------------------------------------------
+// Conversations (2026-06-21 plan, stage 4)
+// ---------------------------------------------------------------------------
+
+export interface ConversationSummary {
+  session_id: string;
+  user_id: string;
+  title: string;
+  message_count: number;
+  last_message_preview: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  job_id: string | null;
+  capability: string | null;
+  created_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface ConversationDetail extends ConversationSummary {
+  messages: ConversationMessage[];
+}
+
+export interface ConversationListResponse {
+  items: ConversationSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export const listConversations = (
+  userId: string,
+  opts: { limit?: number; offset?: number } = {},
+) => {
+  const params = new URLSearchParams();
+  params.set("user_id", userId);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  if (opts.offset) params.set("offset", String(opts.offset));
+  return request<ConversationListResponse>(
+    `/conversations?${params.toString()}`,
+  );
+};
+
+export const getConversation = (userId: string, sessionId: string) =>
+  request<ConversationDetail>(
+    `/conversations/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}`,
+  );
+
+export const createConversation = (
+  userId: string,
+  opts: { session_id?: string; title?: string } = {},
+) =>
+  request<ConversationSummary>("/conversations", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId, ...opts }),
+  });
+
+export const renameConversation = (
+  userId: string,
+  sessionId: string,
+  title: string,
+) =>
+  request<ConversationSummary>(
+    `/conversations/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    },
+  );
+
+export const deleteConversation = (userId: string, sessionId: string) =>
+  request<{ deleted: boolean; session_id: string }>(
+    `/conversations/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+  );
+
+export const appendConversationMessage = (
+  userId: string,
+  sessionId: string,
+  msg: {
+    role: "user" | "assistant" | "system";
+    content: string;
+    job_id?: string | null;
+    capability?: string | null;
+    metadata?: Record<string, unknown>;
+  },
+) =>
+  request<ConversationMessage>(
+    `/conversations/${encodeURIComponent(sessionId)}/messages?user_id=${encodeURIComponent(userId)}`,
+    { method: "POST", body: JSON.stringify(msg) },
+  );

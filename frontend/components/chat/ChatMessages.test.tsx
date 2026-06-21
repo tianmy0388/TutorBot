@@ -27,7 +27,9 @@ vi.mock("@/lib/store", () => ({
 }));
 
 const baseActiveTurn: ActiveTurn = {
+  turn_id: "",
   phase: "idle",
+  started_at: 0,
   text_buffer: "",
   thinking_buffer: "",
   events: [],
@@ -38,6 +40,7 @@ const baseActiveTurn: ActiveTurn = {
 const baseJobs: JobsState = {
   jobsById: {},
   jobOrder: [],
+  messages: [],
 };
 
 function mockStoreState(opts: {
@@ -76,32 +79,56 @@ describe("ChatMessages — terminal state", () => {
     // empty — exactly the hang scenario.
     const now = Date.now();
     const job: ClientJob = {
-      jobId: "job_1",
-      status: "succeeded",
+      job_id: "job_1",
       capability: "tutoring",
-      stage: "done",
+      status: "succeeded",
+      message_preview: "解释 self-attention",
+      submitted_at: now - 1000,
+      started_at: now - 1000,
+      finished_at: now,
+      last_seq: 1,
+      event_count: 1,
+      seen_event_ids: new Set(),
       events: [
-        { type: "job_terminal", stage: "done", source: "runner", content: "" },
+        {
+          type: "job_terminal",
+          source: "runner",
+          stage: "done",
+          content: "",
+          metadata: {},
+          session_id: "s1",
+          turn_id: "",
+          seq: 1,
+          timestamp: now,
+          event_id: "e1",
+        },
       ],
-      textBuffer: "",
-      thinkingBuffer: "",
-      result: null as never,
+      result: null,
       error: null,
-      createdAt: now - 1000,
-      startedAt: now - 1000,
-      finishedAt: now,
-      message: "解释 self-attention",
-      language: "zh",
     };
     mockStoreState({
       activeTurn: {
+        turn_id: "",
         phase: "success",
+        started_at: now - 1000,
         text_buffer: "",
         thinking_buffer: "",
         events: [
-          { type: "job_terminal", stage: "done", source: "runner", content: "" },
+          {
+            type: "job_terminal",
+            source: "runner",
+            stage: "done",
+            content: "",
+            metadata: {},
+            session_id: "s1",
+            turn_id: "",
+            seq: 1,
+            timestamp: now,
+            event_id: "e1",
+          },
         ],
         result: null,
+        error: null,
       },
       jobs: {
         jobsById: { job_1: job },
@@ -117,26 +144,34 @@ describe("ChatMessages — terminal state", () => {
   it("renders the streamed text from jobsById on a succeeded job", () => {
     const now = Date.now();
     const job: ClientJob = {
-      jobId: "job_2",
-      status: "running",
+      job_id: "job_2",
       capability: "tutoring",
-      stage: "answer",
-      events: [
-        { type: "text", stage: "answer", source: "tutor", content: "self-attention 计算 QKV 注意力。" },
-      ],
-      textBuffer: "self-attention 计算 QKV 注意力。",
-      thinkingBuffer: "",
-      result: null as never,
+      status: "running",
+      message_preview: "解释 self-attention",
+      submitted_at: now - 1000,
+      started_at: now - 1000,
+      finished_at: null,
+      last_seq: 0,
+      event_count: 0,
+      seen_event_ids: new Set(),
+      events: [],
+      result: null,
       error: null,
-      createdAt: now - 1000,
-      startedAt: now - 1000,
-      finishedAt: now,
-      message: "解释 self-attention",
-      language: "zh",
     };
     // While the job is non-terminal, ChatMessages renders the live
-    // streaming view. The textBuffer must be visible.
+    // streaming view. textBuffer lives on activeTurn (the event
+    // handler keeps it in lockstep with the WS) and must be visible.
     mockStoreState({
+      activeTurn: {
+        turn_id: "t1",
+        phase: "streaming",
+        started_at: now - 1000,
+        text_buffer: "self-attention 计算 QKV 注意力。",
+        thinking_buffer: "",
+        events: [],
+        result: null,
+        error: null,
+      },
       jobs: {
         jobsById: { job_2: job },
         jobOrder: ["job_2"],

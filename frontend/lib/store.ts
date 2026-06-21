@@ -158,6 +158,10 @@ export interface TutorState {
   /** Internal: route a typed reducer event through the pure job reducer. */
   applyReducerEvent: (event: import("./job-reducer").ReducerEvent) => void;
   resetSession: () => void;
+
+  // Conversation (2026-06-21 plan, stage 4)
+  setSessionId: (sessionId: string) => void;
+  loadConversationIntoStore: (userId: string, sessionId: string) => Promise<void>;
 }
 
 const newActiveTurn = (): ActiveTurn => ({
@@ -396,6 +400,36 @@ export const useTutorStore = create<TutorState>()(
         latestEnrichments: [],
         sessionId: cryptoRandom(),
       }),
+
+    setSessionId: (sessionId) => set({ sessionId }),
+
+    loadConversationIntoStore: async (userId, sessionId) => {
+      const { getConversation } = await import("./api");
+      const detail = await getConversation(userId, sessionId);
+      const messages = (detail.messages || []).map((m) => ({
+        id: m.id,
+        role: m.role as "user" | "assistant" | "system",
+        content: m.content,
+        agent: m.capability ?? undefined,
+        timestamp: new Date(m.created_at).getTime(),
+        metadata: m.metadata ?? {},
+      }));
+      set({
+        sessionId,
+        messages,
+        activeTurn: newActiveTurn(),
+        jobsById: {},
+        jobOrder: [],
+        latestPackage: null,
+        resourceSelection: { packageId: null, selectedResourceId: null },
+        plannedPath: null,
+        latestAssessment: null,
+        latestStrategy: null,
+        latestUnderstanding: null,
+        latestTutorAnswer: null,
+        latestEnrichments: [],
+      });
+    },
   })),
 );
 

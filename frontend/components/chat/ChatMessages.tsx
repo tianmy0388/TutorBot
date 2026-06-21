@@ -41,14 +41,20 @@ import {
 
 export function ChatMessages() {
   const messages = useTutorStore((s) => s.messages);
+  const activeTurn = useTutorStore((s) => s.activeTurn);
   const jobsById = useTutorStore((s) => s.jobsById);
   const jobOrder = useTutorStore((s) => s.jobOrder);
   const tracePanelOpen = useTutorStore((s) => s.tracePanelOpen);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Pick the most recent job the user is waiting on (running, pending,
-  // or non-terminal). If everything is terminal, the view collapses
-  // to the message list — no spinner, no "正在调用 Agent" badge.
+  // "In progress" is defined by the per-job state machine, NOT the
+  // legacy activeTurn.phase. The most-recent non-terminal job is the
+  // source of truth for "show the spinner / streaming view". Once
+  // every job is terminal, the view collapses to the message list —
+  // the "正在调用 Agent" badge no longer hangs because we no longer
+  // use phase !== idle as the trigger. The streaming buffers still
+  // live on activeTurn (the event-handler keeps them updated in
+  // lockstep with the WS), so we still read them there.
   const liveJob = useMemo(() => {
     for (let i = jobOrder.length - 1; i >= 0; i--) {
       const job = jobsById[jobOrder[i]];
@@ -57,33 +63,43 @@ export function ChatMessages() {
     return null;
   }, [jobOrder, jobsById]);
 
-  const textBuffer = liveJob?.textBuffer ?? "";
-  const thinkingBuffer = liveJob?.thinkingBuffer ?? "";
-  const errorText = liveJob?.error ?? null;
-  const events = liveJob?.events ?? [];
+  // The live view follows the job. If a job is running, we render
+  // it. If every job is terminal — even if the legacy activeTurn
+  // record still claims to be "streaming" or "success" — the live
+  // view stays collapsed and the message list takes over.
+  const showLive = !!liveJob;
+  const textBuffer = activeTurn.text_buffer;
+  const thinkingBuffer = activeTurn.thinking_buffer;
+  const errorText = activeTurn.error;
+  const events = activeTurn.events;
   const stage =
     events
       .filter((e) => e.type === "stage_start")
-      .slice(-1)[0]?.stage || liveJob?.stage || "";
+      .slice(-1)[0]?.stage || "";
 
   // Auto-scroll on new content
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages.length, textBuffer, thinkingBuffer, events.length]);
+  }, [
+    messages.length,
+    activeTurn.text_buffer,
+    activeTurn.thinking_buffer,
+    activeTurn.events.length,
+  ]);
 
   return (
     <div
       ref={scrollRef}
       className="flex-1 overflow-y-auto px-6 py-6 space-y-5"
     >
-      {messages.length === 0 && !liveJob ? <EmptyState /> : null}
+      {messages.length === 0 && !showLive ? <EmptyState /> : null}
       {messages.map((m) => (
         <MessageBubble key={m.id} message={m} />
       ))}
 
-      {liveJob && (
+      {showLive && (
         <ActiveTurnView
           textBuffer={textBuffer}
           thinkingBuffer={thinkingBuffer}
