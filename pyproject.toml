@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tutor"
+name = "tutorbot"
 version = "0.1.0"
-description = "个性化学习资源生成多智能体系统 — Personalized learning resource generation multi-agent system"
+description = "TutorBot — 个性化学习资源生成多智能体系统 / Personalized learning resource generation multi-agent system"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -93,9 +93,9 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourname/tutor"
-Documentation = "https://github.com/yourname/tutor/blob/main/docs/architecture.md"
-Repository = "https://github.com/yourname/tutor"
+Homepage = "https://github.com/yourname/TutorBot"
+Documentation = "https://github.com/yourname/TutorBot/blob/main/docs/architecture.md"
+Repository = "https://github.com/yourname/TutorBot"
 
 [project.scripts]
 tutor = "tutor.cli.main:app"
