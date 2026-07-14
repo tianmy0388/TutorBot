@@ -5,6 +5,10 @@ Surface:
   POST   /conversations                              — create / get
   GET    /conversations?user_id=&limit=&offset=      — list (newest first)
   GET    /conversations/{session_id}                 — detail + messages
+  GET    /conversations/{session_id}/aggregate       — detail + jobs + packages
+                                                        (single atomic call
+                                                        the front-end uses to
+                                                        switch conversations)
   PATCH  /conversations/{session_id}                 — rename
   DELETE /conversations/{session_id}                 — delete + cascade
   POST   /conversations/{session_id}/messages        — append one message
@@ -71,6 +75,55 @@ async def get_conversation(
     if detail.user_id != user_id:
         raise HTTPException(status_code=403, detail="not your conversation")
     return detail.model_dump(mode="json")
+
+
+@router.get("/conversations/{session_id}/aggregate")
+async def get_conversation_aggregate(
+    session_id: str,
+    user_id: str = Query(..., min_length=1, max_length=64),
+    jobs_limit: int = Query(50, ge=1, le=200),
+    packages_limit: int = Query(20, ge=1, le=100),
+) -> dict[str, Any]:
+    """Aggregate snapshot for one conversation (2026-06-21 plan).
+
+    Returns a single payload containing:
+
+      * the conversation header + message history
+      * jobs filtered by ``session_id`` (newest first, capped by ``jobs_limit``)
+      * resource package summaries filtered by ``session_id`` (newest first,
+        capped by ``packages_limit``)
+
+    The front-end uses this when the user clicks a history row so it
+    can replace ``jobsById`` / ``latestPackage`` / chat messages in one
+    atomic store update — no flicker, no cross-session bleed, and
+    background jobs running in other sessions are NOT cancelled.
+    """
+    conv_store = get_conversation_store()
+    detail = await conv_store.get_conversation_with_messages(session_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    if detail.user_id != user_id:
+        raise HTTPException(status_code=403, detail="not your conversation")
+
+    # Lazy imports so this endpoint doesn't pull in the heavy resource /
+    # jobs stores on first request to a fresh process.
+    from tutor.services.jobs import get_job_store
+    from tutor.services.resource_package import get_resource_package_store
+
+    job_store = get_job_store()
+    pkg_store = get_resource_package_store()
+
+    jobs = await job_store.list(
+        user_id, limit=jobs_limit, session_id=session_id
+    )
+    packages = await pkg_store.list(
+        user_id, limit=packages_limit, session_id=session_id
+    )
+    return {
+        "conversation": detail.model_dump(mode="json"),
+        "jobs": jobs,
+        "packages": packages,
+    }
 
 
 @router.patch("/conversations/{session_id}")

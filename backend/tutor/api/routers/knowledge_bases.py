@@ -135,4 +135,38 @@ async def delete_document(lib_id: str, doc_id: str) -> dict[str, Any]:
     return {"deleted": ok, "id": doc_id}
 
 
+@router.post("/knowledge-bases/{lib_id}/documents/{doc_id}/reindex")
+async def reindex_document(lib_id: str, doc_id: str) -> dict[str, Any]:
+    """2026-06-21 plan (D12): force a re-ingestion of a document.
+
+    The pre-fix code only flipped ``reindex_required = True``
+    on the document and waited for the operator to upload a
+    new copy. The new endpoint actually re-runs the chunk /
+    embed / index pipeline against the existing on-disk file
+    so the operator can recover from a stale RAG index without
+    re-uploading. The re-ingested document overwrites the old
+    chunks; if the pipeline fails, the document transitions
+    to ``failed`` and the previous (potentially stale)
+    vectors stay on disk for forensic comparison.
+    """
+    _ensure_seeded()
+    doc = _service.get_document(doc_id)
+    if doc is None or doc.knowledge_base_id != lib_id:
+        raise HTTPException(status_code=404, detail="document not found")
+    # Run synchronously so the HTTP response carries the final
+    # state. Operators who want a background reindex can hit
+    # the upload endpoint again.
+    result = _service.run_ingestion(doc_id)
+    if result is None:
+        raise HTTPException(status_code=500, detail="reindex failed")
+    return {
+        "doc_id": doc_id,
+        "status": result.status.value,
+        "chunk_count": result.chunk_count,
+        "embedding_model": result.embedding_model,
+        "error": result.error,
+        "error_code": result.error_code,
+    }
+
+
 __all__ = ["router"]

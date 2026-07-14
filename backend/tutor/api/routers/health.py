@@ -45,12 +45,22 @@ async def capabilities(request: Request) -> dict[str, Any]:
 
 @router.get("/info")
 async def info(request: Request) -> dict[str, Any]:
-    """Server-side runtime info (LLM, RAG, Manim status)."""
+    """Server-side runtime info (LLM, RAG, Manim status).
+
+    2026-06-21 plan: the response now includes the resolved data_dir
+    and the canonical DB path so operators can confirm at a glance
+    that the process is reading/writing the same database across
+    restarts regardless of the cwd the backend was launched from.
+    """
     settings = request.app.state.settings
+    data_dir = settings.data_dir
+    db_path = data_dir / "tutor.db"
     return {
         "version": __version__,
         "env": settings.env,
         "language": settings.language,
+        "data_dir": str(data_dir),
+        "db_path": str(db_path),
         "llm": {
             "provider": settings.llm_provider,
             "model": settings.llm_model,
@@ -65,6 +75,7 @@ async def info(request: Request) -> dict[str, Any]:
             "enabled": settings.manim_enabled,
             "quality": settings.manim_quality,
         },
+        "execution_python": getattr(settings, "execution_python", "") or sys.executable,
     }
 
 

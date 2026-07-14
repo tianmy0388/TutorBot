@@ -26,7 +26,7 @@ from tutor.services.config.settings import get_settings
 
 app = typer.Typer(
     name="tutor",
-    help="Tutor — 个性化学习资源生成多智能体系统 CLI",
+    help="TutorBot — 个性化学习资源生成多智能体系统 CLI",
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
@@ -49,7 +49,7 @@ def main(
         help="显示版本",
     ),
 ) -> None:
-    """Tutor — Multi-Agent Learning System."""
+    """TutorBot — Multi-Agent Learning System."""
 
 
 @app.command("info")

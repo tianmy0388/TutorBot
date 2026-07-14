@@ -19,6 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from tutor import __version__
@@ -94,6 +95,29 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"JobStore init failed: {exc!r}")
 
+    # 2026-06-21 plan: persistent KB and Course stores. The KB
+    # store walks the on-disk layout on first init() to migrate any
+    # orphan files the in-memory store had been tracking; the
+    # course store then re-binds the seeded AI 导论 course.
+    # We do this lazily — the kb router's module-level
+    # ``KnowledgeBaseService()`` constructor already triggers the
+    # first init, and the courses store opens on first call to
+    # ``get_course_service()``. Wrapping that work here is just a
+    # chance to log a clean "ready" message.
+    try:
+        from tutor.services.knowledge_base.sqlite_store import (
+            get_kb_store,
+        )
+        from tutor.services.courses import (
+            get_course_service,
+        )
+
+        get_kb_store()
+        get_course_service()
+        logger.info("KBStore + CourseStore initialised")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"KB/Course store init failed: {exc!r}")
+
     try:
         yield
     finally:
@@ -114,7 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
     app = FastAPI(
-        title="Tutor — Multi-Agent Learning System",
+        title="TutorBot — Multi-Agent Learning System",
         version=__version__,
         description=(
             "Tutor is a multi-agent AI system that generates personalized "
@@ -133,8 +157,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     # Routers
+    # **2026-07-09 fix (ada95ede trace):** mount the manim public
+    # directory at ``/static/manim/`` so the URLs produced by
+    # ``ManimRenderService._publish`` (``/static/manim/<scene>.mp4``)
+    # actually resolve. Pre-fix, the service wrote the MP4 to
+    # ``data/manim_videos/`` and returned that URL, but no route
+    # served it — the right pane rendered a 0-second blank ``<video>``.
+    # We mount under the *same* ``data_dir/manim_videos`` directory
+    # the service uses (anchored to an absolute path so cwd-relative
+    # surprises don't split the served dir from the publish dir).
+    try:
+        manim_videos_dir = settings.data_dir / "manim_videos"
+        manim_videos_dir.mkdir(parents=True, exist_ok=True)
+        # ``check_dir=False`` is critical: the service may publish a
+        # brand-new file *after* startup. StaticFiles re-scans on
+        # each request anyway.
+        from starlette.staticfiles import StaticFiles as _SM  # noqa: F401
+
+        app.mount(
+            "/static/manim",
+            StaticFiles(directory=str(manim_videos_dir), check_dir=False),
+            name="manim-videos",
+        )
+        logger.info(f"Manim videos mounted at /static/manim → {manim_videos_dir}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not mount /static/manim (non-fatal): {exc!r}")
+
+    # Routers
     from tutor.api.routers.config import router as config_router
     from tutor.api.routers.conversations import router as conversations_router
+    from tutor.api.routers.courses import router as courses_router
     from tutor.api.routers.health import router as health_router
     from tutor.api.routers.jobs import router as jobs_router
     from tutor.api.routers.knowledge_bases import router as kb_router
@@ -146,6 +198,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router, prefix="/api/v1", tags=["health"])
     app.include_router(kg_router, prefix="/api/v1", tags=["knowledge-graph"])
     app.include_router(kb_router, prefix="/api/v1", tags=["knowledge-bases"])
+    app.include_router(courses_router, prefix="/api/v1", tags=["courses"])
     app.include_router(resources_router, prefix="/api/v1", tags=["resources"])
     app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
     app.include_router(plans_router, prefix="/api/v1", tags=["plans"])
