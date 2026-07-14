@@ -1,4 +1,4 @@
-# Tutor — 演示脚本
+# TutorBot — 演示脚本
 
 本脚本配合 `docs/architecture.md` 使用。`backend/tests/e2e/test_demo_scenarios.py`
 覆盖了脚本中提到的全部七条主线，可在 CI 中自动复演。
