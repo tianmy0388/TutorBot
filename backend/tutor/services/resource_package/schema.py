@@ -133,13 +133,21 @@ class ReadingResource(BaseModel):
 
 
 class VideoResource(BaseModel):
-    """Payload for ``type=video``. Holds Manim source + (optional) render result."""
+    """Payload for ``type=video``. Holds Manim source + (optional) render result.
+
+    2026-06-21 plan (C2): ``mp4_path`` is the local filesystem path
+    to the rendered MP4, persisted alongside the resource so the
+    download endpoint can serve it. ``video_url`` is the HTTP-
+    accessible URL (pointing at the same file via static serve).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     manim_code: str = ""
     scene_class: str = "GeneratedScene"
     video_url: str | None = None
+    # Local filesystem path (2026-06-21 plan, for archival / download).
+    mp4_path: str | None = None
     thumbnail_url: str | None = None
     duration_seconds: int = 0
     render_status: Literal["pending", "rendering", "ready", "failed"] = "pending"
@@ -147,17 +155,35 @@ class VideoResource(BaseModel):
 
 
 class CodeResource(BaseModel):
-    """Payload for ``type=code``. Code + explanation + execution result."""
+    """Payload for ``type=code``. Code + explanation + execution result.
+
+    2026-06-21 plan adds structured diagnostics for the run:
+      * ``error_code``         — distinguishes runtime-dep-missing
+                                 from code-execution-failed
+      * ``execution_python``   — which interpreter actually ran
+      * ``dependency_versions``— matplotlib / numpy / python version
+                                 snapshot for the right-pane footer
+      * ``duration_seconds``   — wall-clock time of the run
+      * ``artifacts``          — image / SVG files written by the
+                                 user code, collected into the
+                                 resource so the viewer can render
+                                 them inline
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     language: str = "python"
     code: str = ""
     explanation: str = ""
-    execution_status: Literal["not_run", "pending", "success", "failed"] = "not_run"
+    execution_status: Literal["not_run", "pending", "success", "failed", "timeout"] = "not_run"
     stdout: str = ""
     stderr: str = ""
     sandbox_url: str | None = None
+    error_code: str | None = None
+    execution_python: str = ""
+    dependency_versions: dict[str, str] = Field(default_factory=dict)
+    duration_seconds: float = 0.0
+    artifacts: list[dict[str, str]] = Field(default_factory=dict)  # type: ignore[type-arg]
 
 
 class PPTResource(BaseModel):

@@ -33,6 +33,7 @@ from tutor.services.learner_profile.store import (
     ProfileEvent,
     ProfileEventType,
     ProfileStore,
+    _close_profile_store_sync,
     get_profile_store,
     reset_profile_store,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "ProfileEventType",
     "ProfileStore",
     "Urgency",
+    "_close_profile_store_sync",
     "get_profile_builder",
     "get_profile_store",
     "reset_profile_builder",

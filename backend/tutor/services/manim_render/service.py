@@ -90,7 +90,21 @@ class ManimRenderService:
         self.code_retry = code_retry or CodeRetry(
             max_attempts=settings.code_retry_max_attempts
         )
-        self.public_dir = Path(public_dir) if public_dir else Path("./data/manim_videos")
+        # **2026-07-09 fix (ada95ede trace):** the public_dir default
+        # used to be ``Path("./data/manim_videos")`` which is *relative
+        # to the process cwd*. When the backend started under one cwd
+        # and FastAPI mounted under another, the URL
+        # ``/static/manim/MainScene.mp4`` 404'd because the served
+        # directory and the published file landed in different places.
+        # Anchor the default to ``settings.data_dir`` (which itself is
+        # resolved to an absolute path under the repo root by the
+        # Settings validator) so the same directory is used for both
+        # ``_publish`` and the FastAPI ``StaticFiles`` mount wired up
+        # in ``tutor/api/main.py``.
+        if public_dir:
+            self.public_dir = Path(public_dir)
+        else:
+            self.public_dir = settings.data_dir / "manim_videos"
         self.public_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------

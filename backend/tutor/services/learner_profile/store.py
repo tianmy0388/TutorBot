@@ -455,10 +455,33 @@ async def reset_profile_store() -> None:
     _store = None
 
 
+def _close_profile_store_sync() -> None:
+    """Synchronous variant for test fixtures that can't await.
+
+    The old code called the async ``reset_profile_store()`` without
+    ``await``, returning a coroutine that was never scheduled. The
+    store singleton kept its reference to the previous test's temp
+    directory, which the conftest had already deleted by the time
+    the next test ran — that caused "unable to open database file".
+    """
+    global _store
+    if _store is None:
+        return
+    try:
+        import asyncio
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(_store.close())
+        loop.close()
+    except Exception:
+        pass
+    _store = None
+
+
 __all__ = [
     "ProfileEvent",
     "ProfileEventType",
     "ProfileStore",
     "get_profile_store",
     "reset_profile_store",
+    "_close_profile_store_sync",
 ]

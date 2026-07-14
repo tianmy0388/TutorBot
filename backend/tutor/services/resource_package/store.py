@@ -385,6 +385,7 @@ class ResourcePackageStore:
         since: datetime | None = None,
         until: datetime | None = None,
         topic: str | None = None,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """List package summaries (header only, no resources) for a user.
 
@@ -393,6 +394,13 @@ class ResourcePackageStore:
         of the resource-type values present in the package; this is
         fetched with a single batched query so the list call stays
         O(1) round-trips regardless of result size.
+
+        If ``session_id`` is provided, the store filters by the
+        ``session_id`` field stored in ``package_metadata`` (set by
+        the runner when the package is saved). This is what powers the
+        conversation-detail aggregation endpoint (2026-06-21 plan):
+        the front-end asks "which packages belong to this conversation
+        id?" and we answer in a single SQL round-trip.
         """
         self._ensure_engine()
         async with self._with_session() as session:
@@ -403,6 +411,14 @@ class ResourcePackageStore:
                 stmt = stmt.where(PackageRow.created_at <= until)
             if topic:
                 stmt = stmt.where(PackageRow.topic.like(f"%{topic}%"))
+            if session_id is not None:
+                # ``package_metadata`` is a JSON column; on SQLite the
+                # ``json_extract`` accessor is exposed via
+                # ``JSON.col["key"].as_string()``.
+                stmt = stmt.where(
+                    PackageRow.package_metadata["session_id"].as_string()
+                    == session_id
+                )
             stmt = stmt.order_by(PackageRow.created_at.desc()).limit(limit).offset(offset)
             rows = (await session.execute(stmt)).scalars().all()
             if not rows:

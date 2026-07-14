@@ -216,6 +216,19 @@ class ManimExecutor:
         finally:
             with self._lock:
                 self._active_processes.pop(job_id, None)
+            # 2026-06-21 plan (C4): persist the render logs to
+            # ``media_dir/logs/`` so operators can debug
+            # production videos without re-running the pipeline.
+            # ``stdout`` / ``stderr`` are already captured from
+            # ``proc.communicate()`` — we just write them to disk.
+            _save_render_logs(
+                media_dir,
+                job_id,
+                cmd=cmd,
+                stdout=stdout if "stdout" in dir() else "",
+                stderr=stderr if "stderr" in dir() else "",
+                code=code,
+            )
             # Clean up the temp .py file (the media dir stays for the caller)
             try:
                 code_path.unlink()
@@ -295,3 +308,40 @@ def _extract_error(stderr: str) -> str:
 
 
 __all__ = ["ManimExecutor", "ManimRenderResult", "RenderStatus"]
+
+
+def _save_render_logs(
+    media_dir: Path,
+    job_id: str,
+    *,
+    cmd: list[str],
+    stdout: str,
+    stderr: str,
+    code: str,
+) -> None:
+    """Persist render logs to disk (2026-06-21 plan, C4).
+
+    Writes three files under ``media_dir/logs/``:
+
+      * ``command.txt`` — the exact CLI invocation
+      * ``stdout.log`` — the combined stdout output
+      * ``stderr.log`` — the combined stderr output
+      * ``source.py`` — the Manim Python source that was rendered
+
+    This is best-effort — a failure to write logs must not affect
+    the render result, so we catch OSError and move on.
+    """
+    log_dir = media_dir / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "command.txt").write_text(
+            " ".join(cmd) + "\n", encoding="utf-8"
+        )
+        if stdout:
+            (log_dir / "stdout.log").write_text(stdout, encoding="utf-8")
+        if stderr:
+            (log_dir / "stderr.log").write_text(stderr, encoding="utf-8")
+        if code:
+            (log_dir / "source.py").write_text(code, encoding="utf-8")
+    except OSError:
+        pass  # best-effort
