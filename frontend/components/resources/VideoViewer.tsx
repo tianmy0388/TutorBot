@@ -29,7 +29,13 @@ import type { Resource } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export function VideoViewer({ resource }: { resource: Resource }) {
-  const formatSpec = resource.format_specific as {
+  // **2026-07-08 fix (fdb26152 regression):** ``resource.format_specific``
+  // can be undefined for partial resources (e.g. the placeholder
+  // cards emitted via ``contract.partial_artifacts`` on a FAILED
+  // contract). The previous code did a non-null cast and crashed at
+  // ``formatSpec.video_url``. Default to an empty object so all the
+  // optional-chain reads below stay safe.
+  const formatSpec = (resource.format_specific ?? {}) as {
     video_url?: string;
     manim_code?: string;
     scene_class?: string;
@@ -44,14 +50,33 @@ export function VideoViewer({ resource }: { resource: Resource }) {
 
   const [showCode, setShowCode] = useState(false);
   const [copied, setCopied] = useState(false);
+  // **2026-07-09 fix (ada95ede trace):** when the URL 404s (e.g.
+  // /static/manim/<scene>.mp4 isn't reachable because the FastAPI
+  // static mount wasn't wired yet), the ``<video>`` element silently
+  // renders a 0-second blank player. We surface that explicitly as
+  // an error banner with a one-click retry of the original render.
+  const [videoLoadFailed, setVideoLoadFailed] = useState(false);
 
-  const isReady = !!formatSpec.video_url;
-  const isFailed = formatSpec.render_status === "failed";
+  const isReady = !!formatSpec.video_url && !videoLoadFailed;
+  // When ``formatSpec.video_url`` is set but the network failed we
+  // flip the UI into the failure banner instead of the player shell.
+  const effectiveRenderStatus = videoLoadFailed
+    ? "failed"
+    : formatSpec.render_status ?? "unknown";
+  const isFailed = effectiveRenderStatus === "failed";
+  // **2026-07-08 fix:** without ``formatSpec`` being defined, a
+  // missing ``render_status`` shouldn't masquerade as "rendering".
+  // We also collapse the three "not ready" states into one banner
+  // when ``format_specific`` was missing entirely (partial artifact).
+  // **2026-07-09 fix (ada95ede):** also collapse the broken-URL
+  // state (videoLoadFailed) into the same banner.
+  const renderStatus = effectiveRenderStatus;
   const isPending =
     !isReady &&
     !isFailed &&
-    (formatSpec.render_status === "pending" ||
-      formatSpec.render_status === "rendering");
+    (renderStatus === "pending" ||
+      renderStatus === "rendering" ||
+      renderStatus === "unknown");
 
   const copy = async () => {
     if (!formatSpec.manim_code) return;
@@ -88,6 +113,17 @@ export function VideoViewer({ resource }: { resource: Resource }) {
             className="w-full max-h-[60vh]"
             poster=""
             preload="metadata"
+            onError={() => {
+              // **2026-07-09 fix (ada95ede):** a 404 from
+              // /static/manim/<scene>.mp4 used to leave a blank
+              // player. Surface the failure and switch to the
+              // failure banner.
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[VideoViewer] failed to load video at ${formatSpec.video_url}`,
+              );
+              setVideoLoadFailed(true);
+            }}
           >
             <source src={formatSpec.video_url} type="video/mp4" />
             您的浏览器不支持 video 标签。
@@ -102,9 +138,11 @@ export function VideoViewer({ resource }: { resource: Resource }) {
           </div>
           <div className="text-sm text-fg font-medium">视频渲染中…</div>
           <div className="mt-1 text-xs text-fg-muted">
-            {formatSpec.render_status === "rendering"
+            {renderStatus === "rendering"
               ? "正在执行 Manim 渲染任务"
-              : "任务已排队 — 通常 30 秒内完成"}
+              : renderStatus === "unknown"
+                ? "资源尚未完整生成（任务可能已超时）"
+                : "任务已排队 — 通常 30 秒内完成"}
           </div>
           <div className="mt-3 h-1 bg-bg-panel rounded-full overflow-hidden max-w-xs mx-auto">
             <div className="h-full bg-gradient-to-r from-pink-500 to-pink-400 animate-pulse w-2/3" />
@@ -116,7 +154,14 @@ export function VideoViewer({ resource }: { resource: Resource }) {
         <div className="p-4 rounded-lg border border-red-800/40 bg-red-950/20 flex gap-3">
           <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
           <div className="flex-1">
-            <div className="text-sm font-medium text-red-300">渲染失败</div>
+            <div className="text-sm font-medium text-red-300">
+              {videoLoadFailed ? "视频加载失败" : "渲染失败"}
+            </div>
+            <div className="mt-1 text-xs text-red-400/80">
+              {videoLoadFailed
+                ? `无法访问 ${formatSpec.video_url} — 后端静态文件路由可能未配置（ada95ede fix），或视频文件已被清理。`
+                : "渲染流程未生成可播放视频。"}
+            </div>
             {formatSpec.render_error && (
               <div className="mt-2 text-xs text-red-400/80 font-mono whitespace-pre-wrap bg-red-950/40 rounded p-2 border border-red-800/30">
                 {formatSpec.render_error}

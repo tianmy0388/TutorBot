@@ -12,14 +12,28 @@
  *   - The user can keep typing / submit more jobs in parallel
  *   - When the job completes, the appropriate right-side panel
  *     populates automatically (via dispatchStreamEvent → event-handler)
+ *
+ * 2026-06-21 plan (stage 4): the very first message of a session
+ * auto-creates the server-side conversation (with the first 60 chars
+ * of the question as the title). Until then the store holds a
+ * transient draft id so navigation/history don't generate empty
+ * "no-title" rows.
  */
 
 import { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, MessageCircle, BarChart3, Compass, X } from "lucide-react";
+import { Send, Sparkles, MessageCircle, BarChart3, Compass, X, Database, ChevronDown, BookOpen } from "lucide-react";
 import { useTutorStore } from "@/lib/store";
 import { useJobQueue } from "@/hooks/useJobQueue";
 import { cn } from "@/lib/utils";
-import { appendConversationMessage } from "@/lib/api";
+import {
+  appendConversationMessage,
+  createConversation,
+  getConversation,
+  listAppCourses,
+  listKnowledgeBases,
+  type CourseResponse,
+} from "@/lib/api";
+import type { KnowledgeBaseSummary } from "@/lib/types";
 
 const CAPABILITY_OPTIONS = [
   { id: "resource_generation", label: "生成资源", icon: Sparkles, hint: "例如:系统学习 LSTM" },
@@ -39,6 +53,28 @@ export function ChatComposer() {
   const addMessage = useTutorStore((s) => s.addMessage);
   const queue = useJobQueue(userId);
 
+  // 2026-06-21 plan (D10): RAG scope selector state.
+  const ragEnabled = useTutorStore((s) => s.ragEnabled);
+  const retrievalScope = useTutorStore((s) => s.retrievalScope);
+  const setRagEnabled = useTutorStore((s) => s.setRagEnabled);
+  const setRetrievalScope = useTutorStore((s) => s.setRetrievalScope);
+
+  // Cached course / KB lists so the dropdown doesn't fetch on
+  // every render. We fetch once on mount and cache here.
+  const [scopeCourses, setScopeCourses] = useState<CourseResponse[]>([]);
+  const [scopeKbs, setScopeKbs] = useState<KnowledgeBaseSummary[]>([]);
+  const [scopeOpen, setScopeOpen] = useState(false);
+
+  useEffect(() => {
+    if (!userId) return;
+    void listAppCourses()
+      .then((r) => setScopeCourses(r.items || []))
+      .catch(() => {});
+    void listKnowledgeBases()
+      .then((r) => setScopeKbs(r.items || []))
+      .catch(() => {});
+  }, [userId]);
+
   // Auto-resize textarea up to a max
   useEffect(() => {
     const el = textareaRef.current;
@@ -56,13 +92,43 @@ export function ChatComposer() {
     // Add user message to chat immediately
     addMessage({ role: "user", content: msg });
 
+    // 2026-06-21 plan: the first message in a brand-new (draft) session
+    // must materialise the server-side conversation before we try to
+    // append the message. The store starts with a draft id (see
+    // ``useTutorStore`` initial state) and only the user's first send
+    // causes a row in the conversation history — that is the spec
+    // behaviour for "no empty sessions in history".
+    let activeSessionId = sessionId;
+    if (userId && activeSessionId) {
+      try {
+        await getConversation(userId, activeSessionId);
+      } catch (e: any) {
+        if (e?.status === 404) {
+          // The sessionId is a draft — promote it to a real
+          // conversation now, with the first 60 chars of the
+          // question as the title.
+          const title = msg.length > 60 ? msg.slice(0, 60) + "…" : msg;
+          const conv = await createConversation(userId, {
+            session_id: activeSessionId,
+            title,
+          });
+          activeSessionId = conv.session_id;
+          useTutorStore.getState().setSessionId(conv.session_id);
+        } else {
+          // Network / 5xx — fall through; the append below is also
+          // best-effort so a transient backend hiccup does not block
+          // submission.
+          console.warn("getConversation pre-flight failed", e);
+        }
+      }
+    }
+
     // Persist the user message into the active conversation so the
     // sidebar's message_count updates in real time (DeepSeek-style).
     // Fire-and-forget — a failure to persist must NOT block the user
-    // from submitting. The session id may still be empty during the
-    // very first SSR frame; skip the persist in that case.
-    if (userId && sessionId) {
-      void appendConversationMessage(userId, sessionId, {
+    // from submitting.
+    if (userId && activeSessionId) {
+      void appendConversationMessage(userId, activeSessionId, {
         role: "user",
         content: msg,
         metadata: { source: "chat_composer" },
@@ -103,9 +169,155 @@ export function ChatComposer() {
   const activeCap = CAPABILITY_OPTIONS.find((c) => c.id === currentCapability);
   const activeCount = queue.activeJobs.length;
 
+  const scopeLabel = (() => {
+    if (!ragEnabled) return "不使用知识库";
+    const s = retrievalScope;
+    if (!s || s.kind === "all") return "全部知识库";
+    if (s.kind === "course") {
+      const c = scopeCourses.find((c) => c.id === s.id);
+      return c ? `课程: ${c.name}` : `课程: ${s.id}`;
+    }
+    if (s.kind === "library") {
+      const kb = scopeKbs.find((k) => k.id === s.id);
+      return kb ? `知识库: ${kb.name}` : `知识库: ${s.id}`;
+    }
+    return "不使用知识库";
+  })();
+
   return (
     <div className="border-t border-fg/10 bg-bg-panel/50 backdrop-blur px-6 py-4">
       <div className="max-w-3xl mx-auto">
+        {/* 2026-06-21 plan (D10): RAG scope selector */}
+        <div className="flex gap-2 mb-2 flex-wrap items-center">
+          <div className="relative">
+            <button
+              onClick={() => setScopeOpen((o) => !o)}
+              disabled={submitting}
+              className={cn(
+                "px-2.5 py-1 rounded-full text-xs transition-colors flex items-center gap-1.5",
+                ragEnabled
+                  ? "bg-accent/20 text-accent border border-accent/30"
+                  : "bg-bg-card text-fg-muted border border-fg/10",
+              )}
+            >
+              <Database className="w-3 h-3" />
+              {scopeLabel}
+              <ChevronDown
+                className={cn(
+                  "w-3 h-3 transition-transform",
+                  scopeOpen && "rotate-180",
+                )}
+              />
+            </button>
+            {scopeOpen && (
+              <div className="absolute top-full mt-1 left-0 w-56 bg-bg-panel border border-fg/10 rounded-lg shadow-lg z-20 py-1 max-h-64 overflow-y-auto">
+                {/* Disable RAG */}
+                <button
+                  onClick={() => {
+                    setRagEnabled(false);
+                    setRetrievalScope(null);
+                    setScopeOpen(false);
+                  }}
+                  className={cn(
+                    "w-full text-left px-3 py-1.5 text-xs hover:bg-bg-card flex items-center gap-2",
+                    !ragEnabled && "bg-brand-500/10 text-brand-300",
+                  )}
+                >
+                  <X className="w-3 h-3" />
+                  不使用知识库
+                </button>
+                {/* All */}
+                <button
+                  onClick={() => {
+                    setRagEnabled(true);
+                    setRetrievalScope({ kind: "all" });
+                    setScopeOpen(false);
+                  }}
+                  className={cn(
+                    "w-full text-left px-3 py-1.5 text-xs hover:bg-bg-card flex items-center gap-2",
+                    ragEnabled && retrievalScope?.kind === "all" && "bg-brand-500/10 text-brand-300",
+                  )}
+                >
+                  <Database className="w-3 h-3" />
+                  全部知识库
+                </button>
+                <div className="border-t border-fg/10 my-1" />
+                {/* Courses */}
+                {scopeCourses.length > 0 && (
+                  <>
+                    <div className="text-[10px] text-fg-subtle px-3 py-0.5 flex items-center gap-1">
+                      <BookOpen className="w-2.5 h-2.5" />课程
+                    </div>
+                    {scopeCourses.map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => {
+                          setRagEnabled(true);
+                          setRetrievalScope({ kind: "course", id: c.id });
+                          setScopeOpen(false);
+                        }}
+                        className={cn(
+                          "w-full text-left px-3 py-1.5 text-xs hover:bg-bg-card flex items-center gap-2",
+                          ragEnabled &&
+                            retrievalScope?.kind === "course" &&
+                            retrievalScope?.id === c.id &&
+                            "bg-brand-500/10 text-brand-300",
+                        )}
+                      >
+                        <Database className="w-3 h-3 opacity-50" />
+                        {c.name}
+                        <span className="ml-auto text-fg-subtle text-[10px]">
+                          {c.ready_count}/{c.document_count}
+                        </span>
+                      </button>
+                    ))}
+                  </>
+                )}
+                {/* Standalone KBs (those not in a course) */}
+                {scopeKbs.length > 0 && (
+                  <>
+                    <div className="text-[10px] text-fg-subtle px-3 py-0.5 flex items-center gap-1">
+                      <Database className="w-2.5 h-2.5" />独立知识库
+                    </div>
+                    {scopeKbs
+                      .filter(/* show only standalone KBs */ () => true)
+                      .map((kb) => (
+                        <button
+                          key={kb.id}
+                          onClick={() => {
+                            setRagEnabled(true);
+                            setRetrievalScope({ kind: "library", id: kb.id });
+                            setScopeOpen(false);
+                          }}
+                          className={cn(
+                            "w-full text-left px-3 py-1.5 text-xs hover:bg-bg-card flex items-center gap-2",
+                            ragEnabled &&
+                              retrievalScope?.kind === "library" &&
+                              retrievalScope?.id === kb.id &&
+                              "bg-brand-500/10 text-brand-300",
+                          )}
+                        >
+                          <Database className="w-3 h-3 opacity-50" />
+                          {kb.name}
+                          <span className="ml-auto text-fg-subtle text-[10px]">
+                            {kb.ready_count}/{kb.document_count}
+                          </span>
+                        </button>
+                      ))}
+                  </>
+                )}
+              </div>
+            )}
+            {/* Click-outside to close */}
+            {scopeOpen && (
+              <div
+                className="fixed inset-0 z-10"
+                onClick={() => setScopeOpen(false)}
+              />
+            )}
+          </div>
+        </div>
+
         {/* Capability chips */}
         <div className="flex gap-2 mb-2 flex-wrap items-center">
           {CAPABILITY_OPTIONS.map((c) => {

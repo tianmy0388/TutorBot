@@ -35,7 +35,12 @@ import type { JobStatsResponse, JobSummary, JobStatus, StreamEvent } from "@/lib
 import { WsClient, startJobMessage } from "@/lib/ws";
 
 function getWsUrl(): string {
-  if (typeof window === "undefined") return "ws://localhost:8000/api/v1/ws";
+  if (typeof window === "undefined") {
+    // SSR fallback — must match the backend port the dev proxy targets.
+    // See next.config.ts (BACKEND_PORT).
+    const backendPort = "18000";
+    return `ws://localhost:${backendPort}/api/v1/ws`;
+  }
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${window.location.host}/api/v1/ws`;
 }
@@ -103,18 +108,56 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         const client = new WsClient({
           url,
           onOpen: () => {
-            const activeKbId =
-              useTutorStore.getState().activeKnowledgeBaseId ||
-              "ai_introduction";
+            const state = useTutorStore.getState();
+            // 2026-06-21 plan (D10): the new TutoringCapability /
+            // RetrievalService pair reads ``retrieval_scope`` from the
+            // job metadata. The shape is the canonical
+            // ``{kind, id}`` from the spec — "course", "library",
+            // or "all" — and we forbid an empty / undefined scope
+            // silently defaulting to "all": if the user hasn't
+            // picked a scope we send "none" so the backend raises
+            // a structured ``INVALID_SCOPE`` error rather than
+            // searching the entire corpus. The user-facing toggle
+            // in the chat composer is the only place that should
+            // resolve "none" → a real scope.
+            const ragEnabled = state.ragEnabled !== false;
+            const scopeObj = state.retrievalScope;
+            let scopeWire: string;
+            if (!ragEnabled) {
+              scopeWire = "none";
+            } else if (
+              scopeObj && scopeObj.kind && scopeObj.kind !== "all"
+            ) {
+              scopeWire = `${scopeObj.kind}:${scopeObj.id || ""}`;
+            } else if (scopeObj && scopeObj.kind === "all") {
+              scopeWire = "all";
+            } else {
+              scopeWire = "all";
+            }
+            // 2026-06-21 plan: the Job must carry the same session_id as
+            // the active conversation so right-pane resources, jobs, and
+            // messages are joined correctly when the user switches
+            // history. Read the latest value from the store inside the
+            // submit closure (not via a captured hook value, which would
+            // be stale on the second submit) and surface it both in the
+            // top-level ``session_id`` field (consumed by JobSubmit on
+            // the backend) and in ``metadata.session_id`` for legacy
+            // callers that read it from the envelope.
+            const currentSessionId = state.sessionId || "";
+            const activeKbId = state.activeKnowledgeBaseId || "ai_introduction";
             client.send(
               startJobMessage({
                 message: text,
                 userId: userId || "anonymous",
                 capability: capability || undefined,
-                language: useTutorStore.getState().language || "zh",
+                sessionId: currentSessionId,
+                language: state.language || "zh",
                 metadata: {
                   knowledge_base_id: activeKbId,
                   plan_id: "",
+                  session_id: currentSessionId,
+                  retrieval_scope: scopeWire,
+                  rag_enabled: ragEnabled,
                 },
               }),
             );

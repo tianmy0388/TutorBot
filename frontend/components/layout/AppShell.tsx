@@ -1,15 +1,21 @@
 "use client";
 
 /**
- * AppShell — the four-page navigation wrapper.
+ * AppShell — TutorBot's outer chrome.
  *
- * - /                  learning workspace (chat + plan confirm + job tray)
- * - /knowledge-bases   library manager
- * - /resources         persisted resource center
- * - /settings          runtime configuration
+ * Layout contract:
+ *   body  →  ``h-dvh overflow-hidden`` (set in app/layout.tsx)
+ *   AppShell → ``h-full`` (fills the body, no min-height tricks)
+ *   AppShell → column: top rail + scroll region
  *
- * Capability buttons are no longer in the global header: the user's
- * intent is inferred by the router/plan flow inside the workspace.
+ * The top rail is a single horizontal band with three "zones":
+ *   left:  brand wordmark + lockup
+ *   middle: primary nav (the four top-level surfaces)
+ *   right: status + theme + settings
+ *
+ * We deliberately avoid a sticky shadow; the rail sits on a slightly
+ * elevated panel color with a 1px hairline divider — more editorial,
+ * less SaaS-app.
  */
 
 import Link from "next/link";
@@ -19,10 +25,14 @@ import {
   Database,
   MessageSquare,
   Settings as SettingsIcon,
+  Sun,
+  Moon,
+  Sparkle,
 } from "lucide-react";
 import { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { useTutorStore } from "@/lib/store";
+import { Logo } from "@/components/brand/Logo";
 
 interface NavItem {
   href: string;
@@ -61,19 +71,33 @@ const NAV_ITEMS: NavItem[] = [
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() || "/";
   const setSettingsOpen = useTutorStore((s) => s.setSettingsOpen);
+  const theme = useTutorStore((s) => s.theme);
+  const setTheme = useTutorStore((s) => s.setTheme);
 
   return (
-    <div className="min-h-screen flex flex-col bg-bg text-fg">
-      <header className="border-b border-fg/10 bg-bg-panel/80 backdrop-blur sticky top-0 z-30">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-12 flex items-center justify-between">
+    <div className="h-full flex flex-col bg-bg text-fg">
+      <header
+        className="border-b shrink-0 z-30 backdrop-blur-sm animate-slide-down"
+        style={{
+          backgroundColor: "rgb(var(--color-bg-panel) / 0.85)",
+          borderColor: "rgb(var(--color-rule) / 0.6)",
+        }}
+      >
+        <div className="h-14 px-5 flex items-center justify-between gap-6">
+          {/* Brand */}
           <Link
             href="/"
-            className="text-sm font-bold tracking-tight"
+            className="group flex items-center"
             data-testid="app-logo"
           >
-            DeepTutor
+            <Logo size={26} showWordmark wordmarkSize="lg" />
           </Link>
-          <nav className="flex items-center gap-1" data-testid="app-nav">
+
+          {/* Primary nav */}
+          <nav
+            className="flex items-center gap-1 flex-1 justify-center"
+            data-testid="app-nav"
+          >
             {NAV_ITEMS.map((item) => {
               const active = item.match(pathname);
               return (
@@ -81,30 +105,74 @@ export function AppShell({ children }: { children: ReactNode }) {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "inline-flex items-center gap-1.5 px-3 h-8 rounded-lg text-sm transition-colors",
+                    "relative inline-flex items-center gap-1.5 px-3 h-8 rounded-md text-[13px] font-medium",
+                    "transition-colors duration-150",
                     active
-                      ? "bg-brand-500/15 text-brand-200"
-                      : "text-fg-muted hover:text-fg hover:bg-bg-card",
+                      ? "text-fg"
+                      : "text-fg-muted hover:text-fg",
                   )}
                   data-testid={`nav-${item.label}`}
                 >
-                  <item.icon className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">{item.label}</span>
+                  <item.icon
+                    className={cn(
+                      "w-3.5 h-3.5 transition-colors",
+                      active ? "text-brand-400" : "text-fg-subtle",
+                    )}
+                  />
+                  <span>{item.label}</span>
+                  {active && (
+                    <span
+                      className="absolute -bottom-[1px] left-3 right-3 h-[2px] rounded-full"
+                      style={{ backgroundColor: "rgb(var(--color-brand-400))" }}
+                    />
+                  )}
                 </Link>
               );
             })}
           </nav>
-          <button
-            className="btn-secondary text-xs h-8"
-            onClick={() => setSettingsOpen(true)}
-            data-testid="nav-theme-toggle"
-            title="主题"
-          >
-            主题
-          </button>
+
+          {/* Right cluster */}
+          <div className="flex items-center gap-1.5">
+            <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 h-7 rounded-full text-[10px] font-mono-tab text-fg-subtle"
+              style={{
+                backgroundColor: "rgb(var(--color-bg-card) / 0.5)",
+                border: "1px solid rgb(var(--color-rule) / 0.5)",
+                letterSpacing: "0.14em",
+              }}
+            >
+              <span
+                className="w-1.5 h-1.5 rounded-full animate-pulse-slow"
+                style={{ backgroundColor: "rgb(var(--color-brand-400))" }}
+              />
+              v1.0
+            </span>
+
+            <button
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="p-1.5 rounded-md text-fg-muted hover:text-fg transition-colors hover:bg-bg-card"
+              title={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
+              data-testid="nav-theme-toggle"
+            >
+              {theme === "dark" ? (
+                <Sun className="w-4 h-4" />
+              ) : (
+                <Moon className="w-4 h-4" />
+              )}
+            </button>
+
+            <button
+              className="btn-secondary text-xs h-8"
+              onClick={() => setSettingsOpen(true)}
+              title="打开设置"
+            >
+              <Sparkle className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">设置</span>
+            </button>
+          </div>
         </div>
       </header>
-      <main className="flex-1">{children}</main>
+
+      <main className="flex-1 min-h-0 overflow-hidden">{children}</main>
     </div>
   );
 }

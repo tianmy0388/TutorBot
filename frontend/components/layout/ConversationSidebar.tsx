@@ -37,8 +37,10 @@ export function ConversationSidebar() {
   const userId = useTutorStore((s) => s.userId);
   const sessionId = useTutorStore((s) => s.sessionId);
   const setSessionId = useTutorStore((s) => s.setSessionId);
-  const loadConversationIntoStore = useTutorStore(
-    (s) => s.loadConversationIntoStore,
+  // 2026-06-21 plan: switching history must restore the right pane,
+  // not just the messages — use the aggregate loader.
+  const loadConversationAggregate = useTutorStore(
+    (s) => s.loadConversationAggregate,
   );
   const resetSession = useTutorStore((s) => s.resetSession);
 
@@ -82,7 +84,7 @@ export function ConversationSidebar() {
     setBusy(true);
     try {
       setSessionId(sid);
-      await loadConversationIntoStore(userId, sid);
+      await loadConversationAggregate(userId, sid);
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -102,6 +104,11 @@ export function ConversationSidebar() {
     try {
       await deleteConversation(userId, sid);
       if (sid === sessionId) {
+        setSessionId(
+          typeof crypto !== "undefined" && (crypto as any).randomUUID
+            ? (crypto as any).randomUUID()
+            : `s_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        );
         resetSession();
       }
       await refresh();

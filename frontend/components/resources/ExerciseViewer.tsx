@@ -59,7 +59,8 @@ const TYPE_LABELS: Record<string, string> = {
   single_choice: "单选",
   multiple_choice: "多选",
   true_false: "判断",
-  short_answer: "填空",
+  fill_blank: "填空",
+  short_answer: "简答",
 };
 
 export function ExerciseViewer({ resource }: { resource: Resource }) {
@@ -264,6 +265,16 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
 
 function isCorrect(q: ParsedQuestion, ans: any): boolean {
   if (ans === undefined || ans === null) return false;
+  if (q.type === "fill_blank") {
+    // 2026-06-21 plan (B4): per-blank comparison with
+    // trim + case-insensitive + numeric-tolerance
+    const expected = Array.isArray(q.answer) ? q.answer : [q.answer];
+    const given = Array.isArray(ans) ? ans : [ans];
+    if (expected.length !== given.length) return false;
+    return expected.every((exp: unknown, i: number) =>
+      _normalizeFillBlank(String(exp), String(given[i] ?? ""))
+    );
+  }
   if (Array.isArray(q.answer)) {
     if (!Array.isArray(ans)) return false;
     const setA = new Set<string>(q.answer.map(String));
@@ -274,6 +285,45 @@ function isCorrect(q: ParsedQuestion, ans: any): boolean {
     return ans === q.answer;
   }
   return String(ans).trim().toLowerCase() === String(q.answer).trim().toLowerCase();
+}
+
+/**
+ * Compare a single fill-in-the-blank slot.
+ *
+ * Rules (2026-06-21 plan):
+ *  - Trim leading/trailing whitespace from both sides.
+ *  - Case-insensitive comparison.
+ *  - Numeric tolerance: if both sides parse as finite float,
+ *    accept when |a - b| / max(1, |b|) < 0.05.
+ */
+function _normalizeFillBlank(expected: string, given: string): boolean {
+  const e = expected.trim().toLowerCase();
+  const g = given.trim().toLowerCase();
+  if (e === g) return true;
+  const numE = parseFloat(e);
+  const numG = parseFloat(g);
+  if (!isNaN(numE) && !isNaN(numG)) {
+    const tol = Math.abs(numE - numG) / Math.max(1, Math.abs(numE));
+    return tol < 0.05;
+  }
+  return false;
+}
+
+/**
+ * Split a question text like "The capital of ___ is ___."
+ * into segments of {text, blankKey}. Blank slots with no
+ * explicit label get an auto-label like "blank_0".
+ */
+function _splitBlanks(questionText: string): Array<{ text: string; blankKey?: string }> {
+  const parts = questionText.split(/_{3,}/);
+  const segments: Array<{ text: string; blankKey?: string }> = [];
+  parts.forEach((p, i) => {
+    if (p) segments.push({ text: p });
+    if (i < parts.length - 1) {
+      segments.push({ text: "", blankKey: `blank_${i}` });
+    }
+  });
+  return segments.length > 0 ? segments : [{ text: questionText }];
 }
 
 function QuestionCard({
@@ -442,6 +492,14 @@ function QuestionCard({
           placeholder="输入答案…"
         />
       )}
+      {q.type === "fill_blank" && (
+        <FillBlankInput
+          question={q}
+          answer={answer}
+          isSub={isSub}
+          setAnswer={setAnswer}
+        />
+      )}
       <div className="flex items-center gap-2 mt-3">
         {!isSub ? (
           <button
@@ -468,6 +526,95 @@ function QuestionCard({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Fill-in-the-blank input (2026-06-21 plan, B4)
+// Supports single-blank and multi-blank with per-slot correctness.
+// ---------------------------------------------------------------------------
+
+function FillBlankInput({
+  question: q,
+  answer,
+  isSub,
+  setAnswer,
+}: {
+  question: ParsedQuestion;
+  answer: string[];
+  isSub: boolean;
+  setAnswer: (v: string[]) => void;
+}) {
+  const segments = useMemo(() => _splitBlanks(q.question), [q.question]);
+  const expected = Array.isArray(q.answer) ? q.answer : [q.answer];
+
+  if (segments.length === 1 && !segments[0].blankKey) {
+    // No blank markers found — render a single input.
+    return (
+      <input
+        type="text"
+        value={Array.isArray(answer) ? (answer[0] ?? "") : (answer ?? "")}
+        disabled={isSub}
+        onChange={(e) => setAnswer([e.target.value])}
+        className="w-full bg-bg-panel border border-fg/10 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-brand-500"
+        placeholder="输入答案…"
+      />
+    );
+  }
+
+  return (
+    <div className="text-sm text-fg leading-relaxed space-y-1">
+      {segments.map((seg, i) => {
+        if (seg.blankKey === undefined) {
+          return seg.text ? <span key={i}>{seg.text} </span> : null;
+        }
+        const blankIdx = parseInt(seg.blankKey.replace("blank_", ""), 10);
+        const userVal = (Array.isArray(answer) ? answer[blankIdx] : "") ?? "";
+        const exp = String(expected[blankIdx] ?? "");
+        const slotCorrect = isSub
+          ? _normalizeFillBlank(exp, String(userVal))
+          : null;
+        return (
+          <span key={seg.blankKey} className="inline-flex items-center gap-1 mx-0.5 align-baseline">
+            {!isSub ? (
+              <input
+                type="text"
+                value={userVal}
+                onChange={(e) => {
+                  const next = Array.isArray(answer) ? [...answer] : [];
+                  next[blankIdx] = e.target.value;
+                  setAnswer(next);
+                }}
+                className="bg-bg-panel border border-fg/10 rounded px-2 py-0.5 text-sm w-28 font-mono focus:outline-none focus:border-brand-500"
+                placeholder="…"
+              />
+            ) : (
+              <span
+                className={cn(
+                  "px-2 py-0.5 rounded text-sm font-mono border",
+                  slotCorrect
+                    ? "bg-green-950/20 border-green-700/50 text-green-300"
+                    : "bg-red-950/20 border-red-700/50 text-red-300",
+                )}
+              >
+                {userVal || "(空)"}
+                {slotCorrect ? (
+                  <Check className="w-3 h-3 inline ml-1" />
+                ) : (
+                  <X className="w-3 h-3 inline ml-1" />
+                )}
+              </span>
+            )}
+            {isSub && slotCorrect === false && exp && (
+              <span className="text-[10px] text-green-400">({exp})</span>
+            )}
+            {segments[i + 1]?.text ? (
+              <span>{segments[i + 1].text}</span>
+            ) : null}
+          </span>
+        );
+      })}
     </div>
   );
 }

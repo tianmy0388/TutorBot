@@ -68,14 +68,15 @@ export function ChatMessages() {
   // record still claims to be "streaming" or "success" — the live
   // view stays collapsed and the message list takes over.
   const showLive = !!liveJob;
-  const textBuffer = activeTurn.text_buffer;
-  const thinkingBuffer = activeTurn.thinking_buffer;
-  const errorText = activeTurn.error;
-  const events = activeTurn.events;
-  const stage =
-    events
-      .filter((e) => e.type === "stage_start")
-      .slice(-1)[0]?.stage || "";
+  // 2026-06-21 plan (B2): streaming buffers now live on the
+  // per-job ClientJob state. The legacy activeTurn fields are
+  // a fallback for callers that haven't been updated yet
+  // (event-handler, useWebSocket still write to activeTurn).
+  const textBuffer = liveJob?.text_buffer || activeTurn.text_buffer;
+  const thinkingBuffer = liveJob?.thinking_buffer || activeTurn.thinking_buffer;
+  const errorText = liveJob?.error || activeTurn.error;
+  const events = liveJob?.events.length > 0 ? liveJob.events : activeTurn.events;
+  const stage = liveJob?.stage || "";
 
   // Auto-scroll on new content
   useEffect(() => {
@@ -84,9 +85,9 @@ export function ChatMessages() {
     el.scrollTop = el.scrollHeight;
   }, [
     messages.length,
-    activeTurn.text_buffer,
-    activeTurn.thinking_buffer,
-    activeTurn.events.length,
+    liveJob?.text_buffer,
+    liveJob?.thinking_buffer,
+    liveJob?.events.length ?? activeTurn.events.length,
   ]);
 
   return (
@@ -419,28 +420,40 @@ function StageProgress({
 }: {
   events: Array<{ type: string; stage: string; source: string; content: string }>;
 }) {
-  const starts = events.filter((e) => e.type === "stage_start");
-  const ends = events.filter((e) => e.type === "stage_end");
-  const active = starts[starts.length - 1];
-  if (!active) return null;
-
+  // **2026-07-08 fix (585f367d):** compute the open-stages stack
+  // from the event timeline so the "active" badge tracks whatever
+  // is currently running, not just the last ``stage_start`` we
+  // ever saw. Pre-fix, a trailing unmatched ``stage_start`` (e.g.
+  // ``video_rendering`` whose end never fired after a 600s
+  // timeout) looked active forever, even after job_terminal.
   const seen = new Set<string>();
-  const sequence = starts
-    .map((s) => s.stage)
-    .filter((s) => {
-      if (seen.has(s)) return false;
-      seen.add(s);
-      return true;
-    });
+  const sequence: string[] = [];
+  const openStack: string[] = [];
+  for (const e of events) {
+    if (!e.stage) continue;
+    if (e.type === "stage_start") {
+      if (!seen.has(e.stage)) {
+        sequence.push(e.stage);
+        seen.add(e.stage);
+      }
+      openStack.push(e.stage);
+    } else if (e.type === "stage_end") {
+      const idx = openStack.lastIndexOf(e.stage);
+      if (idx >= 0) openStack.splice(idx, 1);
+    }
+  }
+
+  if (sequence.length === 0) return null;
+  const activeSet = new Set(openStack);
 
   return (
     <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[10px]">
       {sequence.map((stage, i) => {
-        const isActive = stage === active.stage;
-        const isDone = !isActive && ends.some((e) => e.stage === stage);
+        const isActive = activeSet.has(stage);
+        const isDone = !isActive;
         return (
           <div key={`${stage}_${i}`} className="flex items-center gap-1">
-            <StageRow stage={stage} state={isDone ? "done" : isActive ? "active" : "pending"} />
+            <StageRow stage={stage} state={isActive ? "active" : "done"} />
             {i < sequence.length - 1 && (
               <span className="text-fg-subtle">→</span>
             )}

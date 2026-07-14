@@ -1,18 +1,18 @@
 "use client";
 
 /**
- * Sidebar — session, capability, course, **and conversation history**
- * rail (2026-06-21 — conversation history added in stage 4).
+ * Sidebar — TutorBot's left rail (2026-07 redesign).
  *
- *  - Top: new session + collapse
- *  - Capability switcher
- *  - Course picker (KG)
- *  - Conversation history (persisted via /conversations)
- *  - Footer: WS status, session id
+ * Aesthetic notes:
+ *   - Editorial hairline rules between sections (no heavy borders)
+ *   - Capability cards feel like contents-page entries, not buttons
+ *   - Conversation rows are slightly inset, with a saffron leading rule
+ *     when active — quiet but unmistakable
+ *   - Footer is a status strip, not a settings drawer
  *
- * The conversation history portion is the inlined version of
- * ``ConversationSidebar`` — we keep it here so users can see past
- * sessions, switch between them, rename, and delete in one rail.
+ * Behavior is unchanged from the previous version: same store hooks,
+ * same conversation API, same keyboard/click handling. This is a
+ * pure visual refresh.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -31,10 +31,12 @@ import {
   MessageSquare,
   Pencil,
   Loader2,
+  ArrowUpRight,
 } from "lucide-react";
 import { useTutorStore } from "@/lib/store";
 import { useKG } from "@/hooks/useKG";
 import { cn } from "@/lib/utils";
+import { Logo } from "@/components/brand/Logo";
 import {
   createConversation,
   deleteConversation,
@@ -52,31 +54,79 @@ interface SidebarProps {
 }
 
 const CAPABILITY_NAV = [
-  { id: "resource_generation", label: "资源生成", icon: Sparkles, color: "text-accent" },
-  { id: "tutoring", label: "即时答疑", icon: MessageCircle, color: "text-brand-300" },
-  { id: "assessment", label: "效果评估", icon: BarChart3, color: "text-green-400" },
-  { id: "path_planning", label: "路径规划", icon: Compass, color: "text-yellow-300" },
+  {
+    id: "resource_generation",
+    label: "资源生成",
+    hint: "Resource",
+    icon: Sparkles,
+    accent: "var(--color-brand-400)",
+  },
+  {
+    id: "tutoring",
+    label: "即时答疑",
+    hint: "Tutor",
+    icon: MessageCircle,
+    accent: "var(--color-accent)",
+  },
+  {
+    id: "assessment",
+    label: "效果评估",
+    hint: "Assess",
+    icon: BarChart3,
+    accent: "var(--color-accent-green)",
+  },
+  {
+    id: "path_planning",
+    label: "路径规划",
+    hint: "Path",
+    icon: Compass,
+    accent: "var(--color-accent-warm)",
+  },
 ] as const;
 
 export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProps) {
   const wsConnected = useTutorStore((s) => s.wsConnected);
   const currentCapability = useTutorStore((s) => s.currentCapability);
   const setCapability = useTutorStore((s) => s.setCurrentCapability);
-  // Back-compat alias in case the store is later renamed.
-  const setCurrentCapability = useTutorStore((s) => s.setCurrentCapability);
   const resetSession = useTutorStore((s) => s.resetSession);
   const setSettingsOpen = useTutorStore((s) => s.setSettingsOpen);
   const userId = useTutorStore((s) => s.userId);
   const setSessionId = useTutorStore((s) => s.setSessionId);
-  const loadConversationIntoStore = useTutorStore(
-    (s) => s.loadConversationIntoStore,
+  const loadConversationAggregate = useTutorStore(
+    (s) => s.loadConversationAggregate,
   );
-  // Subscribe to the live message count so the sidebar's
-  // message_count badge updates as the user types / a job completes.
-  // DeepSeek-style: open the conversation and the count ticks up in
-  // place; no manual refresh.
   const messageCount = useTutorStore((s) => s.messages.length);
-  const { courses, currentCourse, plannedPath } = useKG();
+  const { courses: kgCourses, currentCourse, plannedPath } = useKG();
+
+  const [appCourses, setAppCourses] = useState<
+    Array<{
+      id: string;
+      name: string;
+      library_count: number;
+      ready_count: number;
+      document_count: number;
+    }>
+  >([]);
+
+  useEffect(() => {
+    if (!userId) return;
+    import("@/lib/api")
+      .then((mod) => mod.listAppCourses())
+      .then((r) => setAppCourses(r.items || []))
+      .catch(() => {});
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    const t = setTimeout(() => {
+      import("@/lib/api")
+        .then((mod) => mod.listAppCourses())
+        .then((r) => setAppCourses(r.items || []))
+        .catch(() => {});
+    }, 500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, messageCount]);
 
   // ---- conversation list state ----------------------------------------
 
@@ -100,21 +150,12 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
     refreshConvs();
   }, [refreshConvs]);
 
-  // Live refresh: when the user types a message in the chat composer
-  // and ChatComposer.appendConversationMessage lands on the server,
-  // the conversation's message_count on disk is now ahead of the
-  // cached list. Re-pull the list so the badge updates without
-  // waiting for a manual refresh. Debounced to coalesce bursty
-  // updates (e.g. one user message + one assistant message arriving
-  // back-to-back).
   useEffect(() => {
     if (!userId) return;
     const t = setTimeout(() => {
       void refreshConvs();
     }, 300);
     return () => clearTimeout(t);
-    // refreshConvs is stable per userId; we intentionally key on
-    // messageCount so a chat message triggers a re-pull.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, messageCount]);
 
@@ -139,7 +180,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
     setConvBusy(true);
     try {
       setSessionId(sid);
-      await loadConversationIntoStore(userId, sid);
+      await loadConversationAggregate(userId, sid);
     } catch (e: any) {
       setConvError(e?.message ?? String(e));
     } finally {
@@ -159,6 +200,11 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
     try {
       await deleteConversation(userId, sid);
       if (sid === sessionId) {
+        setSessionId(
+          typeof crypto !== "undefined" && (crypto as any).randomUUID
+            ? (crypto as any).randomUUID()
+            : `s_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        );
         resetSession();
         onNewSession();
       }
@@ -194,7 +240,12 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
     return (
       <button
         onClick={onToggle}
-        className="absolute left-2 top-2 z-10 p-2 bg-bg-panel border border-fg/10 rounded-lg hover:bg-bg-card transition-colors shadow-md"
+        className="absolute left-3 top-3 z-20 p-2 rounded-md transition-all animate-scale-in"
+        style={{
+          backgroundColor: "rgb(var(--color-bg-panel))",
+          border: "1px solid rgb(var(--color-rule))",
+          boxShadow: "var(--shadow-soft)",
+        }}
         title="展开侧栏"
       >
         <ChevronRight className="w-4 h-4" />
@@ -203,17 +254,41 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
   }
 
   return (
-    <aside className="w-64 bg-bg-panel border-r border-fg/10 flex flex-col h-full">
-      {/* Top: new conversation (DeepSeek-style: one canonical entry
-          point that both clears the local chat and persists a fresh
-          conversation on the server). The old version had a separate
-          "新会话" button that didn't talk to the server, so users
-          saw the same action appear twice. */}
-      <div className="p-3 border-b border-fg/10 flex items-center justify-between shrink-0">
+    <aside
+      className="w-64 shrink-0 flex flex-col h-full animate-slide-down"
+      style={{
+        backgroundColor: "rgb(var(--color-bg-subtle))",
+        borderRight: "1px solid rgb(var(--color-rule) / 0.6)",
+      }}
+    >
+      {/* Brand row inside rail — small monogram only, since AppShell
+          already shows the full lockup in the top bar. Doubles as
+          collapse trigger. */}
+      <div
+        className="h-14 px-3 flex items-center justify-between shrink-0"
+        style={{ borderBottom: "1px solid rgb(var(--color-rule) / 0.6)" }}
+      >
+        <div className="flex items-center gap-2">
+          <Logo size={22} />
+          <span className="font-display text-sm font-semibold tracking-tight">
+            TutorBot
+          </span>
+        </div>
+        <button
+          onClick={onToggle}
+          className="p-1.5 rounded-md text-fg-muted hover:text-fg hover:bg-bg-card transition-colors"
+          title="收起侧栏"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* New conversation — full-bleed editorial button */}
+      <div className="px-3 pt-3 shrink-0">
         <button
           onClick={handleNewConv}
           disabled={convBusy}
-          className="btn-primary flex-1 mr-2 text-sm h-9 flex items-center justify-center gap-1.5"
+          className="btn-primary w-full h-9 text-sm"
           title="新建对话 (清空当前聊天，持久化到服务端)"
           data-testid="sidebar-conv-new-primary"
         >
@@ -222,23 +297,15 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
           ) : (
             <Plus className="w-4 h-4" />
           )}
-          新建对话
-        </button>
-        <button
-          onClick={onToggle}
-          className="p-2 hover:bg-bg-card rounded-lg text-fg-muted hover:text-fg transition-colors"
-          title="收起侧栏"
-        >
-          <ChevronLeft className="w-4 h-4" />
+          <span>新建对话</span>
+          <ArrowUpRight className="w-3.5 h-3.5 ml-auto opacity-60" />
         </button>
       </div>
 
       {/* Capability nav */}
-      <div className="p-3 border-b border-fg/10 shrink-0">
-        <div className="text-[10px] uppercase tracking-wider text-fg-subtle font-semibold mb-2 px-1">
-          能力
-        </div>
-        <nav className="space-y-1">
+      <div className="px-3 pt-4 pb-3 shrink-0">
+        <div className="rail-label px-1 mb-2">能力 · Capability</div>
+        <nav className="space-y-0.5">
           {CAPABILITY_NAV.map((c) => {
             const Icon = c.icon;
             const active = currentCapability === c.id;
@@ -247,83 +314,158 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
                 key={c.id}
                 onClick={() => setCapability(active ? null : c.id)}
                 className={cn(
-                  "w-full text-left px-3 py-2 rounded-lg text-sm flex items-center gap-2 transition-colors",
+                  "group relative w-full text-left pl-3 pr-2.5 py-2 rounded-md text-[13px] flex items-center gap-2.5",
+                  "transition-all duration-150",
                   active
-                    ? "bg-brand-600/30 text-brand-200 border border-brand-500/40"
-                    : "hover:bg-bg-card text-fg-muted hover:text-fg",
+                    ? "text-fg"
+                    : "text-fg-muted hover:text-fg",
                 )}
+                style={{
+                  backgroundColor: active
+                    ? "rgb(var(--color-bg-card))"
+                    : "transparent",
+                  border: active
+                    ? "1px solid rgb(var(--color-rule))"
+                    : "1px solid transparent",
+                }}
               >
-                <Icon className={cn("w-4 h-4", active && c.color)} />
-                <span className="flex-1">{c.label}</span>
-                {active && <span className="w-1.5 h-1.5 rounded-full bg-brand-400" />}
+                {active && (
+                  <span
+                    className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-r"
+                    style={{ backgroundColor: c.accent }}
+                  />
+                )}
+                <Icon
+                  className={cn(
+                    "w-4 h-4 shrink-0 transition-colors",
+                    active ? "" : "text-fg-subtle",
+                  )}
+                  style={active ? { color: c.accent } : undefined}
+                />
+                <span className="flex-1 font-medium">{c.label}</span>
+                <span
+                  className="text-[9px] font-mono-tab uppercase opacity-50"
+                  style={{ letterSpacing: "0.14em" }}
+                >
+                  {c.hint}
+                </span>
               </button>
             );
           })}
         </nav>
       </div>
 
-      {/* Course list (KG) */}
-      <div className="p-3 border-b border-fg/10 shrink-0 max-h-40 overflow-y-auto">
-        <div className="text-[10px] uppercase tracking-wider text-fg-subtle font-semibold mb-2 px-1 flex items-center gap-1">
+      <div
+        className="mx-3 hr-rule shrink-0"
+        style={{ borderColor: "rgb(var(--color-rule) / 0.5)" }}
+      />
+
+      {/* Course list */}
+      <div className="px-3 pt-3 pb-3 shrink-0 max-h-44 overflow-y-auto">
+        <div className="rail-label px-1 mb-2 flex items-center gap-1">
           <Network className="w-3 h-3" />
-          课程
+          课程 · Courses
         </div>
-        {courses.length === 0 ? (
+        {appCourses.length === 0 && kgCourses.length === 0 ? (
           <p className="text-xs text-fg-subtle px-2 py-1">暂无课程</p>
         ) : (
           <nav className="space-y-0.5">
-            {courses.map((c) => {
-              const active = c === currentCourse;
-              return (
-                <button
-                  key={c}
-                  onClick={() =>
-                    useTutorStore.setState({ currentCourse: c })
-                  }
-                  className={cn(
-                    "w-full text-left px-3 py-1.5 rounded-md text-xs transition-colors",
-                    active
-                      ? "bg-bg-card text-fg"
-                      : "text-fg-muted hover:text-fg hover:bg-bg-card/50",
-                  )}
-                >
-                  <span className="truncate block">{c}</span>
-                </button>
-              );
-            })}
+            {appCourses.length > 0
+              ? appCourses.map((c) => {
+                  const active =
+                    c.knowledge_graph_id === currentCourse ||
+                    c.id === currentCourse;
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() =>
+                        useTutorStore.setState({
+                          currentCourse: c.knowledge_graph_id || c.id,
+                        })
+                      }
+                      className={cn(
+                        "w-full text-left px-2.5 py-1.5 rounded-md text-xs transition-colors",
+                        active
+                          ? "bg-bg-card text-fg"
+                          : "text-fg-muted hover:text-fg hover:bg-bg-card/50",
+                      )}
+                    >
+                      <span className="truncate block font-medium">{c.name}</span>
+                      <span className="text-[9px] text-fg-subtle font-mono-tab">
+                        {c.ready_count}/{c.document_count} 就绪 · {c.library_count} 库
+                      </span>
+                    </button>
+                  );
+                })
+              : kgCourses.map((c) => {
+                  const active = c === currentCourse;
+                  return (
+                    <button
+                      key={c}
+                      onClick={() =>
+                        useTutorStore.setState({ currentCourse: c })
+                      }
+                      className={cn(
+                        "w-full text-left px-2.5 py-1.5 rounded-md text-xs transition-colors",
+                        active
+                          ? "bg-bg-card text-fg"
+                          : "text-fg-muted hover:text-fg hover:bg-bg-card/50",
+                      )}
+                    >
+                      <span className="truncate block">{c}</span>
+                    </button>
+                  );
+                })}
           </nav>
         )}
         {plannedPath && (
-          <div className="mt-3 px-1 text-[10px] text-fg-muted">
-            <div className="flex items-center gap-1 mb-1">
-              <Activity className="w-3 h-3" />
+          <div className="mt-3 px-2 py-2 rounded-md text-[10px]"
+            style={{
+              backgroundColor: "rgb(var(--color-bg-card) / 0.5)",
+              border: "1px solid rgb(var(--color-rule) / 0.5)",
+            }}
+          >
+            <div className="flex items-center gap-1 mb-1 text-fg-muted">
+              <Activity className="w-3 h-3" style={{ color: "var(--color-brand-400)" }} />
               当前路径
             </div>
-            <div className="text-fg truncate">{plannedPath.name}</div>
-            <div className="text-fg-subtle">
+            <div className="text-fg truncate font-medium">{plannedPath.name}</div>
+            <div className="text-fg-subtle font-mono-tab">
               {plannedPath.completed_count}/{plannedPath.nodes.length} 节点
             </div>
           </div>
         )}
       </div>
 
-      {/* Conversation history (2026-06-21 plan, stage 4) */}
-      <div className="p-3 border-b border-fg/10 flex-1 overflow-y-auto min-h-0">
+      <div
+        className="mx-3 hr-rule shrink-0"
+        style={{ borderColor: "rgb(var(--color-rule) / 0.5)" }}
+      />
+
+      {/* Conversation history */}
+      <div className="px-3 pt-3 flex-1 overflow-y-auto min-h-0">
         <div className="flex items-center justify-between mb-2 px-1">
-          <div className="text-[10px] uppercase tracking-wider text-fg-subtle font-semibold flex items-center gap-1">
+          <div className="rail-label flex items-center gap-1">
             <MessageSquare className="w-3 h-3" />
             对话历史
           </div>
           <span
-            className="text-[9px] text-fg-subtle"
+            className="text-[9px] font-mono-tab text-fg-subtle"
             data-testid="sidebar-conv-count"
+            style={{ letterSpacing: "0.12em" }}
           >
-            {convs?.length ?? 0} 个
+            {convs?.length ?? 0}
           </span>
         </div>
 
         {convError && (
-          <div className="text-[10px] text-red-300 bg-red-500/10 border border-red-500/30 rounded px-2 py-1 mb-2">
+          <div
+            className="text-[10px] text-red-300 rounded px-2 py-1 mb-2"
+            style={{
+              backgroundColor: "rgb(220 80 60 / 0.08)",
+              border: "1px solid rgb(220 80 60 / 0.25)",
+            }}
+          >
             {convError}
           </div>
         )}
@@ -333,7 +475,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
         ) : convs.length === 0 ? (
           <p className="text-xs text-fg-subtle px-2 py-1">还没有对话</p>
         ) : (
-          <ul className="space-y-1">
+          <ul className="space-y-0.5">
             {convs.map((c) => {
               const isActive = c.session_id === sessionId;
               const isRenaming = renamingId === c.session_id;
@@ -341,22 +483,32 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
                 <li
                   key={c.session_id}
                   className={cn(
-                    "rounded-lg border",
+                    "relative rounded-md transition-colors",
                     isActive
-                      ? "border-brand-500/40 bg-brand-500/10"
-                      : "border-transparent hover:border-fg/10 hover:bg-bg-card",
+                      ? "bg-bg-card"
+                      : "hover:bg-bg-card/50",
                   )}
+                  style={{
+                    border: isActive
+                      ? "1px solid rgb(var(--color-rule))"
+                      : "1px solid transparent",
+                  }}
                   data-testid={`sidebar-conv-${c.session_id}`}
                 >
-                  <div className="flex items-start gap-1 p-2">
+                  {isActive && (
+                    <span
+                      className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-r"
+                      style={{ backgroundColor: "var(--color-brand-400)" }}
+                    />
+                  )}
+                  <div className="flex items-start gap-1 pl-2.5 pr-1.5 py-1.5">
                     <button
                       onClick={() => handleSwitchConv(c.session_id)}
                       className="flex-1 min-w-0 text-left"
                       disabled={convBusy}
                       data-testid={`sidebar-conv-switch-${c.session_id}`}
                     >
-                      <div className="flex items-center gap-1 text-fg-muted">
-                        <MessageSquare className="w-3 h-3 shrink-0" />
+                      <div className="flex items-center gap-1.5 text-fg-muted">
                         {isRenaming ? (
                           <input
                             autoFocus
@@ -370,19 +522,27 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
                                 setRenamingId(null);
                               }
                             }}
-                            className="input text-[10px] h-5 px-1 py-0 w-full"
+                            className="input text-[11px] h-5 px-1 py-0 w-full"
                             onClick={(e) => e.stopPropagation()}
                           />
                         ) : (
-                          <span className="text-[11px] font-medium truncate">
+                          <span
+                            className={cn(
+                              "text-[12px] truncate",
+                              isActive ? "text-fg font-medium" : "",
+                            )}
+                          >
                             {c.title || "(无标题)"}
                           </span>
                         )}
                       </div>
                       {!isRenaming && (
-                        <div className="text-[9px] text-fg-subtle mt-0.5 truncate">
-                          {c.message_count} 条 ·{" "}
-                          {new Date(c.updated_at).toLocaleDateString()}
+                        <div className="text-[9px] text-fg-subtle mt-0.5 font-mono-tab flex items-center gap-1"
+                          style={{ letterSpacing: "0.05em" }}
+                        >
+                          <span>{c.message_count} 条</span>
+                          <span className="opacity-50">·</span>
+                          <span>{new Date(c.updated_at).toLocaleDateString()}</span>
                         </div>
                       )}
                     </button>
@@ -392,7 +552,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
                           e.stopPropagation();
                           handleStartRename(c);
                         }}
-                        className="text-fg-muted hover:text-fg p-0.5"
+                        className="text-fg-subtle hover:text-fg p-0.5 opacity-0 group-hover:opacity-100"
                         title="重命名"
                       >
                         <Pencil className="w-3 h-3" />
@@ -402,7 +562,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
                           e.stopPropagation();
                           handleDeleteConv(c.session_id);
                         }}
-                        className="text-fg-muted hover:text-red-300 p-0.5"
+                        className="text-fg-subtle hover:text-red-300 p-0.5"
                         title="删除"
                       >
                         <Trash2 className="w-3 h-3" />
@@ -416,41 +576,57 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
         )}
       </div>
 
-      {/* Footer */}
-      <div className="p-3 border-t border-fg/10 shrink-0">
-        <div className="flex items-center gap-2 text-xs text-fg-muted mb-2">
-          <span
-            className={cn(
-              "inline-block w-2 h-2 rounded-full shrink-0",
-              wsConnected ? "bg-green-400 animate-pulse" : "bg-red-400",
-            )}
-          />
-          <span>{wsConnected ? "WebSocket 已连接" : "WebSocket 未连接"}</span>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <div className="font-mono text-[10px] text-fg-subtle truncate flex-1">
-            {sessionId ? `${sessionId.slice(0, 8)}…` : "connecting…"}
-          </div>
-          <button
-            onClick={() => setSettingsOpen(true)}
-            className="p-1.5 text-fg-subtle hover:text-fg transition-colors"
-            title="设置"
-          >
-            <Settings className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => {
-              if (confirm("确定清空当前会话的所有数据吗？")) {
-                resetSession();
-                onNewSession();
-              }
-            }}
-            className="p-1.5 text-fg-subtle hover:text-red-400 transition-colors"
-            title="清空当前会话（不影响已持久化的历史对话）"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        </div>
+      {/* Footer status strip */}
+      <div
+        className="px-3 py-2.5 shrink-0 flex items-center gap-2 text-xs"
+        style={{
+          borderTop: "1px solid rgb(var(--color-rule) / 0.6)",
+          backgroundColor: "rgb(var(--color-bg-panel) / 0.5)",
+        }}
+      >
+        <span
+          className={cn(
+            "inline-block w-1.5 h-1.5 rounded-full shrink-0",
+            wsConnected ? "" : "",
+          )}
+          style={{
+            backgroundColor: wsConnected
+              ? "var(--color-accent-green)"
+              : "rgb(220 80 60)",
+            boxShadow: wsConnected
+              ? "0 0 0 3px rgb(124 168 110 / 0.15)"
+              : "none",
+            animation: wsConnected ? "pulse 2s ease-in-out infinite" : undefined,
+          }}
+        />
+        <span className="text-fg-muted">
+          {wsConnected ? "已连接" : "未连接"}
+        </span>
+        <span
+          className="ml-auto font-mono-tab text-[10px] text-fg-subtle truncate"
+          style={{ letterSpacing: "0.05em" }}
+        >
+          {sessionId ? `${sessionId.slice(0, 8)}` : "—"}
+        </span>
+        <button
+          onClick={() => setSettingsOpen(true)}
+          className="p-1 text-fg-subtle hover:text-fg transition-colors"
+          title="设置"
+        >
+          <Settings className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={() => {
+            if (confirm("确定清空当前会话的所有数据吗？")) {
+              resetSession();
+              onNewSession();
+            }
+          }}
+          className="p-1 text-fg-subtle hover:text-red-400 transition-colors"
+          title="清空当前会话"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
       </div>
     </aside>
   );

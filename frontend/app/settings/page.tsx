@@ -39,7 +39,16 @@ const LLM_PROVIDERS = [
   "ollama",
   "custom",
 ];
-const EMBED_PROVIDERS = ["openai", "azure_openai", "ollama", "custom"];
+const EMBED_PROVIDERS = [
+  "openai",
+  "openrouter",
+  "azure_openai",
+  "ollama",
+  "custom",
+  "deepseek",
+  "zhipu",
+  "zhipuai",
+];
 const WEB_PROVIDERS = ["duckduckgo", "searxng", "bing", "mcp"];
 
 export default function SettingsPage() {
