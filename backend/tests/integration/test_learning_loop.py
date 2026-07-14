@@ -17,13 +17,13 @@ from tutor.services.learner_profile.builder import (
     ProfileBuilder,
     reset_profile_builder,
 )
+from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.learner_profile.schema import (
     LearnerProfile,
     ModalityPreferences,
 )
 from tutor.services.learner_profile.store import (
     ProfileStore,
-    reset_profile_store,
 )
 from tutor.services.resource_package.schema import (
     Resource,
@@ -37,7 +37,7 @@ def fresh_profile(monkeypatch, tmp_path):
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
     from tutor.services.config.settings import reset_settings_cache
     reset_settings_cache()
-    reset_profile_store()
+    _close_profile_store_sync()
     reset_profile_builder()
 
 
@@ -121,5 +121,5 @@ async def test_weak_exercise_nudges_profile_and_path(fresh_profile) -> None:
     assert "transformer" in weak or "rnn" in weak
 
     await store.close()
-    reset_profile_store()
+    _close_profile_store_sync()
     reset_profile_builder()

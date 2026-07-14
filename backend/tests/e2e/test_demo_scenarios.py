@@ -41,8 +41,8 @@ from tutor.services.knowledge_base.store import (
 from tutor.services.learner_profile.schema import LearnerProfile
 from tutor.services.learner_profile.store import (
     ProfileStore,
-    reset_profile_store,
 )
+from tutor.services.learner_profile import _close_profile_store_sync
 
 
 def _client() -> httpx.AsyncClient:
@@ -50,7 +50,7 @@ def _client() -> httpx.AsyncClient:
     reset_job_store()
     reset_job_runner()
     reset_kb_store()
-    reset_profile_store()
+    _close_profile_store_sync()
     app = create_app()
     return httpx.AsyncClient(
         transport=ASGITransport(app=app),

@@ -37,15 +37,15 @@ from tutor.services.learner_profile.schema import (
 def _reset_profile_singleton():
     """Reset profile builder singleton between tests."""
     from tutor.services.learner_profile import (
+        _close_profile_store_sync,
         reset_profile_builder,
-        reset_profile_store,
     )
 
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
     yield
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
 
 
 def _mock_llm(response_content: str):
