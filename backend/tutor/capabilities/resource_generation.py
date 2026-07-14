@@ -126,6 +126,11 @@ class ResourceGenerationCapability(BaseCapability):
         self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
         self.ppt_generator = ppt_generator or PPTGeneratorAgent()
         self.package_store = package_store
+        # **2026-07-08 fix (fdb26152):** strong references to
+        # fire-and-forget video render tasks. Without this, asyncio
+        # GC's the task as soon as ``_start_pending_video_renders``
+        # returns and the manim subprocess gets cancelled mid-encode.
+        self._bg_render_tasks: list[asyncio.Task] = []
 
     @property
     def _builder(self) -> ProfileBuilder:
@@ -276,6 +281,18 @@ class ResourceGenerationCapability(BaseCapability):
                         pedagogy_resource.confidence_score,
                         document_resource.confidence_score,
                     )
+                    # **2026-07-08 fix (187b2955):** emit a ``RESOURCE``
+                    # event for the pedagogy output *before* the slower
+                    # parallel agents + video rendering finish. The
+                    # frontend renders the document card immediately.
+                    try:
+                        await stream.resource(
+                            pedagogy_resource,
+                            source="resource_capability",
+                            stage="content_and_pedagogy",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(f"stream.resource() emission failed: {exc!r}")
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(f"Content/Pedagogy failed: {exc!r}")
                     await stream.error(
@@ -313,6 +330,32 @@ class ResourceGenerationCapability(BaseCapability):
             # Keep pedagogy version (it supersedes); document is intermediate
             pass
         all_resources.extend(parallel_resources)
+
+        # ------------------------------------------------------------------
+        # **2026-07-07 fix:** pre-filter resources whose *generation*
+        # already failed (vs. resources whose content is simply
+        # low-quality). The agent still returns a typed failed
+        # Resource so the user sees "视频生成失败 — 重新提交" in the
+        # trace, but it must NOT enter the quality-review loop —
+        # the reviewer would correctly reject it, then the reject
+        # filter would strip it from the package, then the
+        # video_rendering stage would be a confusing no-op.
+        #
+        # Filter rule:
+        #   * video     — drop if ``render_status == "failed"``
+        #                  (Manim code generation / syntax check failed)
+        #   * code      — keep; reviewer handles ``execution_status``
+        #                  failures so we don't lose valid-but-env-broken
+        #                  snippets.
+        #   * other     — keep.
+        #
+        # We emit a clear stream observation so the UI / chat
+        # channel can show "1 video resource skipped (generation
+        # failed)" rather than a silent 5/6 retain count.
+        # ------------------------------------------------------------------
+        all_resources, prefilter_summary = await self._prefilter_failed_resources(
+            all_resources, stream
+        )
 
         async with stream.stage("quality_review", source="resource_capability"):
             reviews = await self._review_all(all_resources, context, stream)
@@ -376,6 +419,98 @@ class ResourceGenerationCapability(BaseCapability):
                 safety = safety_reports[idx]
                 r.metadata["safety"] = safety.to_dict()
 
+        # **2026-07-08 fix (187b2955):** drop resources whose safety
+        # verdict is ``UNSAFE`` (refuted claims OR content-safety
+        # violation). Before this, ``safety_blocked`` was counted in
+        # metadata but the unsafe resource was still shipped to the
+        # user — exactly the kind of "the user sees a hallucinated
+        # answer as a confident resource card" failure we don't want.
+        # We keep ``CAUTION`` and ``UNVERIFIED`` (those are educational
+        # signals, not blocks).
+        unsafe_ids: set[str] = set()
+        for idx, r in enumerate(package.resources):
+            if idx >= len(safety_reports):
+                continue
+            sv = safety_reports[idx].overall_verdict
+            if sv == OverallVerdict.UNSAFE:
+                unsafe_ids.add(r.resource_id)
+        if unsafe_ids:
+            before_count = len(package.resources)
+            package.resources = [
+                r for r in package.resources if r.resource_id not in unsafe_ids
+            ]
+            package.metadata.setdefault("filtered_safety", []).extend(
+                [
+                    {
+                        "resource_id": rid,
+                        "reason": "anti_hallucination_unsafe",
+                    }
+                    for rid in unsafe_ids
+                ]
+            )
+            await stream.observation(
+                f"已过滤 {len(unsafe_ids)} 个安全校验未通过的资源"
+                f"（保留 {len(package.resources)}/{before_count}）",
+                source="resource_capability",
+                stage="anti_hallucination",
+                metadata={
+                    "unsafe_count": len(unsafe_ids),
+                    "kept_count": len(package.resources),
+                },
+            )
+            logger.warning(
+                f"resource_capability: filtered {len(unsafe_ids)} unsafe resources "
+                f"(topic={package.topic!r}); kept={len(package.resources)}"
+            )
+
+        # ------------------------------------------------------------------
+        # **2026-06-22 fix (Task 9):** filter out resources whose quality
+        # review verdict is ``reject`` BEFORE we persist or surface the
+        # package. Previously the verdict was attached as metadata but
+        # the resource still shipped to the chat viewer — so a code
+        # resource with empty code or a video resource whose generation
+        # failed was published to the user as a real, usable resource.
+        #
+        # We keep ``REVISE`` (the LLM thinks it can be improved but is
+        # still usable) and ``PASS``; only ``REJECT`` is dropped.
+        # Dropped resources are recorded in ``package.metadata`` for
+        # downstream observability and surfaced as a stream observation
+        # so the chat UI can show "2 resources were filtered".
+        # ------------------------------------------------------------------
+        rejected_ids = {
+            r.resource_id
+            for r in package.resources
+            if (r.metadata.get("review") or {}).get("verdict") == "reject"
+        }
+        if rejected_ids:
+            before_count = len(package.resources)
+            package.resources = [
+                r for r in package.resources if r.resource_id not in rejected_ids
+            ]
+            package.metadata.setdefault("filtered_reviews", []).extend(
+                [
+                    {
+                        "resource_id": rid,
+                        "reason": "quality_review_rejected",
+                    }
+                    for rid in rejected_ids
+                ]
+            )
+            await stream.observation(
+                f"已过滤 {len(rejected_ids)} 个质量不达标的资源（保留 "
+                f"{len(package.resources)}/{before_count}）",
+                source="resource_capability",
+                stage="quality_review",
+                metadata={
+                    "rejected_count": len(rejected_ids),
+                    "kept_count": len(package.resources),
+                },
+            )
+            logger.warning(
+                f"resource_capability: filtered {len(rejected_ids)} rejected resources "
+                f"(topic={package.topic!r}); kept={len(package.resources)}"
+            )
+
         # ------------------------------------------------------------------
         # Stage 10: Path integration — store package ID in profile metadata
         # ------------------------------------------------------------------
@@ -409,6 +544,18 @@ class ResourceGenerationCapability(BaseCapability):
 
         async with stream.stage("persistence", source="resource_capability"):
             try:
+                # 2026-06-21 plan: tag the package with the session_id
+                # so conversation-detail can filter packages by session
+                # in a single SQL query. We write the id into
+                # ``package.metadata`` (the store already round-trips
+                # it through the ``package_metadata`` JSON column) and
+                # the per-resource ``metadata`` for downstream lookups
+                # (RAG scope, retried jobs, etc.).
+                session_id = getattr(context, "session_id", "") or ""
+                if session_id:
+                    package.metadata.setdefault("session_id", session_id)
+                    for r in package.resources:
+                        r.metadata.setdefault("session_id", session_id)
                 await self._store.save(package, user_id=context.user_id)
                 await stream.observation(
                     f"资源包已持久化: pkg={package.package_id[:12]}… "
@@ -427,6 +574,39 @@ class ResourceGenerationCapability(BaseCapability):
                     f"资源包持久化失败 (不影响本轮): {exc}",
                     source="resource_capability",
                 )
+
+        # ------------------------------------------------------------------
+        # Stage 12: Video rendering status (2026-06-21 plan, C2)
+        # ------------------------------------------------------------------
+        # The agent already outputs ``VideoResource(render_status="pending")``.
+        # We kick off the actual ``manim`` subprocess via
+        # :meth:`ManimRenderService.render`, which is async + uses
+        # ``loop.run_in_executor`` so the manim subprocess never blocks
+        # the FastAPI event loop. Each render updates the resource's
+        # ``render_status`` in-place and re-saves the package so the UI
+        # can poll/snapshot it without the user reloading.
+        #
+        # **2026-07-08 fix (fdb26152):** rendering is now fire-and-forget.
+        # Before this, ``_render_pending_videos`` was awaited inline, so
+        # a slow Manim render pushed the job past 600s — even though the
+        # resource was already streamable. Now we start the render
+        # background tasks, register them on the running loop (so they
+        # keep going after ``cap.run()`` returns), and IMMEDIATELY emit
+        # ``stream.result()`` so the user gets the package + the final
+        # contract without waiting for video encoding. The render task
+        # keeps streaming ``RESOURCE`` events for each finished video
+        # (with the updated ``render_status`` / ``video_url``) so the
+        # right-pane card updates live as the video comes online.
+        # We also persist a strong reference to the task so it can't be
+        # garbage-collected mid-render.
+        render_bg_tasks = await self._start_pending_video_renders(
+            package, context, stream
+        )
+        # Hold a reference on the capability instance for the lifetime
+        # of the loop. The task is fire-and-forget; if the loop ends
+        # the manim subprocess is torn down anyway.
+        if render_bg_tasks:
+            self._bg_render_tasks.extend(render_bg_tasks)
 
         # ------------------------------------------------------------------
         # Emit final result
@@ -450,9 +630,9 @@ class ResourceGenerationCapability(BaseCapability):
         )
         await stream.done(source="resource_capability")
 
-    # ------------------------------------------------------------------
-    # PPT bookkeeping
-    # ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# PPT bookkeeping
+# ------------------------------------------------------------------
 
     def _relocate_ppt_artifacts(self, package: ResourcePackage) -> None:
         """Move any PPT files written under ``ad_hoc/`` to
@@ -493,6 +673,143 @@ class ResourceGenerationCapability(BaseCapability):
 
                 shutil.copy2(src, dst)
             r.format_specific["pptx_path"] = str(dst)
+
+    # ------------------------------------------------------------------
+    # Video rendering (2026-06-21 plan, C2)
+    # ------------------------------------------------------------------
+
+    async def _start_pending_video_renders(
+        self,
+        package: ResourcePackage,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> list[asyncio.Task]:
+        """Start one background asyncio task per pending video and
+        return immediately.
+
+        **2026-07-08 fix (fdb26152):** the previous ``_render_pending_videos``
+        awaited every render inline, so a slow Manim encode (one
+        video can take 30-90s to compile) pushed the entire job past
+        the 600s timeout — even though the resource was already
+        streamable. We now start the render tasks fire-and-forget and
+        return without awaiting them, so ``cap.run()`` can emit the
+        final ``result`` + ``done`` immediately. The render tasks
+        each emit ``RESOURCE`` events (with the updated
+        ``render_status`` / ``video_url``) when they finish, so the
+        right pane updates live as the video comes online.
+
+        Returns the list of started tasks so the caller can keep a
+        strong reference (otherwise asyncio GC's them mid-render).
+        """
+        pending = [
+            r
+            for r in package.resources
+            if r.type == ResourceType.VIDEO
+            and (r.format_specific or {}).get("render_status") == "pending"
+        ]
+        if not pending:
+            return []
+
+        # Emit the stage markers + observation INSIDE the now-fire-and-
+        # forget tasks' wrapper, so the trace still shows a
+        # ``video_rendering`` window even though the parent has moved on.
+        tasks: list[asyncio.Task] = []
+        for r in pending:
+            task = asyncio.create_task(self._render_one_video(r, package, context, stream))
+            tasks.append(task)
+        return tasks
+
+    async def _render_one_video(
+        self,
+        res: Resource,
+        package: ResourcePackage,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> None:
+        """Render a single video, updating its ``format_specific`` and
+        emitting a ``RESOURCE`` event when done.
+
+        **2026-07-08 fix (fdb26152):** the previous per-render closure
+        only emitted ``stream.observation(...)``; the frontend never
+        knew the resource had updated ``render_status=ready`` /
+        ``video_url`` because no incremental ``RESOURCE`` event was
+        sent after the original parallel-generation one. We now emit
+        a fresh ``RESOURCE`` event so the right-pane card swaps the
+        placeholder for a real video player.
+        """
+        try:
+            from tutor.services.manim_render.service import (
+                ManimRenderService,
+                get_manim_render_service,
+            )
+
+            manim_service = get_manim_render_service()
+            code = (res.format_specific or {}).get("manim_code", "")
+            scene = (res.format_specific or {}).get("scene_class", "GeneratedScene")
+            if not code:
+                res.format_specific["render_status"] = "failed"
+                res.format_specific["render_error"] = "no manim_code in resource"
+            else:
+                render_result = await manim_service.render(
+                    code=code, scene_class=scene
+                )
+                # Update the resource payload in-place.
+                res.format_specific["render_status"] = (
+                    "ready" if render_result.success else "failed"
+                )
+                if render_result.public_url:
+                    res.format_specific["video_url"] = render_result.public_url
+                if render_result.video_path:
+                    res.format_specific["mp4_path"] = str(render_result.video_path)
+                if render_result.duration_seconds:
+                    res.format_specific["duration_seconds"] = (
+                        render_result.duration_seconds
+                    )
+                if render_result.error:
+                    res.format_specific["render_error"] = render_result.error
+                await stream.observation(
+                    (
+                        f"视频渲染{'成功' if render_result.success else '失败'}: "
+                        f"{res.title}"
+                    ),
+                    source="resource_capability",
+                    stage="video_rendering",
+                    metadata={
+                        "resource_id": res.resource_id,
+                        "success": render_result.success,
+                        "attempts": render_result.attempts,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                f"Video render failed res={res.resource_id}: {exc!r}"
+            )
+            res.format_specific["render_status"] = "failed"
+            res.format_specific["render_error"] = f"{type(exc).__name__}: {exc}"
+            await stream.error(
+                f"视频渲染异常: {res.title} — {exc}",
+                source="resource_capability",
+            )
+        finally:
+            # **2026-07-08 fix:** emit a fresh ``RESOURCE`` event so the
+            # frontend swaps the placeholder card for a real video
+            # player. We do this in ``finally`` so even render failures
+            # surface (the user sees "渲染失败" instead of a forever-
+            # pending placeholder).
+            try:
+                await stream.resource(
+                    res,
+                    source="resource_capability",
+                    stage="video_rendering",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"stream.resource() emission failed: {exc!r}")
+            # Re-save the package so the updated format_specific is
+            # persisted for reconnection / reload.
+            try:
+                await self._store.save(package, user_id=context.user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Video render re-save failed: {exc!r}")
 
     # ------------------------------------------------------------------
     # Resource planning
@@ -631,6 +948,37 @@ class ResourceGenerationCapability(BaseCapability):
                 )
                 return None
 
+        # **2026-07-08 fix (187b2955):** wrap each agent call in a semaphore-
+        # bounded task so we don't fan out 6+ concurrent LLM calls if the
+        # topic requests many resource types. Before this, the trace showed
+        # 5+ LLM calls running in parallel + 4 sequential pedagogy invocations,
+        # totalling 670s of LLM time on a 600s budget. The cap is intentional:
+        # we still get parallelism (3× faster than serial), but no longer
+        # blow through the upstream provider's rate limit or stall on a single
+        # slow call. ``Semaphore(0)`` or negative → unbounded (legacy behaviour).
+        import os
+        try:
+            cap = int(os.environ.get("TUTOR_PARALLEL_AGENT_CAP", "3"))
+        except ValueError:
+            cap = 3
+        sem: asyncio.Semaphore | None = (
+            asyncio.Semaphore(cap) if cap > 0 else None
+        )
+
+        async def _safe(coro: Any, rtype: ResourceType) -> Resource | None:
+            try:
+                if sem is not None:
+                    async with sem:
+                        return await coro
+                return await coro
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(f"{rtype.value} generation failed: {exc!r}")
+                await stream.error(
+                    f"{rtype.value} 生成失败: {exc}",
+                    source="resource_capability",
+                )
+                return None
+
         if ResourceType.MINDMAP in planned_types:
             tasks.append((
                 ResourceType.MINDMAP,
@@ -720,8 +1068,33 @@ class ResourceGenerationCapability(BaseCapability):
         if not tasks:
             return []
 
-        results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=False)
-        return [r for r in results if r is not None]
+        # **2026-07-08 fix (187b2955):** as each agent finishes, immediately
+        # emit a ``RESOURCE`` event so the frontend can render the card
+        # BEFORE the whole package assembly / video render / safety check
+        # sequence runs. Previously the right pane only updated at the
+        # very end (``stream.result(...)``); any later failure left the
+        # user with an empty pane even though some resources were already
+        # done. ``asyncio.as_completed`` lets us interleave completion
+        # events with the gather waiting on the rest.
+        finished: list[Resource] = []
+        pending_tasks = {t[1]: t[0] for t in tasks}
+        for fut in asyncio.as_completed([t[1] for t in tasks]):
+            r = await fut
+            if r is None:
+                continue
+            finished.append(r)
+            try:
+                await stream.resource(
+                    r,
+                    source="resource_capability",
+                    stage="parallel_resource_generation",
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Stream emission must NEVER block the pipeline. A failed
+                # event broadcast (closed bus, full queue) must not
+                # invalidate an already-finished resource.
+                logger.debug(f"stream.resource() emission failed: {exc!r}")
+        return finished
 
     async def _generate_reading(
         self,
@@ -794,6 +1167,71 @@ class ResourceGenerationCapability(BaseCapability):
     # Quality review
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_generation_failed(resource: Resource) -> bool:
+        """Return True if the resource's *generation* pipeline failed
+        (vs. the resource being merely low-quality).
+
+        Currently the only typed failure surface is video:
+        ``format_specific.render_status == "failed"`` (Manim code
+        generation or syntax check failure).
+
+        Code resources with ``execution_status == "failed"`` are NOT
+        filtered here — ``RUNTIME_DEPENDENCY_MISSING`` is a valid
+        educational resource that the user can still read; the
+        quality reviewer decides.
+        """
+        if resource.type != ResourceType.VIDEO:
+            return False
+        fs = resource.format_specific or {}
+        return fs.get("render_status") == "failed"
+
+    async def _prefilter_failed_resources(
+        self,
+        resources: list[Resource],
+        stream: StreamBus,
+    ) -> tuple[list[Resource], list[dict[str, Any]]]:
+        """Drop resources whose *generation* failed (not the content
+        quality) before the quality-review loop.
+
+        Returns ``(kept_resources, filtered_summary)`` so the caller
+        can attach the summary to ``package.metadata`` for downstream
+        observability and so a focused regression test can assert
+        exactly which resources were dropped.
+        """
+        before = len(resources)
+        kept: list[Resource] = []
+        filtered: list[dict[str, Any]] = []
+        for r in resources:
+            if self._is_generation_failed(r):
+                fs = r.format_specific or {}
+                filtered.append(
+                    {
+                        "resource_id": r.resource_id,
+                        "type": r.type.value,
+                        "title": r.title,
+                        "render_error": fs.get("render_error"),
+                    }
+                )
+                continue
+            kept.append(r)
+        if filtered:
+            await stream.observation(
+                f"已跳过 {len(filtered)} 个生成失败的资源 "
+                f"（{', '.join(f['type'] for f in filtered)}）"
+                f"—— 将在聊天流中提示用户重试或调整主题",
+                source="resource_capability",
+                stage="quality_review",
+                metadata={"filtered_failed": filtered},
+            )
+            logger.warning(
+                f"resource_capability: pre-filtered {len(filtered)} "
+                f"failed-generation resources before review "
+                f"({before} -> {len(kept)}): "
+                f"{[f['title'] for f in filtered]}"
+            )
+        return kept, filtered
+
     async def _review_all(
         self,
         resources: list[Resource],
@@ -853,6 +1291,33 @@ class ResourceGenerationCapability(BaseCapability):
         tasks = [asyncio.create_task(_check_one(r)) for r in resources]
         results = await asyncio.gather(*tasks, return_exceptions=False)
         return list(results)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_failed_resource(r: Resource) -> bool:
+    """Return True if a resource is a known-failed artifact and should
+    be filtered out **before** quality review.
+
+    **2026-07-07 fix:** resources with a self-reported hard failure
+    (currently: ``video.render_status == "failed"``) are dropped here
+    so the quality reviewer doesn't waste cycles judging a "video
+    generation failed" diagnostic card. The reviewer can still
+    reject other resources, but those represent LLM-judged issues,
+    not deterministic "the agent already gave up" cases.
+
+    Code resources with ``execution_status="failed"`` are NOT
+    filtered here — the LLM-generated code may still be educational
+    even if the local interpreter lacked the runtime dep. The
+    reviewer decides.
+    """
+    fs = r.format_specific or {}
+    if r.type == ResourceType.VIDEO and fs.get("render_status") == "failed":
+        return True
+    return False
 
 
 __all__ = ["ResourceGenerationCapability"]
