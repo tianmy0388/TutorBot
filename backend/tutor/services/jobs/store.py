@@ -287,12 +287,19 @@ class JobStore:
         status: JobStatus | None = None,
         limit: int = 50,
         offset: int = 0,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         self._ensure_engine()
         async with self._with_session() as session:
             stmt = select(JobRow).where(JobRow.user_id == user_id)
             if status is not None:
                 stmt = stmt.where(JobRow.status == status.value)
+            # 2026-06-21 plan: filter by session_id so conversation
+            # detail can return only the jobs that belong to a single
+            # conversation. Empty string (the column default) is
+            # treated as "no session assigned" and excluded by default.
+            if session_id is not None:
+                stmt = stmt.where(JobRow.session_id == session_id)
             stmt = stmt.order_by(JobRow.created_at.desc()).limit(limit).offset(offset)
             rows = (await session.execute(stmt)).scalars().all()
             return [self._row_to_job(r).to_summary() for r in rows if r is not None]

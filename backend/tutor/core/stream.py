@@ -46,6 +46,12 @@ class StreamEventType(str, Enum):
 
     # Outputs
     RESULT = "result"               # Final structured result for the turn
+    RESOURCE = "resource"           # **2026-07-08:** incremental single-resource
+                                    # ready event. Emitted the moment an Agent
+                                    # finishes one Resource (before the final
+                                    # ``RESULT``) so the frontend can render
+                                    # the resource card immediately rather than
+                                    # waiting for the whole pipeline to drain.
 
     # Errors / cancellation
     ERROR = "error"                 # Error during processing

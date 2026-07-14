@@ -76,6 +76,7 @@ class ArtifactResult(BaseModel):
     resource_type: str
     status: str = "succeeded"  # "succeeded" | "failed"
     resource_id: str | None = None
+    title: str | None = None
     duration_seconds: float = 0.0
     agents: list[str] = Field(default_factory=list)
     error: JobError | None = None
@@ -120,6 +121,15 @@ class JobResultContract(BaseModel):
 
     progress: JobProgress = Field(default_factory=JobProgress)
     artifacts: list[ArtifactResult] = Field(default_factory=list)
+    # **2026-07-08 fix (187b2955):** resources that were already emitted
+    # to the stream before a timeout / cancellation / late-stage error
+    # (e.g. safety check, video render). The capability now streams
+    # ``RESOURCE`` events incrementally, so even when ``status`` is
+    # FAILED or PARTIAL the user can still see the partial result.
+    # ``artifacts`` stays the canonical "delivered" set (used for
+    # status inference); ``partial_artifacts`` is for observability +
+    # UI rendering when ``artifacts`` is empty.
+    partial_artifacts: list[ArtifactResult] = Field(default_factory=list)
     warnings: list[JobWarning] = Field(default_factory=list)
     error: JobError | None = None
     event_cursor: int = 0

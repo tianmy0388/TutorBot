@@ -295,6 +295,68 @@ class StreamBus:
             metadata=md,
         )
 
+    async def resource(
+        self,
+        resource: Any,
+        *,
+        source: str = "",
+        stage: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit an incremental ``RESOURCE`` event for a single finished resource.
+
+        **2026-07-08 fix (187b2955 trace):** previously the only path for
+        a resource to reach the frontend was the final ``RESULT`` event,
+        which fires AFTER ``video_rendering`` for the whole package. If
+        any later step (review, safety, render) failed or the 600s
+        timeout fired, the user saw an empty right pane even though
+        several resources were already usable. This helper emits one
+        ``RESOURCE`` event per finished :class:`Resource` so the
+        frontend can render cards incrementally.
+
+        Accepts both :class:`Resource` objects (preferred — pulls
+        ``resource_id``/``type``/``title`` via attribute access) and
+        plain ``dict`` payloads (the typical wire shape after Pydantic
+        ``model_dump(mode="json")``).
+        """
+        md = dict(metadata or {})
+        # Carry the resource in metadata (not content) so the trace
+        # panel doesn't double-render it as a TEXT chunk.
+        #
+        # **2026-07-08 fix (fdb26152 test):** the previous
+        # ``json.loads(json.dumps(resource, default=str))`` rendered
+        # every non-trivial Pydantic field as a ``repr()`` string
+        # (``default=str`` runs only on non-serialisable objects, but
+        # a Pydantic v2 ``Resource`` is a non-serialisable type from
+        # the stdlib json's point of view). The frontend then saw
+        # ``md["resource"]`` as a string, not a dict, and broke. We
+        # now prefer ``model_dump(mode="json")`` for Pydantic objects
+        # and fall back to a plain dict for already-dumped payloads.
+        md["resource"] = _serialise_resource(resource)
+
+        # Pull id / type / title — works for both objects and dicts.
+        if isinstance(resource, dict):
+            if "resource_id" in resource and "resource_id" not in md:
+                md["resource_id"] = str(resource["resource_id"])
+            if "type" in resource and "resource_type" not in md:
+                md["resource_type"] = str(resource["type"])
+            if "title" in resource and "title" not in md:
+                md["title"] = str(resource["title"])
+        else:
+            if hasattr(resource, "type") and "resource_type" not in md:
+                md["resource_type"] = str(getattr(resource.type, "value", resource.type))
+            if hasattr(resource, "resource_id") and "resource_id" not in md:
+                md["resource_id"] = str(resource.resource_id)
+            if hasattr(resource, "title") and "title" not in md:
+                md["title"] = str(resource.title)
+
+        await self._make(
+            StreamEventType.RESOURCE,
+            source=source,
+            stage=stage,
+            metadata=md,
+        )
+
     async def error(
         self,
         message: str,
@@ -399,3 +461,39 @@ class StreamBus:
 
 
 __all__ = ["StreamBus"]
+
+
+# ---------------------------------------------------------------------------
+# Module helpers
+# ---------------------------------------------------------------------------
+
+
+def _serialise_resource(resource: Any) -> Any:
+    """Best-effort serialisation of a ``Resource`` for stream metadata.
+
+    **2026-07-08 fix (fdb26152):** a plain
+    ``json.dumps(resource, default=str)`` rendered every Pydantic
+    object as a ``repr()`` string (Pydantic v2 models aren't
+    serialisable by stdlib ``json`` without help). The frontend then
+    saw ``md["resource"]`` as a string and broke. We now:
+
+    1. Use ``model_dump(mode="json")`` for Pydantic v2 BaseModel
+       objects (the typical ``Resource`` case).
+    2. Pass dicts through verbatim.
+    3. Fall back to ``str(resource)`` if nothing else works.
+    """
+    # Pydantic v2: prefer ``model_dump(mode="json")``.
+    if hasattr(resource, "model_dump") and callable(resource.model_dump):
+        try:
+            return resource.model_dump(mode="json")
+        except Exception:  # noqa: BLE001
+            pass
+    # Already a dict (e.g. ``package.model_dump(...)`` result).
+    if isinstance(resource, dict):
+        return resource
+    # Last resort: stringify, but mark it so the consumer knows.
+    try:
+        import json as _json
+        return _json.loads(_json.dumps(resource, default=str))
+    except Exception:  # noqa: BLE001
+        return str(resource)

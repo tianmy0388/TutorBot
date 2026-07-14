@@ -1,4 +1,4 @@
-"""Service layer for Tutor.
+"""Service layer for TutorBot.
 
 Modules:
 - :mod:`tutor.services.config`        — Settings, .env, model catalog
