@@ -392,7 +392,9 @@ class KnowledgeBaseService:
         stage_started = time.monotonic()
         self.store.set_document_status(doc_id, status=IngestionStatus.EMBEDDING)
         try:
-            embedding_model, embedded = self._embed(chunk_records)
+            embedding_model, embedder_provider, embedder_dimension, embedded = (
+                self._embed(chunk_records)
+            )
         except Exception as e:  # noqa: BLE001
             self.store.set_document_status(
                 doc_id,
@@ -412,7 +414,13 @@ class KnowledgeBaseService:
 
         # Persist the chunk store to disk.
         try:
-            self._write_chunk_index(doc, chunk_records, embedded)
+            self._write_chunk_index(
+                doc,
+                chunk_records,
+                embedded,
+                provider=embedder_provider,
+                dimension=embedder_dimension,
+            )
         except OSError as e:
             self.store.set_document_status(
                 doc_id,
@@ -423,11 +431,18 @@ class KnowledgeBaseService:
             self._log_outcome(doc_id, lib_id, "INDEX_WRITE_FAILED", started)
             return self.store.get_document(doc_id)
 
+        from tutor.services.knowledge_base.sqlite_store import INDEX_VERSION
+
         self.store.set_document_status(
             doc_id,
             status=IngestionStatus.READY,
             chunk_count=len(chunk_records),
             embedding_model=embedding_model,
+            embedder_provider=embedder_provider,
+            embedder_model=embedding_model,
+            embedder_dimension=embedder_dimension,
+            index_version=INDEX_VERSION,
+            reindex_required=False,
             # Surface the "no vectors" case as a non-fatal warning so
             # the UI can show a chip and the operator knows their
             # runtime config needs an embedder for real RAG. The doc
@@ -436,7 +451,7 @@ class KnowledgeBaseService:
                 "embedder_unavailable: storing chunks without vectors; "
                 "RAG will use text-only matching"
             )
-            if not embedding_model
+            if not embedder_provider
             else None,
         )
         self._log_outcome(doc_id, lib_id, "READY", started)
@@ -480,10 +495,28 @@ class KnowledgeBaseService:
                 start = max(end - overlap, start + 1)
         return out
 
-    def _embed(self, chunks: list[dict[str, str]]) -> tuple[str, list[list[float]]]:
-        """Embed chunks using the runtime embedder. Returns ("", [])
-        if the embedder isn't configured — the document still gets
-        marked ready for text-only RAG fallback.
+    def _embed(self, chunks: list[dict[str, str]]) -> tuple[str, str, int, list[list[float]]]:
+        """Embed chunks using the runtime embedder.
+
+        Returns ``(model, provider, dimension, vectors)``. The
+        ``model`` field is preserved for backward-compat reads; the
+        canonical values for the new index manifest are
+        ``provider`` + ``dimension``.
+
+        2026-06-21 plan (D12): the previous behaviour silently
+        swallowed any embedder exception and returned an empty
+        ``vectors`` list — the document was then marked
+        ``ready`` and the RAG service dutifully searched its
+        (empty) index. The pre-fix code treated the empty-vector
+        case as a non-fatal warning and exposed the document
+        under "text-only retrieval" — but the spec is explicit
+        that this is a false positive ("知识库已就绪，但实际没有
+        RAG") and we should reject the document by default.
+        With ``embedding_keyword_fallback = False`` (the default),
+        any embedder failure raises so the caller can mark the
+        document ``failed / EMBED_FAILED``. The keyword-fallback
+        opt-in is preserved for local dev and demo flows that
+        explicitly want a graceful degradation.
 
         ``OpenAICompatEmbedder.embed`` is an ``async def`` coroutine
         but ``run_ingestion`` is sync, so we drive it with
@@ -498,8 +531,10 @@ class KnowledgeBaseService:
         submitted coroutine.
         """
         model = self.settings.embed_model or ""
+        provider = self.settings.embed_provider or ""
+        dimension = int(self.settings.embed_dimensions or 0)
         if not chunks:
-            return model, []
+            return model, provider, dimension, []
         try:
             import asyncio
             from tutor.services.embeddings.embedder_factory import (
@@ -515,20 +550,49 @@ class KnowledgeBaseService:
                 return list(resp.vectors)
 
             vectors = asyncio.run(_call())
-            return model, vectors
+            # Recover the actual dimension from the response so a
+            # provider that ignores our ``dimensions`` param still
+            # records the right value.
+            if vectors and not dimension:
+                dimension = len(vectors[0])
+            return model, provider, dimension, vectors
         except Exception as e:  # noqa: BLE001
-            logger.warning("Embedder unavailable: {err}", err=e)
-            return "", []
+            # 2026-06-21 plan (D12): the previous behaviour was to
+            # return empty vectors and let ``run_ingestion`` mark
+            # the document ``ready``. That is the exact
+            # "knowledge base looks ready but isn't searchable"
+            # false positive the spec calls out. With the default
+            # ``embedding_keyword_fallback = False`` we now
+            # re-raise so the caller transitions the document
+            # to ``failed / EMBED_FAILED`` and surfaces the
+            # error to the operator. The keyword fallback path is
+            # still reachable for dev / demo by flipping the
+            # setting explicitly.
+            if not getattr(
+                self.settings, "embedding_keyword_fallback", False
+            ):
+                logger.error("Embedder failed: {err}", err=e)
+                raise
+            logger.warning(
+                "Embedder unavailable, falling back to keyword-only: {err}",
+                err=e,
+            )
+            return "", "", 0, []
 
     def _write_chunk_index(
         self,
         doc: KnowledgeDocument,
         chunks: list[dict[str, str]],
         embeddings: list[list[float]],
+        *,
+        provider: str = "",
+        dimension: int = 0,
     ) -> None:
         index_dir = self._library_source_dir(doc.knowledge_base_id) / "indexes" / doc.id
         index_dir.mkdir(parents=True, exist_ok=True)
         import json
+
+        from tutor.services.knowledge_base.sqlite_store import INDEX_VERSION
 
         # Sanitize chunks so any lone surrogates (U+D800..U+DFFF) from
         # bad PDF font tables don't break the strict utf-8 encoder.
@@ -538,16 +602,44 @@ class KnowledgeBaseService:
             {"text": _sanitize_text(c.get("text", "")), "anchor": _sanitize_text(c.get("anchor", ""))}
             for c in chunks
         ]
+        # 2026-06-21 plan: write the full index manifest. The
+        # ``embedding_model`` field is kept for back-compat readers;
+        # the canonical trio is ``embedder_provider``,
+        # ``embedder_dimension`` and ``index_version``. The RAG
+        # service uses these to flag a document as
+        # ``reindex_required`` when the runtime config no longer
+        # matches the manifest.
         payload = {
             "document_id": doc.id,
             "knowledge_base_id": doc.knowledge_base_id,
             "embedding_model": doc.embedding_model or "",
+            "embedder_provider": provider,
+            "embedder_dimension": int(dimension),
+            "index_version": INDEX_VERSION,
             "chunks": clean_chunks,
             "embeddings": embeddings,
         }
         (index_dir / "chunks.json").write_text(
             json.dumps(payload, ensure_ascii=False, default=str),
             encoding="utf-8",
+        )
+
+    def detect_reindex_required(self) -> int:
+        """Reconcile every ready document's manifest with the runtime
+        config and flag stale rows.
+
+        Returns the number of documents flagged. Called from the
+        settings-change handler so the operator sees an immediate
+        "RAG is stale" warning after they switch providers.
+        """
+        settings = self.settings
+        provider = settings.embed_provider or ""
+        dimension = int(settings.embed_dimensions or 0)
+        if not provider:
+            return 0
+        return self.store.mark_reindex_required(
+            embedder_provider=provider,
+            embedder_dimension=dimension,
         )
 
     # ---- paths ------------------------------------------------------------

@@ -1,4 +1,11 @@
-"""Knowledge base ingestion service (Task 8)."""
+"""Knowledge base ingestion service (Task 8 + 2026-06-21 plan).
+
+The metadata store was upgraded from an in-memory dict to a
+SQLite-backed implementation in the 2026-06-21 stability plan; see
+:mod:`tutor.services.knowledge_base.sqlite_store` for the new
+implementation. The legacy in-memory class is preserved as a
+deprecated alias for any external code that imported it.
+"""
 
 from tutor.services.knowledge_base.loaders import (
     ExtractedChunk,
@@ -17,18 +24,24 @@ from tutor.services.knowledge_base.service import (
     reset_ingestion_queue,
     seed_default_libraries,
 )
-from tutor.services.knowledge_base.store import (
-    KnowledgeBaseStore,
+from tutor.services.knowledge_base.sqlite_store import (
+    KnowledgeBaseSQLiteStore,
     get_kb_store,
     reset_kb_store,
 )
+
+# Back-compat shim: external code may still import
+# ``KnowledgeBaseStore`` (the in-memory class). It is now an alias
+# for the SQLite-backed store, which has the same public surface.
+KnowledgeBaseStore = KnowledgeBaseSQLiteStore
 
 __all__ = [
     "ExtractedChunk",
     "IngestionStatus",
     "KnowledgeBaseRecord",
     "KnowledgeBaseService",
-    "KnowledgeBaseStore",
+    "KnowledgeBaseSQLiteStore",
+    "KnowledgeBaseStore",  # deprecated alias
     "KnowledgeDocument",
     "LoaderError",
     "SUPPORTED_EXTENSIONS",
