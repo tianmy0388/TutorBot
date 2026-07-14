@@ -59,7 +59,56 @@ class Settings(BaseSettings):
     env: Literal["development", "staging", "production", "test"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     language: Literal["zh", "en"] = "zh"
-    data_dir: Path = Field(default=Path("./data"))
+
+    def _default_data_dir() -> Path:
+        """2026-06-21 plan: the data directory must resolve to a single
+        absolute path under the project root so that two processes
+        started from different cwds (project root vs ``backend/``)
+        agree on where SQLite, KB, and artifact files live.
+
+        Layout::
+
+            <repo-root>/data/
+                tutor.db
+                knowledge_bases/
+                resources/
+                videos/
+                code_runs/
+                temp/
+
+        The path is computed relative to this file so it does not
+        depend on the process cwd. An environment override via
+        ``TUTOR_DATA_DIR`` still wins (the pydantic-settings machinery
+        only applies the default when no env var is set).
+        """
+        # settings.py is at backend/tutor/services/config/settings.py —
+        # four ``parent``s reach the repo root.
+        return Path(__file__).resolve().parent.parent.parent.parent / "data"
+
+    data_dir: Path = Field(default_factory=_default_data_dir)
+
+    @field_validator("data_dir", mode="after")
+    @classmethod
+    def _resolve_data_dir(cls, value: Path) -> Path:
+        """Always store the data_dir as an absolute, fully-resolved
+        path. This eliminates the original bug where running the
+        backend from ``backend/`` would create ``backend/data/`` while
+        running it from the project root created ``data/`` — two
+        separate SQLite databases for the same user.
+
+        Relative paths are interpreted relative to the project root
+        (the same anchor the default uses), not relative to the
+        process cwd. The on-disk health check / startup banner prints
+        the resolved path so the operator can see exactly which
+        directory the process is using.
+        """
+        if value.is_absolute():
+            return value.resolve()
+        # Treat relative as "under the project root" so cwd-independence
+        # is preserved. This avoids the historical "where am I
+        # writing?" footgun.
+        project_root = Path(__file__).resolve().parent.parent.parent.parent
+        return (project_root / value).resolve()
 
     # ---------- Server ----------
     host: str = "0.0.0.0"
@@ -101,11 +150,31 @@ class Settings(BaseSettings):
     agent_llm_base_url: str = ""
 
     # ---------- Embedding ----------
-    embed_provider: str = "openai"
+    # 2026-06-21 plan: ``zhipu`` / ``zhipuai`` are first-class
+    # provider strings. The factory registers Zhipu as an
+    # OpenAI-compatible provider and applies a sensible default
+    # ``base_url`` + ``model`` (``embedding-3``) when env doesn't
+    # override them.
+    embed_provider: Literal[
+        "openai", "openrouter", "ollama", "custom", "deepseek",
+        "azure_openai", "zhipu", "zhipuai",
+    ] = "openai"
     embed_model: str = "text-embedding-3-small"
     embed_api_key: str = ""
     embed_base_url: str = "https://api.openai.com/v1"
     embed_dimensions: int = 0  # 0 = use provider default; only some models support override
+
+    # 2026-06-21 plan (D12): explicit keyword-only fallback policy.
+    # The pre-fix behaviour silently fell back to text-only
+    # matching when the embedder raised an exception, which
+    # produced "ready" documents that were actually invisible to
+    # vector retrieval. The spec calls for the default to be
+    # ``False`` — vector failure means the document is
+    # ``failed / EMBED_FAILED`` and never reaches the
+    # retrieval index. Operators who really do want the
+    # text-only fallback (e.g. local dev without an API key)
+    # can opt in here.
+    embedding_keyword_fallback: bool = False
 
     # ---------- RAG ----------
     rag_provider: Literal["llamaindex"] = "llamaindex"
@@ -140,6 +209,30 @@ class Settings(BaseSettings):
     manim_temp_dir: Path = Field(default_factory=_default_manim_temp)
     code_retry_max_attempts: int = 4
 
+    # ---------- Code execution (2026-06-21 plan) ----------
+    # Path to the Python interpreter used by ``CodeSandboxAgent`` and
+    # the code-execution tool. The default is the Python that
+    # launched the backend (``sys.executable``) — but for development
+    # this should point at the ``tutor`` conda env that has matplotlib
+    # and manim installed. The Windows dev script in ``package.json``
+    # launches the backend via ``conda run -n tutor`` so this default
+    # is correct; setting it explicitly here is the safety net for
+    # callers that launch the backend some other way (e.g. systemd,
+    # Docker).
+    execution_python: str = ""
+    # Hard timeout for any single code run.
+    code_run_timeout_seconds: int = 15
+    # Sub-directory under ``data_dir`` where per-run scratch files
+    # and image artifacts are written.
+    code_run_subdir: str = "code_runs"
+
+    @field_validator("execution_python", mode="after")
+    @classmethod
+    def _fill_execution_python(cls, value: str) -> str:
+        # Empty string ⇒ defer to sys.executable at runtime so tests
+        # that monkeypatch sys.executable pick the new value up.
+        return value or ""
+
     # ---------- Web Search ----------
     web_search_enabled: bool = False
     web_search_provider: Literal["duckduckgo", "searxng", "bing", "mcp"] = "duckduckgo"
@@ -165,6 +258,14 @@ class Settings(BaseSettings):
     # ---------- Streaming ----------
     stream_chunk_size: int = 20
     stream_queue_max_size: int = 1000
+
+    # ---------- Job ----------
+    # Maximum wall-clock time for any single job (seconds). After this
+    # timeout the job is transitioned to FAILED with code
+    # ``JOB_TIMEOUT``. 0 = no timeout. The timeout is enforced by the
+    # async runner: when ``run_task`` exceeds this, a cancellation is
+    # issued and the job exits cleanly.
+    job_timeout_seconds: int = 600
 
     # ---------- Multi-user ----------
     multi_user_enabled: bool = False

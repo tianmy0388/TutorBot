@@ -65,7 +65,8 @@ WEB_SEARCH_PROVIDERS: tuple[str, ...] = (
 )
 #: Allow-list of Embedding providers.
 EMBED_PROVIDERS: tuple[str, ...] = (
-    "openai", "azure_openai", "ollama", "custom",
+    "openai", "openrouter", "azure_openai", "ollama", "custom",
+    "deepseek", "zhipu", "zhipuai",
 )
 
 
@@ -293,11 +294,37 @@ class RuntimeConfigService:
                 env_path = cwd_env
         self.env_path = env_path
 
+    def _get_settings(self) -> Settings:
+        """Return Settings bound to ``self.env_path``, not the global
+        process singleton.
+
+        The pre-fix code called the global :func:`get_settings` in
+        ``read()`` and ``_test_*()`` helpers. That function is
+        cached with whatever ``env_file`` the process first saw
+        (usually the project-root ``.env``). When a test passes
+        ``env_path=tmp_path/missing.env``, global ``get_settings()``
+        still returns the values from the project-root ``.env``
+        (because ``lru_cache``), causing the test to report
+        ``configured=true`` even though the reference path has no
+        key at all.
+
+        The fix: we construct a fresh, uncached Settings instance
+        whose ``_env_file`` points at our reference path and whose
+        ``_env_prefix`` is correct, but we explicitly suppress the
+        default ``env_file`` tuple that ``Settings`` uses to find
+        the global ``.env``. This way the returned object only
+        reads from ``self.env_path`` + process environment.
+        """
+        return Settings(
+            _env_file=self.env_path,
+            _env_file_encoding="utf-8",
+        )  # type: ignore[call-arg]
+
     # -- read --------------------------------------------------------------
 
     def read(self) -> dict[str, Any]:
         """Return the masked configuration for all three sections."""
-        s = get_settings()
+        s = self._get_settings()
         llm_secret = s.llm_api_key or os.environ.get("TUTOR_LLM_API_KEY", "")
         embed_secret = s.embed_api_key or os.environ.get("TUTOR_EMBED_API_KEY", "")
         # Web-search uses a runtime-override-only model: the API key is
@@ -358,7 +385,24 @@ class RuntimeConfigService:
         field_map = SECTION_FIELD_MAP[section]
         env = _read_env_file(self.env_path)
 
-        for client_field, value in patch.model_dump(exclude_unset=True).items():
+        # 2026-06-21 plan (D6): when switching provider, apply the
+        # preset defaults. The preset overrides the old provider's
+        # model / base_url *only when the caller did not also pass
+        # an explicit value for those fields*. This way the UI can
+        # toggle "Zhipu" and immediately get the right embedding-3
+        # model + open.bigmodel.cn base URL, but if the user typed
+        # a custom model name in the same PATCH that also changed
+        # provider, the user's value wins.
+        patch_dict = patch.model_dump(exclude_unset=True)
+        if patch_dict.get("provider"):
+            provider = patch_dict["provider"]
+            presets = _PROVIDER_PRESETS.get(provider)
+            if presets:
+                for field, preset_value in presets.items():
+                    if field not in patch_dict:
+                        patch_dict[field] = preset_value
+
+        for client_field, value in patch_dict.items():
             # ``clear_api_key`` is a control flag, not a real Settings
             # field. Resolve its target key from the section's
             # ``api_key`` mapping.
@@ -394,18 +438,65 @@ class RuntimeConfigService:
         # The fresh settings reflect what we just wrote.
         reset_settings_cache()
         _clear_provider_caches()
+        # 2026-06-21 plan: when embedding settings change, walk
+        # every ready document and flag rows whose manifest no
+        # longer matches the new config. The retrieval service
+        # uses the flag to surface a "RAG is stale" warning in
+        # the UI rather than silently returning wrong-answer
+        # vectors.
+        if section == "embedding":
+            try:
+                from tutor.services.knowledge_base.service import (
+                    KnowledgeBaseService,
+                )
+
+                flagged = KnowledgeBaseService().detect_reindex_required()
+                if flagged:
+                    logger.info(
+                        "embedding config changed: {n} documents flagged for reindex",
+                        n=flagged,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                # Reindex detection is best-effort — never block a
+                # config save on it.
+                logger.warning(
+                    "detect_reindex_required failed: {err}", err=exc
+                )
         return self.read()
 
     # -- test --------------------------------------------------------------
 
     def test_llm(self) -> dict[str, Any]:
-        return _test_llm()
+        return _test_llm(svc=self)
 
     def test_embedding(self) -> dict[str, Any]:
-        return _test_embedding()
+        return _test_embedding(svc=self)
 
     def test_web_search(self) -> dict[str, Any]:
-        return _test_web_search()
+        return _test_web_search(svc=self)
+
+
+#: Provider presets applied when switching provider via PATCH without
+#: also passing explicit model / base_url values. The UI toggles
+#: the provider dropdown; the preset fills the model and base URL
+#: so the operator doesn't have to type them from memory. Presets
+#: only apply to fields the PATCH did NOT include — a user who
+#: sets ``provider=zhipu`` AND ``model=embedding-2`` (deviance)
+#: keeps the manual override.
+_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    "zhipu": {
+        "model": "embedding-3",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    },
+    "zhipuai": {
+        "model": "embedding-3",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    },
+    "ollama": {
+        "model": "nomic-embed-text",
+        "base_url": "http://localhost:11434/v1",
+    },
+}
 
 
 def _envify_scalar(value: Any) -> str:
@@ -438,11 +529,11 @@ def _clear_provider_caches() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _test_llm() -> dict[str, Any]:
+def _test_llm(svc: RuntimeConfigService | None = None) -> dict[str, Any]:
     """Run a minimal completion against the configured LLM and report."""
     import time as _time
 
-    s = get_settings()
+    s = svc._get_settings() if svc is not None else get_settings()
     started = _time.monotonic()
     try:
         from tutor.services.llm.base import LLMMessage, LLMRequest
@@ -536,17 +627,20 @@ def _collect_one_stream(provider, req) -> str:  # type: ignore[no-untyped-def]
     return result_box[0] if result_box else ""
 
 
-def _test_embedding() -> dict[str, Any]:
+def _test_embedding(svc: RuntimeConfigService | None = None) -> dict[str, Any]:
     import time as _time
+    import asyncio as _asyncio
 
-    s = get_settings()
+    s = svc._get_settings() if svc is not None else get_settings()
     started = _time.monotonic()
     try:
         from tutor.services.embeddings.base import EmbedRequest
         from tutor.services.embeddings.embedder_factory import get_runtime_embedder
 
         embedder = get_runtime_embedder(s)
-        resp = embedder.embed(EmbedRequest(input=["ping"]))
+        # ``embedder.embed`` is async. We must drive it to completion
+        # regardless of whether the caller is inside a running loop.
+        resp = _asyncio.run(embedder.embed(EmbedRequest(input=["ping"])))
         vec = resp.vectors
         latency_ms = int((_time.monotonic() - started) * 1000)
         return {
@@ -569,10 +663,10 @@ def _test_embedding() -> dict[str, Any]:
         }
 
 
-def _test_web_search() -> dict[str, Any]:
+def _test_web_search(svc: RuntimeConfigService | None = None) -> dict[str, Any]:
     import time as _time
 
-    s = get_settings()
+    s = svc._get_settings() if svc is not None else get_settings()
     if not s.web_search_enabled:
         return {
             "ok": False,
