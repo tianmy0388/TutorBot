@@ -31,33 +31,21 @@ def isolated_data_dir(tmp_path, monkeypatch):
     reset_settings_cache()
 
     # Reset profile-store / builder singletons.
-    from tutor.services.learner_profile import (
-        reset_profile_builder,
-        reset_profile_store,
-    )
+    from tutor.services.learner_profile import reset_profile_builder
 
     yield data_dir
 
-    # Cleanup
-    try:
-        # Stop the loop and close the store if it was created.
-        import asyncio
+    # Cleanup: close the store synchronously so the next test
+    # starts with a clean slate. The old code called the async
+    # ``reset_profile_store()`` without ``await``, returning a
+    # coroutine that was never scheduled — the singleton kept
+    # its reference to the previous test's temp directory,
+    # which we just deleted, causing "unable to open database
+    # file" on the next test.
+    from tutor.services.learner_profile import _close_profile_store_sync
 
-        async def _close():
-            from tutor.services.learner_profile.store import get_profile_store
-
-            store = get_profile_store()
-            await store.close()
-
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(_close())
-        finally:
-            loop.close()
-    except Exception:
-        pass
+    _close_profile_store_sync()
     reset_profile_builder()
-    reset_profile_store()
     shutil.rmtree(data_dir, ignore_errors=True)
 
 

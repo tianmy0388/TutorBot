@@ -26,7 +26,8 @@ from tutor.services.learner_profile.builder import (
     ProfileBuilder,
     get_profile_builder,
 )
-from tutor.services.learner_profile.store import ProfileStore, reset_profile_store
+from tutor.services.learner_profile.store import ProfileStore
+from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.llm.base import LLMResponse
 
 
@@ -53,7 +54,7 @@ async def env_setup(monkeypatch, workdir):
     from tutor.services.learner_profile import reset_profile_builder
 
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
     builder = get_profile_builder()
     builder.store = ProfileStore(workdir / "assessment_e2e_profiles.db")
     await builder.initialize()
@@ -80,7 +81,7 @@ async def env_setup(monkeypatch, workdir):
 
     await event_store.close()
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
 
 
 def _mock_llm(*responses: str):

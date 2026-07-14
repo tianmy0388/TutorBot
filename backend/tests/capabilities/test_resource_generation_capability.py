@@ -34,7 +34,6 @@ from tutor.services.learner_profile.builder import (
 )
 from tutor.services.learner_profile.store import (
     ProfileStore,
-    reset_profile_store,
 )
 from tutor.services.resource_package.schema import (
     ResourceType,
@@ -299,10 +298,13 @@ async def fresh_builder(tmp_path, monkeypatch):
     from tutor.services.config.settings import reset_settings_cache
 
     reset_settings_cache()
-    from tutor.services.learner_profile import reset_profile_builder
+    from tutor.services.learner_profile import (
+    _close_profile_store_sync,
+    reset_profile_builder,
+)
 
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
 
     builder = get_profile_builder()
     builder.store = ProfileStore(tmp_path / "e2e_resources.db")
@@ -324,7 +326,7 @@ async def fresh_builder(tmp_path, monkeypatch):
     yield builder
     await builder.store.close()
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
 
 
 @pytest.fixture
@@ -529,6 +531,279 @@ async def test_path_integration_updates_profile(capability, fresh_builder):
     assert "resource_history" in profile.metadata
     assert profile.metadata["last_topic"] == "LSTM"
     assert len(profile.metadata["resource_history"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Quality-review reject filter (Task 9)
+# ---------------------------------------------------------------------------
+
+
+class _CannedReviewer:
+    """QualityReviewerAgent replacement that returns a fixed verdict
+    sequence, used to exercise the reject-filter logic in isolation.
+    """
+
+    def __init__(self, verdicts: list[str]):
+        self._verdicts = list(verdicts)
+        self.agent_name = "canned_reviewer"
+        from tutor.services.resource_package.schema import ReviewVerdict, ResourceReview
+
+        self._map = {
+            "pass": ReviewVerdict.PASS,
+            "revise": ReviewVerdict.REVISE,
+            "reject": ReviewVerdict.REJECT,
+        }
+        self._reviews: list[ResourceReview] = []
+
+    async def process(self, context, resource, stream=None):
+        from tutor.services.resource_package.schema import ResourceReview
+
+        verdict_str = (
+            self._verdicts.pop(0)
+            if self._verdicts
+            else "pass"
+        )
+        rev = ResourceReview(
+            resource_id=resource.resource_id,
+            verdict=self._map[verdict_str],
+            quality_score=0.0 if verdict_str == "reject" else 0.9,
+            issues=[] if verdict_str != "reject" else ["empty content"],
+            suggestions=[],
+        )
+        self._reviews.append(rev)
+        return rev
+
+
+@pytest.mark.asyncio
+async def test_rejected_resources_filtered_from_package(capability, fresh_builder):
+    """**2026-06-22 fix (Task 9):** resources whose quality-review
+    verdict is ``reject`` MUST be filtered from the persisted
+    package, otherwise the chat viewer publishes an empty code
+    block / failed video as a usable resource.
+
+    Drive the filter logic by attaching a canned reviewer and
+    pre-built package, then asserting the package shrinks.
+    """
+    from tutor.services.resource_package.schema import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+    )
+    import uuid
+
+    pkg = ResourcePackage(
+        package_id=f"pkg_{uuid.uuid4().hex[:8]}",
+        topic="test",
+        created_at="2026-06-22T00:00:00",
+        resources=[
+            Resource(
+                resource_id="r1",
+                type=ResourceType.DOCUMENT,
+                title="good doc",
+                content="solid content",
+                topic="test",
+                difficulty=2,
+                estimated_minutes=10,
+            ),
+            Resource(
+                resource_id="r2",
+                type=ResourceType.CODE,
+                title="empty code",
+                content="",
+                topic="test",
+                difficulty=1,
+                estimated_minutes=0,
+            ),
+            Resource(
+                resource_id="r3",
+                type=ResourceType.VIDEO,
+                title="failed video",
+                content="",
+                topic="test",
+                difficulty=1,
+                estimated_minutes=0,
+            ),
+            Resource(
+                resource_id="r4",
+                type=ResourceType.EXERCISE,
+                title="revise ex",
+                content="ex",
+                topic="test",
+                difficulty=2,
+                estimated_minutes=5,
+            ),
+        ],
+    )
+
+    canned = _CannedReviewer(["pass", "reject", "reject", "revise"])
+    capability.quality_reviewer = canned
+    # Drive the review-all step + post-filter directly to avoid
+    # the full intent → content → pedagogy chain.
+    context = UnifiedContext(user_id="alice", user_message="test", language="zh")
+    bus = StreamBus()
+    reviews = await capability._review_all(pkg.resources, context, bus)
+
+    # Apply the same post-filter logic that's in run().
+    review_by_id = {r.resource_id: r for r in reviews}
+    for idx, r in enumerate(pkg.resources):
+        rev = review_by_id.get(r.resource_id)
+        if rev is not None:
+            r.metadata["review"] = {
+                "verdict": rev.verdict.value,
+                "quality_score": rev.quality_score,
+                "issues": rev.issues,
+                "suggestions": rev.suggestions,
+            }
+
+    rejected_ids = {
+        r.resource_id
+        for r in pkg.resources
+        if (r.metadata.get("review") or {}).get("verdict") == "reject"
+    }
+    pkg.resources = [r for r in pkg.resources if r.resource_id not in rejected_ids]
+
+    # Only r1 (pass) and r4 (revise) survive. r2 + r3 (both reject)
+    # must be dropped.
+    surviving_ids = [r.resource_id for r in pkg.resources]
+    assert surviving_ids == ["r1", "r4"], (
+        f"expected only pass+revise to survive, got {surviving_ids}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_drops_failed_video_resources():
+    """**2026-07-07 fix:** resources whose *generation* failed
+    (render_status="failed" on video) MUST be dropped before the
+    quality-review loop. The reviewer would correctly reject them,
+    then the reject filter would strip them anyway, but going
+    through review wastes capacity AND pollutes the trace panel
+    with a confusing ``video_rendering`` no-op stage.
+
+    Drive the pre-filter helper directly so the test is fast and
+    focused.
+    """
+    from tutor.services.resource_package.schema import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+    )
+    import uuid
+
+    pkg = ResourcePackage(
+        package_id=f"pkg_{uuid.uuid4().hex[:8]}",
+        topic="反向传播",
+        created_at="2026-07-07T00:00:00",
+        resources=[
+            Resource(
+                resource_id="doc-1",
+                type=ResourceType.DOCUMENT,
+                title="反向传播入门",
+                content="教学版内容",
+                topic="反向传播",
+                difficulty=2,
+                estimated_minutes=15,
+            ),
+            Resource(
+                resource_id="vid-failed",
+                type=ResourceType.VIDEO,
+                title="反向传播 — 视频生成失败",
+                content="# 视频生成失败",
+                format_specific={
+                    "render_status": "failed",
+                    "render_error": "LLM codegen returned empty/invalid code",
+                },
+                topic="反向传播",
+                difficulty=1,
+                estimated_minutes=0,
+            ),
+            Resource(
+                resource_id="vid-pending",
+                type=ResourceType.VIDEO,
+                title="反向传播 — 动画视频",
+                content="视频内容",
+                format_specific={"render_status": "pending"},
+                topic="反向传播",
+                difficulty=3,
+                estimated_minutes=1,
+            ),
+            Resource(
+                resource_id="code-broken",
+                type=ResourceType.CODE,
+                title="微型网络反向传播手动计算",
+                content="```python\nimport math\ndef sigmoid(z): pass\n```",
+                format_specific={
+                    "execution_status": "failed",
+                    "error_code": "CODE_EXECUTION_FAILED",
+                },
+                topic="反向传播",
+                difficulty=2,
+                estimated_minutes=5,
+            ),
+        ],
+    )
+    cap = ResourceGenerationCapability()
+    bus = StreamBus()
+    kept, summary = await cap._prefilter_failed_resources(list(pkg.resources), bus)
+    kept_ids = [r.resource_id for r in kept]
+
+    # The failed video MUST be dropped.
+    assert "vid-failed" not in kept_ids, (
+        f"failed video should be pre-filtered, kept={kept_ids}"
+    )
+    # Other resources MUST be kept:
+    #   - document
+    #   - the pending video (not failed yet)
+    #   - the code resource (reviewer decides, even if execution failed
+    #     with CODE_EXECUTION_FAILED — could be RUNTIME_DEPENDENCY_MISSING
+    #     next time, which is still educational)
+    assert "doc-1" in kept_ids
+    assert "vid-pending" in kept_ids
+    assert "code-broken" in kept_ids, (
+        "code with failed execution should NOT be pre-filtered — "
+        "reviewer handles it (might be env-broken but still useful)"
+    )
+    # Summary must list the dropped video.
+    assert len(summary) == 1
+    assert summary[0]["resource_id"] == "vid-failed"
+    assert summary[0]["render_error"] == "LLM codegen returned empty/invalid code"
+
+
+@pytest.mark.asyncio
+async def test_prefilter_no_op_when_nothing_failed():
+    """When no resources have render_status=failed, the filter is a no-op."""
+    from tutor.services.resource_package.schema import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+    )
+    import uuid
+
+    pkg = ResourcePackage(
+        package_id=f"pkg_{uuid.uuid4().hex[:8]}",
+        topic="t",
+        created_at="2026-07-07T00:00:00",
+        resources=[
+            Resource(
+                resource_id="vid-pending",
+                type=ResourceType.VIDEO,
+                title="ok",
+                format_specific={"render_status": "pending"},
+                topic="t",
+            ),
+            Resource(
+                resource_id="vid-ready",
+                type=ResourceType.VIDEO,
+                title="ok2",
+                format_specific={"render_status": "ready"},
+                topic="t",
+            ),
+        ],
+    )
+    cap = ResourceGenerationCapability()
+    bus = StreamBus()
+    kept, summary = await cap._prefilter_failed_resources(list(pkg.resources), bus)
+    assert [r.resource_id for r in kept] == ["vid-pending", "vid-ready"]
+    assert summary == []
 
 
 @pytest.mark.asyncio

@@ -71,10 +71,13 @@ async def fresh_builder(tmp_path, monkeypatch):
     from tutor.services.config.settings import reset_settings_cache
 
     reset_settings_cache()
-    from tutor.services.learner_profile import reset_profile_builder, reset_profile_store
+    from tutor.services.learner_profile import (
+    _close_profile_store_sync,
+    reset_profile_builder,
+)
 
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
 
     builder = get_profile_builder()
     builder.store = ProfileStore(tmp_path / "e2e_profiles.db")
@@ -83,7 +86,7 @@ async def fresh_builder(tmp_path, monkeypatch):
 
     await builder.store.close()
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
 
 
 @pytest.fixture

@@ -22,7 +22,8 @@ from tutor.services.learner_profile.builder import (
     ProfileBuilder,
     get_profile_builder,
 )
-from tutor.services.learner_profile.store import ProfileStore, reset_profile_store
+from tutor.services.learner_profile.store import ProfileStore
+from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.llm.base import LLMResponse
 from tutor.services.tutor.service import TutorService, reset_tutor_service
 
@@ -51,7 +52,7 @@ async def fresh_builder(tmp_path, monkeypatch):
     from tutor.services.learner_profile import reset_profile_builder
 
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
 
     builder = get_profile_builder()
     builder.store = ProfileStore(tmp_path / "tutor_e2e.db")
@@ -59,7 +60,7 @@ async def fresh_builder(tmp_path, monkeypatch):
     yield builder
     await builder.store.close()
     reset_profile_builder()
-    reset_profile_store()
+    _close_profile_store_sync()
     reset_tutor_service()
 
 
