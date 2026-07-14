@@ -403,6 +403,11 @@ export interface JobResultContract {
   assistant_message: string;
   progress?: JobProgress;
   artifacts?: ArtifactResult[];
+  /** **2026-07-08 (fdb26152):** resources that streamed to the bus
+   * BEFORE the job timed out / failed / was cancelled. The frontend
+   * should surface these in the right pane so the user sees the
+   * partial result instead of an empty pane. */
+  partial_artifacts?: ArtifactResult[];
   warnings?: JobWarning[];
   error?: JobError | null;
   event_cursor?: number;

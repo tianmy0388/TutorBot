@@ -160,6 +160,31 @@ export const getProfile = (userId: string) =>
 
 export const listCourses = () => request<CourseListResponse>("/kg/courses");
 
+// 2026-06-21 plan: Courses API (Part D). Distinct from /kg/courses
+// which returns course names from the knowledge graph YAML — this
+// endpoint returns the persistent Course rows with aggregate counts.
+export interface CourseResponse {
+  id: string;
+  name: string;
+  description: string;
+  knowledge_graph_id: string;
+  is_seeded: boolean;
+  library_count: number;
+  document_count: number;
+  ready_count: number;
+  total_chunks: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CourseListResponseV2 {
+  items: CourseResponse[];
+  total: number;
+}
+
+export const listAppCourses = () =>
+  request<CourseListResponseV2>("/courses");
+
 export const getCourseGraph = (course: string) =>
   request<CourseGraph>(`/kg/${encodeURIComponent(course)}`);
 
@@ -480,6 +505,26 @@ export const listConversations = (
 export const getConversation = (userId: string, sessionId: string) =>
   request<ConversationDetail>(
     `/conversations/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}`,
+  );
+
+/**
+ * 2026-06-21 plan: aggregate snapshot for one conversation. Returns
+ * the conversation header + messages, plus the jobs and resource
+ * package summaries that belong to this session, in a single request
+ * so the front-end can replace the current view atomically.
+ */
+export interface ConversationAggregate {
+  conversation: ConversationDetail;
+  jobs: JobSummary[];
+  packages: ResourcePackageSummary[];
+}
+
+export const getConversationAggregate = (
+  userId: string,
+  sessionId: string,
+) =>
+  request<ConversationAggregate>(
+    `/conversations/${encodeURIComponent(sessionId)}/aggregate?user_id=${encodeURIComponent(userId)}`,
   );
 
 export const createConversation = (

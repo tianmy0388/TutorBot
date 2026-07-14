@@ -25,20 +25,48 @@ export interface WsClientOptions {
   onClose?: (code: number, reason: string) => void;
   onError?: (err: Event | Error) => void;
   autoReconnect?: boolean;
+  /** Base delay in ms before the first reconnect attempt. Default 1500. */
   reconnectDelayMs?: number;
+  /** Maximum delay in ms after exponential growth. Default 30000 (30s). */
+  maxReconnectDelayMs?: number;
+  /** Multiplier applied to delay after each failed attempt. Default 2. */
+  backoffMultiplier?: number;
+  /** Maximum reconnect attempts before giving up. Default 0 (unlimited). */
+  maxReconnectAttempts?: number;
+  /**
+   * Fraction of jitter to apply (0.0-1.0). 0 = none, 0.2 = ±20%.
+   * Default 0.2. Jitter avoids thundering-herd reconnect storms
+   * when many clients lose connectivity simultaneously.
+   */
+  jitterFraction?: number;
 }
+
+const DEFAULT_RECONNECT_DELAY_MS = 1500;
+const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000;
+const DEFAULT_BACKOFF_MULTIPLIER = 2;
+const DEFAULT_JITTER_FRACTION = 0.2;
 
 export class WsClient {
   private ws: WebSocket | null = null;
-  private opts: Required<WsClientOptions>;
+  private opts: Required<WsClientOptions> & {
+    maxReconnectDelayMs: number;
+    backoffMultiplier: number;
+    maxReconnectAttempts: number;
+    jitterFraction: number;
+  };
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedByUser = false;
   private seq = 0;
+  private _reconnectAttempt = 0;
 
   constructor(opts: WsClientOptions) {
     this.opts = {
       autoReconnect: true,
-      reconnectDelayMs: 1500,
+      reconnectDelayMs: DEFAULT_RECONNECT_DELAY_MS,
+      maxReconnectDelayMs: DEFAULT_MAX_RECONNECT_DELAY_MS,
+      backoffMultiplier: DEFAULT_BACKOFF_MULTIPLIER,
+      maxReconnectAttempts: 0,
+      jitterFraction: DEFAULT_JITTER_FRACTION,
       onOpen: () => undefined,
       onClose: () => undefined,
       onError: () => undefined,
@@ -56,7 +84,14 @@ export class WsClient {
       this.scheduleReconnect();
       return;
     }
-    this.ws.onopen = () => this.opts.onOpen();
+    this.ws.onopen = () => {
+      // 2026-06-21 plan: reset the backoff counter on a successful
+      // connect so the next disconnection starts from the base
+      // delay again — the spec calls for "exponential backoff",
+      // not "indefinite growth across the session lifetime".
+      this._reconnectAttempt = 0;
+      this.opts.onOpen();
+    };
     this.ws.onmessage = (e) => this.handleMessage(e.data as string);
     this.ws.onerror = (e) => {
       this.opts.onError(e);
@@ -94,10 +129,30 @@ export class WsClient {
 
   private scheduleReconnect(): void {
     if (this.closedByUser || this.reconnectTimer) return;
+    const maxAttempts = this.opts.maxReconnectAttempts;
+    if (maxAttempts > 0 && this._reconnectAttempt >= maxAttempts) {
+      return; // exhausted retries
+    }
+    this._reconnectAttempt += 1;
+    // 2026-06-21 plan (B1): exponential backoff with jitter.
+    // Delay = min(base * multiplier^(attempt-1), max_delay) * (1 + jitter * random).
+    const attempt = this._reconnectAttempt;
+    const base = this.opts.reconnectDelayMs;
+    const mult = this.opts.backoffMultiplier;
+    const maxDelay = this.opts.maxReconnectDelayMs;
+    const raw = Math.min(
+      base * Math.pow(mult, attempt - 1),
+      maxDelay,
+    );
+    const jitter = this.opts.jitterFraction;
+    const jitterRange = raw * jitter;
+    const jittered =
+      raw + (Math.random() * 2 - 1) * jitterRange;
+    const final = Math.max(100, Math.round(jittered));
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, this.opts.reconnectDelayMs);
+    }, final);
   }
 
   private handleMessage(raw: string): void {

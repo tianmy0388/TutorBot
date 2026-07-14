@@ -46,10 +46,35 @@ export interface ClientJob {
   last_seq: number;
   events: StreamEvent[];
   result: JobResultContract | null;
+  /** Server-supplied error message (e.g. "process restarted"). */
   error: string | null;
   event_count: number;
   /** event_ids we've already applied (for dedup). */
   seen_event_ids: Set<string>;
+  /**
+   * 2026-06-21 plan (B2): streaming content buffers, migrated
+   * from the legacy ``ActiveTurn`` record. These are the live
+   * text/thinking/error that the ChatMessages surface reads
+   * while a job is running. Previously these lived on
+   * ``activeTurn`` and the chat surface had to reconcile the
+   * per-job "in progress" check with a separate data source.
+   *
+   * **2026-06-22 fix (Task 5):** removed the duplicate ``error``
+   * field (was declared twice) and ``stage`` is now populated
+   * from stream events.
+   *
+   * **2026-07-08 fix (585f367d):** ``stage`` is derived from the
+   * top of ``open_stages`` (the stack of currently-running nested
+   * stages). Pre-fix, ``stage`` was a monotonic last-write-wins
+   * string and any unmatched trailing ``stage_start`` froze the
+   * chip on its name forever — visible to the user as a stuck
+   * "阶段: 教学设计..." loop after job_terminal.
+   */
+  text_buffer: string;
+  thinking_buffer: string;
+  stage: string;
+  /** Stack of open nested stages. Top of stack = current stage. */
+  open_stages: string[];
 }
 
 export interface JobsState {
@@ -136,6 +161,10 @@ export function createJobState(
     error: null,
     event_count: 0,
     seen_event_ids: new Set(),
+    text_buffer: "",
+    thinking_buffer: "",
+    stage: "",
+    open_stages: [],
   };
   return {
     jobsById: { [job_id]: job },
@@ -194,6 +223,10 @@ function applySubmit(state: JobsState, ev: SubmitEvent): JobsState {
     error: null,
     event_count: 0,
     seen_event_ids: new Set(),
+    text_buffer: "",
+    thinking_buffer: "",
+    stage: "",
+    open_stages: [],
   };
   return {
     jobsById: { ...state.jobsById, [ev.job_id]: job },
@@ -210,6 +243,22 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
     // before any events arrive.
     return state;
   }
+  // **2026-07-09 fix (sess_836 trace):** ``state.jobsById[ev.job_id]``
+  // can be a hand-built ``ClientJob`` literal (e.g. from
+  // ``loadConversationAggregate``) that's missing
+  // ``seen_event_ids``/``text_buffer``/``thinking_buffer``/``stage``/
+  // ``open_stages``. The original ``if (!job) return state;`` guard
+  // only checked existence and let a malformed job crash at
+  // ``job.seen_event_ids.has(...)``. Normalise the shape here so a
+  // single defensive layer protects every consumer below from
+  // ``undefined`` access.
+  if (!(job.seen_event_ids instanceof Set)) {
+    job.seen_event_ids = new Set<string>();
+  }
+  if (typeof job.text_buffer !== "string") job.text_buffer = "";
+  if (typeof job.thinking_buffer !== "string") job.thinking_buffer = "";
+  if (typeof job.stage !== "string") job.stage = "";
+  if (!Array.isArray(job.open_stages)) job.open_stages = [];
   const stream = ev.event;
 
   // Dedup by event_id.
@@ -240,6 +289,63 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
     started_at = stream.timestamp ? stream.timestamp * 1000 : Date.now();
   }
 
+  // 2026-06-21 plan (B2): accumulate streaming content into
+  // per-job buffers so ChatMessages can read from liveJob
+  // instead of the legacy activeTurn.
+  let textBuf = job.text_buffer;
+  let thinkingBuf = job.thinking_buffer;
+  let jobError = job.error;
+  let jobStage = job.stage;
+
+  if (stream.type === "content" && stream.content) {
+    textBuf = textBuf + stream.content;
+  }
+  if (stream.type === "thinking" && stream.content) {
+    thinkingBuf = thinkingBuf + stream.content;
+  }
+  if (stream.type === "error" && stream.content) {
+    jobError = stream.content;
+  }
+  if (stream.type === "stage_start" && stream.stage) {
+    jobStage = stream.stage;
+  }
+  // **2026-07-08 fix (585f367d):** ``stage_start`` pushes onto the
+  // open-stages stack; ``stage_end`` pops the matching stage.
+  // Pre-fix, the stack did not exist and ``jobStage`` was
+  // last-write-wins, so a trailing unmatched ``stage_start``
+  // (e.g. ``video_rendering`` whose end never fired after a 600s
+  // timeout) froze ``job.stage`` forever — the right-pane chip
+  // looped "阶段: 视频分镜设计" even after job_terminal.
+  let openStages = job.open_stages ?? [];
+  if (stream.type === "stage_start" && stream.stage) {
+    openStages = [...openStages, stream.stage];
+    jobStage = stream.stage;
+  } else if (stream.type === "stage_end" && stream.stage) {
+    // Pop the matching stage from the stack. If the stack has
+    // multiple copies (out-of-order ends), pop the most recent
+    // match so the LIFO invariant is preserved.
+    const idx = openStages.lastIndexOf(stream.stage);
+    if (idx >= 0) {
+      openStages = [
+        ...openStages.slice(0, idx),
+        ...openStages.slice(idx + 1),
+      ];
+    }
+    jobStage = openStages[openStages.length - 1] ?? "";
+  }
+  // Once the job is terminal, ignore any subsequent stage_start —
+  // it must not reanimate the chip or re-push onto the stack.
+  if (
+    (status === "succeeded" ||
+      status === "failed" ||
+      status === "partial" ||
+      status === "cancelled") &&
+    stream.type === "stage_start"
+  ) {
+    openStages = job.open_stages ?? [];
+    jobStage = job.stage ?? "";
+  }
+
   const next: ClientJob = {
     ...job,
     status,
@@ -251,6 +357,11 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
         ? stream.seq
         : job.last_seq,
     seen_event_ids: seen,
+    text_buffer: textBuf,
+    thinking_buffer: thinkingBuf,
+    error: jobError,
+    stage: jobStage,
+    open_stages: openStages,
   };
   return {
     ...state,
@@ -305,6 +416,10 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       error: ev.result.error?.message ?? null,
       event_count: 0,
       seen_event_ids: new Set(ev.event_id ? [ev.event_id] : []),
+      text_buffer: "",
+      thinking_buffer: "",
+      stage: "",
+      open_stages: [],
     };
     return {
       jobsById: { ...state.jobsById, [ev.job_id]: fresh },
@@ -349,6 +464,12 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
     result: ev.result,
     error: ev.result.error?.message ?? null,
     seen_event_ids: seen,
+    // **2026-07-08 fix (585f367d):** clear the open-stages stack so
+    // the right-pane chip stops showing a "stuck" active stage
+    // (e.g. "阶段: 视频分镜设计…") after a timeout. The job is done;
+    // there is nothing still running.
+    stage: "",
+    open_stages: [],
   };
   return {
     ...state,
@@ -376,6 +497,23 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
       .map((e) => e.event_id)
       .filter((id): id is string => typeof id === "string" && id.length > 0),
   );
+  // 2026-06-21 plan (B2): restore streaming buffers from
+  // stored events when replaying a finished job. Prefer the
+  // server-supplied error string over the local one.
+  const snapTextBuf = existing?.text_buffer ?? "";
+  const snapThinkBuf = existing?.thinking_buffer ?? "";
+  // **2026-07-08 fix (585f367d):** when the incoming snapshot is
+  // already terminal, clear the open_stages stack regardless of
+  // the local stage string — the chip must stop spinning once the
+  // job is over.
+  const isIncomingTerminal = isTerminal(incoming.status);
+  const snapStage = isIncomingTerminal
+    ? ""
+    : existing?.stage ?? "";
+  const snapOpenStages = isIncomingTerminal
+    ? []
+    : existing?.open_stages ?? [];
+
   const next: ClientJob = {
     job_id: incoming.job_id,
     capability: incoming.capability,
@@ -387,9 +525,13 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
     last_seq: incoming.last_seq ?? 0,
     events: incoming.events ?? [],
     result: incoming.result ?? null,
-    error: incoming.error ?? null,
+    error: incoming.error ?? existing?.error ?? null,
     event_count: incoming.event_count ?? (incoming.events?.length ?? 0),
     seen_event_ids: seen,
+    text_buffer: snapTextBuf,
+    thinking_buffer: snapThinkBuf,
+    stage: snapStage,
+    open_stages: snapOpenStages,
   };
   const jobOrder = state.jobOrder.includes(incoming.job_id)
     ? state.jobOrder
