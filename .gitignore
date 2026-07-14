@@ -133,3 +133,10 @@ desktop.ini
 
 # Isolated feature worktrees
 .worktrees/
+
+# Local Codex / Superpowers scratch state — personal, not for the repo
+.codex/
+.superpowers/
+
+# Backend runtime event logs (debug/trace dumps)
+backend/events_*.json
