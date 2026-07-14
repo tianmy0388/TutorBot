@@ -115,6 +115,17 @@ class OpenAICompatProvider(LLMProvider):
             params["tool_choice"] = req.tool_choice
         if req.stop:
             params["stop"] = req.stop
+        # 2026-06-21 fix: ``req.extra`` carries provider-specific
+        # options that ``BaseAgent.call_llm`` builds —
+        # ``response_format={"type": "json_object"}`` for
+        # JSON-mode agents (ManimVideoAgent, CodeSandboxAgent,
+        # ExerciseGenerator, etc.) and other future settings.
+        # Before this fix, ``req.extra`` was silently ignored,
+        # so every agent that asked for JSON mode got plaintext
+        # instead, causing ``parse_json_response`` to return
+        # ``{}`` and triggering the fallback placeholder code.
+        if req.extra:
+            params.update(req.extra)
         return params
 
     def _parse_response(self, resp: ChatCompletion) -> LLMResponse:
