@@ -1,8 +1,8 @@
 {
-  "name": "tutor-frontend",
+  "name": "tutorbot-frontend",
   "version": "0.1.0",
   "private": true,
-  "description": "Tutor — 多智能体学习系统前端 (Next.js 16 + React 19 + Tailwind)",
+  "description": "TutorBot — 多智能体个性化学习系统前端 (Next.js 16 + React 19 + Tailwind)",
   "scripts": {
     "dev": "next dev -p 3010",
     "build": "next build",
