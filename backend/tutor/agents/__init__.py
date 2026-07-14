@@ -1,4 +1,4 @@
-"""Agent implementations for Tutor.
+"""Agent implementations for TutorBot.
 
 Each Agent encapsulates a single domain-responsible LLM call pattern.
 Agents inherit from :class:`tutor.agents.base_agent.BaseAgent` and

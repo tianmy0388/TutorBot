@@ -68,7 +68,19 @@ class PedagogyAgent(BaseAgent):
     module_name = "resource"
     agent_name = "pedagogy"
     default_temperature = 0.5
-    default_max_tokens = 4096
+    # **2026-07-08 fix (187b2955 trace):** the previous default of 4096 +
+    # ``call_llm_with_retry``'s exponential doubling (3 attempts × 2^2 =
+    # 16 384 max tokens on the final attempt) caused single LLM calls to
+    # stretch to 221s. Combined with four sequential pedagogy invocations
+    # (content → pedagogy → 2nd pedagogy → reading-compilation), this
+    # agent alone consumed ~60% of the 600s job budget. We now:
+    #   * use a tighter 2048 token ceiling (output schema is bounded — no
+    #     section needs >2k tokens), and
+    #   * cap ``call_llm_with_retry`` at 2 attempts instead of the base 3,
+    #     so the second attempt can only double to 4096 — well under any
+    #     reasonable model latency budget.
+    default_max_tokens = 2048
+    default_max_attempts = 2
 
     async def process(
         self,
@@ -106,24 +118,25 @@ class PedagogyAgent(BaseAgent):
                     source=self.agent_name,
                     stage="pedagogy_design",
                 )
-                resp = await self.call_llm(
+                resp, data, _attempts = await self.call_llm_with_retry(
                     messages=messages,
                     stream=stream,
                     source=self.agent_name,
                     stage="pedagogy_design",
                     temperature=self.default_temperature,
+                    max_attempts=self.default_max_attempts,
                     response_format={"type": "json_object"},
                 )
         else:
-            resp = await self.call_llm(
+            resp, data, _attempts = await self.call_llm_with_retry(
                 messages=messages,
                 stream=None,
                 source=self.agent_name,
                 temperature=self.default_temperature,
+                max_attempts=self.default_max_attempts,
                 response_format={"type": "json_object"},
             )
 
-        data = self.parse_json_response(resp.content, fallback={})
         if not isinstance(data, dict) or not data.get("sections"):
             # LLM failed — return source unchanged
             logger.warning(f"PedagogyAgent got empty response; passing through.")

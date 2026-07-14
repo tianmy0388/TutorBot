@@ -97,6 +97,13 @@ class MultimediaAgent(BaseAgent):
         mermaid_dsl = str(data.get("mermaid_dsl") or "").strip()
         # Strip wrapping ```mermaid fences if present
         mermaid_dsl = _strip_mermaid_fences(mermaid_dsl)
+        # 2026-06-21 fix: sanitize Mermaid DSL before storing it.
+        # LLM-generated text often contains ``---``, ``===``,
+        # unbalanced parens / brackets that crash the Mermaid
+        # parser. We quote-wrap offending node labels so the
+        # frontend renders them correctly.
+        if mermaid_dsl:
+            mermaid_dsl = _sanitize_mermaid_dsl(mermaid_dsl)
         central_topic = str(data.get("central_topic") or topic)
         branch_count = int(data.get("branch_count") or _count_branches(mermaid_dsl))
 
@@ -138,6 +145,89 @@ class MultimediaAgent(BaseAgent):
 
 
 _FENCE_RE = re.compile(r"^```(?:mermaid)?\s*\n(.*?)\n```\s*$", re.DOTALL)
+
+# Mermaid mindmap nodes: text after the indentation. A node is
+# the text that follows the leading whitespace + optional shape
+# marker (one of ``(``, ``[``, ``{``, ``)``, ``]``, ``}``).
+# Lines containing ``---`` (three dashes) or ``===`` (three
+# equals) inside node text break the Mermaid parser because
+# those sequences are reserved for horizontal rules and
+# separators within certain diagram types. We quote-wrap the
+# offending text to preserve the LLM's intended content.
+#
+# **2026-06-22 fix (Task 8):** the previous regex
+# ``[-=]{3,}|[()\[\]{}]|[:;]`` matched *any* parenthesis, so
+# ``root((反向传播算法))`` (a perfectly valid Mermaid mindmap
+# root) got wrapped to ``"root((反向传播算法))"``. The next line
+# `` 基本概念`` (no parens) was NOT wrapped → parser then saw a
+# mix of quoted and unquoted siblings at the same indent level,
+# threw ``Expecting 'SPACELINE', 'NL', 'EOF', got 'NODE_ID'``.
+#
+# New strategy: only quote-wrap when the line text itself
+# contains ``---`` or ``===`` (the actually-fatal sequences).
+# Parens/brackets are allowed as long as they balance; we don't
+# need to escape them.
+_SANITIZE_BAD_LINE_PATTERN = re.compile(r"^(\s*)(.*)$", re.MULTILINE)
+_SANITIZE_DANGEROUS_CHARS = re.compile(r"[-=]{3,}")
+
+
+def _sanitize_mermaid_dsl(dsl: str) -> str:
+    """Clean a Mermaid DSL string so it doesn't crash the parser.
+
+    For each line in the DSL:
+      1. Skip the ``mindmap`` / ``graph`` header.
+      2. If the line's text content contains ``---`` or ``===``,
+         quote-wrap the entire text so Mermaid treats it as a
+         literal label. (Parens/brackets are left alone — the
+         ``mindmap`` parser is happy with ``((round))`` /
+         ``[rect]`` shapes, and over-wrapping them causes
+         sibling-mix parse errors.)
+      3. **2026-06-22 fix (Task 8):** also normalize whitespace
+         at the start of each line to consistent 2-space steps.
+         LLMs frequently mix tabs, single spaces, and odd
+         indentation, which Mermaid interprets as different
+         hierarchy levels.
+    """
+    lines = dsl.splitlines()
+    out: list[str] = []
+    in_mindmap = False
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            out.append(raw_line)
+            continue
+        if stripped.lower().startswith("mindmap"):
+            in_mindmap = True
+            out.append("mindmap")
+            continue
+        if stripped.startswith("graph") or stripped.startswith("flowchart"):
+            out.append(raw_line)
+            continue
+        # Compute indent depth in 2-space units (round to nearest).
+        leading_ws = len(raw_line) - len(raw_line.lstrip(" \t"))
+        # Count indent as number of leading spaces (treat tabs as 2 spaces).
+        space_count = 0
+        for ch in raw_line[:leading_ws]:
+            space_count += 2 if ch == "\t" else 1
+        if in_mindmap:
+            depth = max(0, round(space_count / 2))
+            indent = "  " * depth
+        else:
+            indent = raw_line[:leading_ws]
+        text = raw_line[leading_ws:]
+        # Already quoted — leave as-is.
+        if (text.startswith('"') and text.endswith('"')) or (
+            text.startswith("'") and text.endswith("'")
+        ):
+            out.append(indent + text)
+            continue
+        # If the text contains dangerous chars, wrap it in quotes.
+        if _SANITIZE_DANGEROUS_CHARS.search(text):
+            safe = text.replace('"', '\\"')
+            out.append(f'{indent}"{safe}"')
+            continue
+        out.append(indent + text)
+    return "\n".join(out)
 
 
 def _strip_mermaid_fences(text: str) -> str:

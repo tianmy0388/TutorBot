@@ -92,7 +92,7 @@ class ContentExpertAgent(BaseAgent):
                     source=self.agent_name,
                     stage="content_generation",
                 )
-                resp = await self.call_llm(
+                resp, data, _attempts = await self.call_llm_with_retry(
                     messages=messages,
                     stream=stream,
                     source=self.agent_name,
@@ -101,7 +101,7 @@ class ContentExpertAgent(BaseAgent):
                     response_format={"type": "json_object"},
                 )
         else:
-            resp = await self.call_llm(
+            resp, data, _attempts = await self.call_llm_with_retry(
                 messages=messages,
                 stream=None,
                 source=self.agent_name,
@@ -109,7 +109,6 @@ class ContentExpertAgent(BaseAgent):
                 response_format={"type": "json_object"},
             )
 
-        data = self.parse_json_response(resp.content, fallback={})
         if not isinstance(data, dict):
             data = {}
 
