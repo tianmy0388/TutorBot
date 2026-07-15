@@ -24,6 +24,7 @@ import {
   BookOpen,
   Database,
   MessageSquare,
+  Presentation,
   Settings as SettingsIcon,
   Sun,
   Moon,
@@ -59,6 +60,12 @@ const NAV_ITEMS: NavItem[] = [
     label: "资源中心",
     icon: BookOpen,
     match: (p) => p.startsWith("/resources"),
+  },
+  {
+    href: "/demo",
+    label: "比赛演示",
+    icon: Presentation,
+    match: (p) => p.startsWith("/demo"),
   },
   {
     href: "/settings",

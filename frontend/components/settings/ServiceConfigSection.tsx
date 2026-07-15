@@ -16,7 +16,15 @@
  */
 
 import { useState } from "react";
-import { CheckCircle2, Loader2, RefreshCw, XCircle, Eye, EyeOff } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  RefreshCw,
+  XCircle,
+  Eye,
+  EyeOff,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface ServiceConfigSectionProps {
@@ -40,6 +48,7 @@ export interface ServiceConfigSectionProps {
   onSave: (patch: Record<string, unknown>) => Promise<void>;
   onTest: () => Promise<{ ok: boolean; latency_ms: number; message: string; code?: string }>;
   providerOptions?: string[];
+  providerHelp?: Record<string, string>;
 }
 
 export function ServiceConfigSection({
@@ -53,6 +62,7 @@ export function ServiceConfigSection({
   onSave,
   onTest,
   providerOptions = [],
+  providerHelp = {},
 }: ServiceConfigSectionProps) {
   const [draftProvider, setDraftProvider] = useState(provider);
   const [draftModel, setDraftModel] = useState(model);
@@ -71,6 +81,7 @@ export function ServiceConfigSection({
     | { ok: boolean; latency_ms: number; message: string; code?: string }
     | null
   >(null);
+  const providerHint = providerHelp[draftProvider];
 
   const handleSave = async () => {
     setSaving(true);
@@ -180,6 +191,16 @@ export function ServiceConfigSection({
         ))}
       </div>
 
+      {providerHint && (
+        <div
+          className="flex items-start gap-2 rounded-lg border border-yellow-500/25 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-100"
+          data-testid={`${title}-provider-hint`}
+        >
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{providerHint}</span>
+        </div>
+      )}
+
       <div>
         <label className="block text-xs font-semibold text-fg-muted mb-1">
           API Key
@@ -243,6 +264,15 @@ export function ServiceConfigSection({
             className="text-[11px] text-yellow-300/80 mt-1"
           >
             💡 {apiKey.hint}
+          </p>
+        )}
+        {apiKey.required !== false && !apiKey.configured && (
+          <p
+            data-testid={`${title}-missing-key-warning`}
+            className="flex items-start gap-1.5 text-[11px] text-yellow-200 mt-1"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>当前未配置 API Key，连接测试和真实生成会处于不可用或降级状态。</span>
           </p>
         )}
         {!apiKey.hint && (

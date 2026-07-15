@@ -11,6 +11,9 @@
  */
 
 import {
+  AlertTriangle,
+  CheckCircle2,
+  ExternalLink,
   FileText,
   Network,
   ListChecks,
@@ -23,6 +26,7 @@ import {
   Sparkles,
   Inbox,
   Tag,
+  ShieldCheck,
 } from "lucide-react";
 import type { Resource } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -207,8 +211,119 @@ export function ResourceDetail({ resource }: { resource: Resource }) {
         </div>
       )}
 
+      {hasEvidence(resource) && <ResourceEvidence resource={resource} />}
+
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-5">{renderByType(resource)}</div>
+    </div>
+  );
+}
+
+function ResourceEvidence({ resource }: { resource: Resource }) {
+  const review = asRecord(resource.review);
+  const safety = asRecord(resource.safety);
+  const citations = resource.citations ?? [];
+  const unverified = resource.unverified_claims ?? [];
+  const reviewVerdict = display(review.verdict || "n/a");
+  const safetyVerdict = display(safety.verdict || "n/a");
+
+  return (
+    <div
+      className="px-5 py-3 border-b border-fg/5 bg-bg-panel/20 space-y-3"
+      data-testid="resource-evidence"
+    >
+      <div className="flex items-center gap-2 text-xs font-semibold">
+        <ShieldCheck className="w-3.5 h-3.5 text-brand-300" />
+        <span>可信证据</span>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <EvidenceTile
+          icon={CheckCircle2}
+          label="质量审核"
+          value={`${reviewVerdict} · ${score(review.quality_score)}`}
+        />
+        <EvidenceTile
+          icon={ShieldCheck}
+          label="安全检查"
+          value={`${safetyVerdict} · ${display(safety.risk_level || "n/a")}`}
+        />
+        <EvidenceTile
+          icon={Sparkles}
+          label="生成 Agent"
+          value={resource.generated_by?.join(", ") || "n/a"}
+        />
+      </div>
+
+      {citations.length > 0 && (
+        <div>
+          <div className="text-[11px] font-semibold text-fg-muted mb-1">
+            引用来源
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {citations.map((citation, index) => {
+              const c = asRecord(citation);
+              const title = display(c.title || c.source || c.url || `citation-${index + 1}`);
+              const url = display(c.url);
+              const isWebUrl = /^https?:\/\//i.test(url);
+              return isWebUrl ? (
+                <a
+                  key={`${title}-${index}`}
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-fg/10 bg-bg-card text-[11px] text-fg-muted hover:text-fg"
+                >
+                  {title}
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              ) : (
+                <span
+                  key={`${title}-${index}`}
+                  className="inline-flex items-center px-2 py-1 rounded-md border border-fg/10 bg-bg-card text-[11px] text-fg-muted"
+                >
+                  {title}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {unverified.length > 0 && (
+        <div className="rounded-md border border-yellow-500/25 bg-yellow-500/10 p-2 text-[11px] text-yellow-100">
+          <div className="flex items-start gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <div className="space-y-0.5">
+              {unverified.map((claim, index) => (
+                <div key={`${claim}-${index}`}>{claim}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EvidenceTile({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: any;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-lg border border-fg/10 bg-bg-card/50 p-2 min-w-0">
+      <div className="flex items-center gap-1.5 text-[10px] text-fg-subtle">
+        <Icon className="w-3 h-3" />
+        {label}
+      </div>
+      <div className="text-[11px] text-fg-muted mt-1 truncate" title={value}>
+        {value}
+      </div>
     </div>
   );
 }
@@ -272,6 +387,32 @@ function renderByType(resource: Resource): React.ReactNode {
         <pre className="text-xs whitespace-pre-wrap">{resource.content}</pre>
       );
   }
+}
+
+function hasEvidence(resource: Resource): boolean {
+  return Boolean(
+    (resource.citations && resource.citations.length > 0) ||
+      (resource.unverified_claims && resource.unverified_claims.length > 0) ||
+      Object.keys(asRecord(resource.review)).length > 0 ||
+      Object.keys(asRecord(resource.safety)).length > 0,
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function display(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function score(value: unknown): string {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return "n/a";
+  return `${Math.round(numeric * 100)}%`;
 }
 
 export const RESOURCE_TYPE_META = TYPE_META;

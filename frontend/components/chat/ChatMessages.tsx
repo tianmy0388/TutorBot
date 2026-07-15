@@ -75,7 +75,8 @@ export function ChatMessages() {
   const textBuffer = liveJob?.text_buffer || activeTurn.text_buffer;
   const thinkingBuffer = liveJob?.thinking_buffer || activeTurn.thinking_buffer;
   const errorText = liveJob?.error || activeTurn.error;
-  const events = liveJob?.events.length > 0 ? liveJob.events : activeTurn.events;
+  const liveEvents = liveJob?.events ?? [];
+  const events = liveEvents.length > 0 ? liveEvents : activeTurn.events;
   const stage = liveJob?.stage || "";
 
   // Auto-scroll on new content

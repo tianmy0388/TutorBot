@@ -102,6 +102,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
     Array<{
       id: string;
       name: string;
+      knowledge_graph_id: string;
       library_count: number;
       ready_count: number;
       document_count: number;

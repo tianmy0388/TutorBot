@@ -1,0 +1,633 @@
+{
+  "scenario": {
+    "id": "ai_intro_competition",
+    "title": "AI 入门个性化学习闭环",
+    "course": "ai_introduction",
+    "topic": "Transformer 与注意力机制",
+    "description": "面向软件杯 A3 赛题的固定演示：从学生画像出发，生成资源、规划路径、完成测评并给出下一步建议。",
+    "persona": "计算机专业大二学生，喜欢图示和动手练习，准备人工智能课程展示。",
+    "goal": "在 2 周内理解 Transformer 注意力机制，并能完成一个小型文本分类 Demo。",
+    "estimated_minutes": 12,
+    "tags": ["A3", "multi-agent", "personalized-learning", "RAG"],
+    "live_prompt": "我是计算机专业大二学生，准备软件杯展示。请基于我的画像，为 Transformer 注意力机制生成一套个性化学习资源。"
+  },
+  "user_id": "competition-demo",
+  "session_id": "demo-ai-intro",
+  "profile": {
+    "knowledge_map": {
+      "scores": {
+        "ai_basic": 0.82,
+        "machine_learning": 0.68,
+        "neural_network": 0.56,
+        "attention": 0.34,
+        "transformer": 0.26,
+        "llm": 0.22
+      }
+    },
+    "cognitive_style": "visual",
+    "error_patterns": [
+      {
+        "concept": "attention",
+        "mistake_type": "formula_to_intuition_gap",
+        "frequency": 3,
+        "examples": ["能背 Q/K/V 公式，但无法解释为什么要缩放点积。"],
+        "notes": "需要图示和数值例子把公式与语义对齐。"
+      },
+      {
+        "concept": "transformer",
+        "mistake_type": "component_order_confusion",
+        "frequency": 2,
+        "examples": ["混淆多头注意力、残差连接和前馈网络的顺序。"],
+        "notes": "适合用流程图和分层练习。"
+      }
+    ],
+    "learning_pace": {
+      "avg_session_duration_min": 40,
+      "preferred_chunk_size_min": 12,
+      "review_interval_hours": 24,
+      "daily_time_budget_min": 45,
+      "sessions_per_week": 5
+    },
+    "motivation": {
+      "goal_type": "competition",
+      "goal_description": "软件杯 A3 项目展示，需要讲清多智能体如何个性化生成资源。",
+      "urgency": "high",
+      "self_efficacy": 0.62,
+      "target_completion_date": null,
+      "stakes": "需要在答辩中清楚解释系统闭环与生成质量。"
+    },
+    "modality": {
+      "text": 0.55,
+      "video": 0.72,
+      "interactive": 0.76,
+      "diagram": 0.9,
+      "code": 0.68,
+      "audio": 0.2,
+      "exercise": 0.82
+    },
+    "version": 3,
+    "metadata": {
+      "demo": true,
+      "school_stage": "undergraduate",
+      "competition_track": "A3"
+    }
+  },
+  "path": {
+    "path_id": "demo_path_transformer",
+    "course": "ai_introduction",
+    "name": "Transformer 注意力机制冲刺路径",
+    "description": "先补齐神经网络和注意力直觉，再完成 Transformer 结构与 LLM 应用。",
+    "nodes": [
+      {
+        "id": "machine_learning",
+        "node_id": "machine_learning",
+        "name": "机器学习基础",
+        "category": "foundation",
+        "difficulty": 2,
+        "estimated_hours": 1.5,
+        "prerequisites": [],
+        "status": "completed"
+      },
+      {
+        "id": "neural_network",
+        "node_id": "neural_network",
+        "name": "神经网络与反向传播",
+        "category": "foundation",
+        "difficulty": 3,
+        "estimated_hours": 2,
+        "prerequisites": ["machine_learning"],
+        "status": "in_progress"
+      },
+      {
+        "id": "attention",
+        "node_id": "attention",
+        "name": "注意力机制",
+        "category": "core",
+        "difficulty": 4,
+        "estimated_hours": 2.5,
+        "prerequisites": ["neural_network"],
+        "status": "available"
+      },
+      {
+        "id": "transformer",
+        "node_id": "transformer",
+        "name": "Transformer 编码器结构",
+        "category": "core",
+        "difficulty": 4,
+        "estimated_hours": 3,
+        "prerequisites": ["attention"],
+        "status": "locked"
+      },
+      {
+        "id": "llm",
+        "node_id": "llm",
+        "name": "大语言模型应用",
+        "category": "application",
+        "difficulty": 5,
+        "estimated_hours": 3,
+        "prerequisites": ["transformer"],
+        "status": "locked"
+      }
+    ],
+    "total_estimated_hours": 12,
+    "completed_count": 1,
+    "available_count": 1,
+    "locked_count": 2,
+    "generated_at": "2026-07-15T00:00:00+00:00"
+  },
+  "package": {
+    "package_id": "demo_pkg_ai_intro_transformer",
+    "topic": "Transformer 与注意力机制",
+    "generated_by": [
+      "ContentExpertAgent",
+      "PedagogyAgent",
+      "ExerciseGeneratorAgent",
+      "QualityReviewerAgent",
+      "AntiHallucinationAgent"
+    ],
+    "target_profile_snapshot": {
+      "user_id": "competition-demo",
+      "version": 3,
+      "cognitive_style": "visual",
+      "knowledge_count": 6,
+      "avg_mastery": 0.48,
+      "weak_concepts": ["attention", "transformer", "llm"],
+      "strong_concepts": ["ai_basic"],
+      "error_pattern_count": 2,
+      "goal": "competition",
+      "urgency": "high",
+      "self_efficacy": 0.62,
+      "modality_dominant": "diagram",
+      "session_duration_min": 40,
+      "updated_at": "2026-07-15T00:00:00+00:00"
+    },
+    "learning_path_summary": {
+      "path_id": "demo_path_transformer",
+      "next_concept": "attention",
+      "progress_pct": 20,
+      "estimated_hours_remaining": 10.5
+    },
+    "metadata": {
+      "demo": true,
+      "review_summary": "资源覆盖核心概念、练习和证据引用；建议现场展示时先讲画像，再讲生成链路。",
+      "safety_summary": "未发现不适宜内容；关键事实已附引用。"
+    },
+    "resources": [
+      {
+        "resource_id": "demo_res_attention_doc",
+        "type": "document",
+        "title": "注意力机制三层讲解",
+        "content": "## 直觉\n注意力机制让模型在处理一个词时，动态关注序列中更相关的位置。\n\n## 公式\n缩放点积注意力通常写作 softmax(QK^T / sqrt(d_k))V。\n\n## 学习建议\n先用 3 个词的玩具例子计算权重，再观察多头注意力如何并行捕捉不同关系。",
+        "format_specific": {
+          "sections": [
+            {
+              "title": "直觉",
+              "content": "把注意力看作可学习的检索权重。",
+              "key_points": ["Q 是查询", "K 是索引", "V 是内容"]
+            },
+            {
+              "title": "公式",
+              "content": "点积衡量相关性，sqrt(d_k) 用于稳定数值尺度。",
+              "key_points": ["缩放", "softmax", "加权求和"]
+            }
+          ],
+          "has_math": true,
+          "has_diagrams": true
+        },
+        "difficulty": 3,
+        "estimated_minutes": 12,
+        "prerequisites": ["neural_network"],
+        "generated_by": ["ContentExpertAgent", "PedagogyAgent"],
+        "confidence_score": 0.91,
+        "topic": "Transformer 与注意力机制",
+        "tags": ["attention", "QKV", "visual"],
+        "metadata": {
+          "personalization": "压缩为 12 分钟块，突出图示与手算。"
+        },
+        "citations": [
+          {
+            "title": "Attention Is All You Need",
+            "url": "https://arxiv.org/abs/1706.03762",
+            "source": "paper",
+            "year": 2017
+          },
+          {
+            "title": "预置知识库：Transformer 与注意力机制",
+            "url": "kb://ai_introduction/06_Transformer与注意力机制.md",
+            "source": "course_kb"
+          }
+        ],
+        "review": {
+          "verdict": "pass",
+          "quality_score": 0.9,
+          "issues": [],
+          "suggestions": ["演示时配合思维导图资源一起讲。"],
+          "reviewer": "QualityReviewerAgent"
+        },
+        "safety": {
+          "verdict": "safe",
+          "risk_level": "low",
+          "notes": "内容为通用课程知识。"
+        },
+        "unverified_claims": []
+      },
+      {
+        "resource_id": "demo_res_attention_map",
+        "type": "mindmap",
+        "title": "Transformer 注意力知识图谱",
+        "content": "围绕 Q/K/V、缩放点积、多头注意力、残差连接与前馈网络组织。",
+        "format_specific": {
+          "mermaid_dsl": "mindmap\n  root((Transformer))\n    注意力机制\n      Q 查询\n      K 键\n      V 值\n      softmax 权重\n    多头注意力\n      并行子空间\n      拼接投影\n    编码器层\n      残差连接\n      LayerNorm\n      前馈网络",
+          "central_topic": "Transformer",
+          "branch_count": 3
+        },
+        "difficulty": 3,
+        "estimated_minutes": 8,
+        "prerequisites": ["neural_network"],
+        "generated_by": ["MultimediaAgent", "PedagogyAgent"],
+        "confidence_score": 0.88,
+        "topic": "Transformer 与注意力机制",
+        "tags": ["mindmap", "structure"],
+        "metadata": {
+          "personalization": "优先满足图示偏好。"
+        },
+        "citations": [
+          {
+            "title": "预置知识库：Transformer 与注意力机制",
+            "url": "kb://ai_introduction/06_Transformer与注意力机制.md",
+            "source": "course_kb"
+          }
+        ],
+        "review": {
+          "verdict": "pass",
+          "quality_score": 0.86,
+          "issues": [],
+          "suggestions": ["可在答辩时作为多智能体产物总览。"],
+          "reviewer": "QualityReviewerAgent"
+        },
+        "safety": {
+          "verdict": "safe",
+          "risk_level": "low",
+          "notes": "结构化课程内容。"
+        },
+        "unverified_claims": []
+      },
+      {
+        "resource_id": "demo_res_attention_exercise",
+        "type": "exercise",
+        "title": "Q/K/V 与缩放点积小测",
+        "content": "5 道题覆盖概念辨析、公式理解和简单计算。",
+        "format_specific": {
+          "questions": [
+            {
+              "id": "q1",
+              "type": "single_choice",
+              "difficulty": 2,
+              "knowledge_point": "attention",
+              "question": "在注意力机制中，Q 的主要作用是什么？",
+              "options": [
+                {"label": "A", "text": "表示当前需要查询的信息"},
+                {"label": "B", "text": "保存最终输出标签"},
+                {"label": "C", "text": "固定表示所有词的位置"},
+                {"label": "D", "text": "只用于防止过拟合"}
+              ],
+              "answer": "A",
+              "explanation": "Q 是 Query，用来和 K 计算相关性。",
+              "estimated_seconds": 45
+            },
+            {
+              "id": "q2",
+              "type": "short_answer",
+              "difficulty": 3,
+              "knowledge_point": "scaled_dot_product",
+              "question": "为什么点积注意力中要除以 sqrt(d_k)？",
+              "options": [],
+              "answer": "稳定点积分布尺度，避免 softmax 过早饱和。",
+              "explanation": "维度越高，未经缩放的点积方差越大。",
+              "estimated_seconds": 90
+            }
+          ],
+          "total_questions": 2,
+          "difficulty_breakdown": {
+            "basic": 1,
+            "advanced": 1
+          }
+        },
+        "difficulty": 3,
+        "estimated_minutes": 10,
+        "prerequisites": ["attention"],
+        "generated_by": ["ExerciseGeneratorAgent", "AssessmentAgent"],
+        "confidence_score": 0.86,
+        "topic": "Transformer 与注意力机制",
+        "tags": ["exercise", "diagnostic"],
+        "metadata": {
+          "personalization": "针对公式到直觉的薄弱点。"
+        },
+        "citations": [
+          {
+            "title": "Attention Is All You Need",
+            "url": "https://arxiv.org/abs/1706.03762",
+            "source": "paper",
+            "year": 2017
+          }
+        ],
+        "review": {
+          "verdict": "pass",
+          "quality_score": 0.84,
+          "issues": [],
+          "suggestions": ["现场可展示错因如何回写画像。"],
+          "reviewer": "QualityReviewerAgent"
+        },
+        "safety": {
+          "verdict": "safe",
+          "risk_level": "low",
+          "notes": "测验题无敏感内容。"
+        },
+        "unverified_claims": []
+      },
+      {
+        "resource_id": "demo_res_llm_reading",
+        "type": "reading",
+        "title": "从注意力到大语言模型的拓展阅读",
+        "content": "建议在掌握注意力后阅读：Transformer 如何扩展到预训练语言模型，以及为什么上下文窗口和位置编码会影响生成效果。",
+        "format_specific": {
+          "citations": [
+            {
+              "title": "Attention Is All You Need",
+              "url": "https://arxiv.org/abs/1706.03762",
+              "author": "Vaswani et al.",
+              "year": 2017
+            }
+          ],
+          "estimated_reading_minutes": 15
+        },
+        "difficulty": 4,
+        "estimated_minutes": 15,
+        "prerequisites": ["transformer"],
+        "generated_by": ["ContentExpertAgent", "AntiHallucinationAgent"],
+        "confidence_score": 0.82,
+        "topic": "Transformer 与注意力机制",
+        "tags": ["reading", "LLM"],
+        "metadata": {
+          "personalization": "作为高阶延伸，不放在当前第一学习块。"
+        },
+        "citations": [
+          {
+            "title": "Attention Is All You Need",
+            "url": "https://arxiv.org/abs/1706.03762",
+            "source": "paper",
+            "year": 2017
+          }
+        ],
+        "review": {
+          "verdict": "pass",
+          "quality_score": 0.8,
+          "issues": ["需要在完成基础练习后再阅读。"],
+          "suggestions": ["放在下一阶段推荐。"],
+          "reviewer": "QualityReviewerAgent"
+        },
+        "safety": {
+          "verdict": "safe",
+          "risk_level": "low",
+          "notes": "外部论文链接已标注。"
+        },
+        "unverified_claims": ["不同模型的位置编码细节需要按具体模型文档确认。"]
+      }
+    ]
+  },
+  "assessment": {
+    "user_id": "competition-demo",
+    "dimension_scores": {
+      "knowledge_mastery": {
+        "dimension": "knowledge_mastery",
+        "score": 0.48,
+        "evidence": ["6 个概念平均掌握度 0.48", "attention / transformer / llm 为薄弱点"],
+        "notes": "需要先补齐注意力机制。"
+      },
+      "engagement": {
+        "dimension": "engagement",
+        "score": 0.76,
+        "evidence": ["最近一周 18 条学习事件", "每天约 40 分钟"],
+        "notes": "参与度稳定。"
+      },
+      "comprehension": {
+        "dimension": "comprehension",
+        "score": 0.58,
+        "evidence": ["练习平均正确率 58%", "公式题明显弱于概念题"],
+        "notes": "适合增加手算题。"
+      },
+      "pace": {
+        "dimension": "pace",
+        "score": 0.72,
+        "evidence": ["12 分钟资源块更容易完成", "长篇阅读完成率偏低"],
+        "notes": "保持短块学习。"
+      },
+      "gaps": {
+        "dimension": "gaps",
+        "score": 0.52,
+        "evidence": ["注意力直觉与 Transformer 结构顺序是主要缺口"],
+        "notes": "分数越高代表缺口越大。"
+      },
+      "trajectory": {
+        "dimension": "trajectory",
+        "score": 0.68,
+        "evidence": ["从 AI 基础到神经网络持续改善"],
+        "notes": "趋势向好。"
+      }
+    },
+    "overall_score": 0.64,
+    "trajectory": "improving",
+    "weak_concepts": ["attention", "transformer", "llm"],
+    "strong_concepts": ["ai_basic"],
+    "recommendations": [
+      "先完成注意力机制三层讲解，再做 Q/K/V 小测。",
+      "答辩展示时用思维导图解释多智能体分工。",
+      "下一轮生成加入代码例子，验证注意力权重计算。"
+    ],
+    "notes": "学习动机明确，适合比赛冲刺型路径。",
+    "event_window_hours": 168,
+    "events_analyzed": 18,
+    "created_at": "2026-07-15T00:00:00+00:00"
+  },
+  "strategy": {
+    "user_id": "competition-demo",
+    "actions": [
+      {
+        "action_type": "recommend_practice",
+        "target_concept": "attention",
+        "target_resource_type": "exercise",
+        "rationale": "学生在公式解释题上薄弱，需要把 Q/K/V 计算过程显性化。",
+        "priority": 1,
+        "metadata": {"resource_id": "demo_res_attention_exercise"}
+      },
+      {
+        "action_type": "recommend_tutoring",
+        "target_concept": "transformer",
+        "target_resource_type": "tutoring",
+        "rationale": "多头注意力与编码器层顺序容易混淆，适合即时问答纠偏。",
+        "priority": 2,
+        "metadata": {"prompt": "为什么 Transformer 要用多头注意力？"}
+      }
+    ],
+    "overall_directive": "先补注意力直觉，再推进 Transformer 编码器结构。",
+    "notes": "保持 12 分钟短资源块和图示优先。",
+    "created_at": "2026-07-15T00:00:00+00:00"
+  },
+  "agent_trace": [
+    {
+      "id": "trace-profile",
+      "agent": "CognitiveDiagnosticAgent",
+      "role": "学生画像",
+      "stage": "profile_diagnosis",
+      "status": "succeeded",
+      "input_summary": "学生目标、偏好、答题记录与知识掌握度。",
+      "output_summary": "识别图示偏好、competition 目标，以及 attention/transformer 薄弱点。",
+      "duration_ms": 840,
+      "confidence": 0.89,
+      "artifacts": ["profile.version=3"]
+    },
+    {
+      "id": "trace-path",
+      "agent": "KnowledgeGraphPlanner",
+      "role": "路径规划",
+      "stage": "path_planning",
+      "status": "succeeded",
+      "input_summary": "知识图谱、先修关系和当前画像。",
+      "output_summary": "生成 5 节点冲刺路径，下一节点为注意力机制。",
+      "duration_ms": 420,
+      "confidence": 0.93,
+      "artifacts": ["demo_path_transformer"]
+    },
+    {
+      "id": "trace-content",
+      "agent": "ContentExpertAgent",
+      "role": "内容专家",
+      "stage": "resource_generation",
+      "status": "succeeded",
+      "input_summary": "目标主题、学习路径、知识库片段。",
+      "output_summary": "产出注意力机制讲解与拓展阅读。",
+      "duration_ms": 1280,
+      "confidence": 0.91,
+      "artifacts": ["demo_res_attention_doc", "demo_res_llm_reading"]
+    },
+    {
+      "id": "trace-pedagogy",
+      "agent": "PedagogyAgent",
+      "role": "教学设计",
+      "stage": "personalization",
+      "status": "succeeded",
+      "input_summary": "图示偏好、12 分钟资源块、比赛目标。",
+      "output_summary": "将长内容拆成短块，并优先安排思维导图与手算题。",
+      "duration_ms": 760,
+      "confidence": 0.88,
+      "artifacts": ["learning_loop"]
+    },
+    {
+      "id": "trace-review",
+      "agent": "QualityReviewerAgent",
+      "role": "质量审核",
+      "stage": "quality_review",
+      "status": "succeeded",
+      "input_summary": "4 个资源草稿及引用列表。",
+      "output_summary": "全部通过，平均质量分 0.85，补充了展示建议。",
+      "duration_ms": 650,
+      "confidence": 0.86,
+      "artifacts": ["review"]
+    },
+    {
+      "id": "trace-safety",
+      "agent": "AntiHallucinationAgent",
+      "role": "事实与安全",
+      "stage": "fact_check",
+      "status": "warning",
+      "input_summary": "资源声明、引用和课程知识库。",
+      "output_summary": "关键事实已引用；1 条模型细节声明被标记为待确认。",
+      "duration_ms": 710,
+      "confidence": 0.82,
+      "artifacts": ["citations", "unverified_claims"]
+    }
+  ],
+  "learning_loop": [
+    {
+      "stage": "goal",
+      "title": "学习目标",
+      "status": "done",
+      "summary": "2 周内掌握 Transformer 注意力机制并服务比赛展示。"
+    },
+    {
+      "stage": "diagnostic",
+      "title": "诊断",
+      "status": "done",
+      "summary": "公式到直觉、模块顺序是主要错因。"
+    },
+    {
+      "stage": "profile",
+      "title": "画像",
+      "status": "done",
+      "summary": "视觉/练习偏好，40 分钟学习节奏，高紧迫度。"
+    },
+    {
+      "stage": "resources",
+      "title": "资源",
+      "status": "ready",
+      "summary": "生成讲解、思维导图、练习和拓展阅读。"
+    },
+    {
+      "stage": "assessment",
+      "title": "评估",
+      "status": "ready",
+      "summary": "综合得分 0.64，趋势 improving。"
+    },
+    {
+      "stage": "next",
+      "title": "下一步",
+      "status": "queued",
+      "summary": "完成 Q/K/V 小测后生成代码演示。"
+    }
+  ],
+  "teacher_panel": {
+    "class_snapshot": "演示学生：competition-demo",
+    "progress_pct": 20,
+    "risk_level": "medium",
+    "weak_concepts": ["attention", "transformer", "llm"],
+    "interventions": [
+      "用 3 词 toy example 让学生手算注意力权重。",
+      "答辩前让学生用思维导图讲一遍多智能体分工。",
+      "下一次资源生成加入代码例子，验证注意力权重可视化。"
+    ],
+    "evidence": [
+      "练习正确率 58%",
+      "attention 掌握度 0.34",
+      "图示偏好 0.90"
+    ]
+  },
+  "events": [
+    {
+      "event_type": "resource_viewed",
+      "target_id": "demo_res_attention_doc",
+      "concept_id": "attention",
+      "duration_seconds": 560,
+      "score": null,
+      "correct": null,
+      "metadata": {"demo": true}
+    },
+    {
+      "event_type": "exercise_completed",
+      "target_id": "demo_res_attention_exercise",
+      "concept_id": "attention",
+      "duration_seconds": 420,
+      "score": 0.58,
+      "correct": null,
+      "metadata": {"demo": true}
+    },
+    {
+      "event_type": "path_advanced",
+      "target_id": "demo_path_transformer",
+      "concept_id": "neural_network",
+      "duration_seconds": 60,
+      "score": null,
+      "correct": true,
+      "metadata": {"demo": true}
+    }
+  ]
+}

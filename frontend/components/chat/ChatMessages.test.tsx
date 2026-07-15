@@ -105,6 +105,10 @@ describe("ChatMessages — terminal state", () => {
       ],
       result: null,
       error: null,
+      text_buffer: "",
+      thinking_buffer: "",
+      stage: "",
+      open_stages: [],
     };
     mockStoreState({
       activeTurn: {
@@ -157,6 +161,10 @@ describe("ChatMessages — terminal state", () => {
       events: [],
       result: null,
       error: null,
+      text_buffer: "",
+      thinking_buffer: "",
+      stage: "",
+      open_stages: [],
     };
     // While the job is non-terminal, ChatMessages renders the live
     // streaming view. textBuffer lives on activeTurn (the event

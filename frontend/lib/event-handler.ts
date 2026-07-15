@@ -122,6 +122,7 @@ export function dispatchStreamEvent(
       const hasPackage =
         typeof contract?.package === "object" && contract.package !== null;
       if (
+        contract &&
         (contractStatus === "failed" || contractStatus === "partial") &&
         !hasPackage &&
         partial.length > 0
@@ -198,10 +199,9 @@ export function dispatchStreamEvent(
           stage: "",
           open_stages: [],
         };
-        const partialResources = Array.isArray(
-          (contract?.partial_artifacts as unknown[] | undefined),
-        )
-          ? (contract.partial_artifacts as Array<Record<string, unknown>>)
+        const contractPartialArtifacts = contract?.partial_artifacts;
+        const partialResources = Array.isArray(contractPartialArtifacts)
+          ? (contractPartialArtifacts as Array<Record<string, unknown>>)
           : [];
         const timeline = buildWorkflowTimeline(
           syntheticJob,

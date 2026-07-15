@@ -11,6 +11,8 @@ import type {
   ConfigTestResult,
   CourseGraph,
   CourseListResponse,
+  DemoLoadResult,
+  DemoScenario,
   EmbeddingSectionPatch,
   HealthResponse,
   JobDetail,
@@ -136,6 +138,30 @@ function isAbortError(e: unknown): boolean {
 export const getHealth = () => request<HealthResponse>("/health");
 
 export const getCapabilities = () => request<CapabilitiesResponse>("/capabilities");
+
+// ---------------------------------------------------------------------------
+// Competition demo
+// ---------------------------------------------------------------------------
+
+export const listDemoScenarios = () =>
+  request<{ items: DemoScenario[] }>("/demo/scenarios");
+
+export const loadDemoScenario = (
+  scenarioId: string,
+  body: {
+    user_id?: string;
+    session_id?: string;
+    persist?: boolean;
+    mode?: "seeded" | "live";
+  } = {},
+) =>
+  request<DemoLoadResult>(
+    `/demo/scenarios/${encodeURIComponent(scenarioId)}/load`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
 
 // ---------------------------------------------------------------------------
 // Profile
@@ -443,6 +469,8 @@ export type {
   CapabilitiesResponse,
   CourseGraph,
   CourseListResponse,
+  DemoLoadResult,
+  DemoScenario,
   HealthResponse,
   LearnerProfileDetail,
   LearnerProfileSummary,

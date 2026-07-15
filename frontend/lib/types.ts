@@ -36,6 +36,7 @@ export type StreamEventType =
   | "observation"
   | "content"
   | "content_final"
+  | "resource"
   | "tool_call"
   | "tool_result"
   | "progress"
@@ -287,12 +288,17 @@ export interface Resource {
   tags: string[];
   created_at: string;
   metadata: Record<string, unknown>;
+  citations?: Array<Record<string, unknown>>;
+  review?: ReviewVerdict | Record<string, unknown>;
+  safety?: Record<string, unknown>;
+  unverified_claims?: string[];
 }
 
 export interface ResourcePackage {
   package_id: string;
   topic: string;
   resources: Resource[];
+  summary?: string;
   target_profile_snapshot: LearnerProfileSummary | Record<string, unknown>;
   learning_path_summary: Record<string, unknown>;
   generated_by: string[];
@@ -652,6 +658,60 @@ export interface ConfigTestResult {
   latency_ms: number;
   message: string;
   code?: string;
+}
+
+// ============================================================================
+// Competition demo
+// ============================================================================
+
+export interface DemoScenario {
+  id: string;
+  title: string;
+  course: string;
+  topic: string;
+  description: string;
+  persona: string;
+  goal: string;
+  estimated_minutes: number;
+  tags: string[];
+  live_prompt: string;
+}
+
+export type AgentTraceStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "warning"
+  | "failed";
+
+export interface AgentTraceEvent {
+  id: string;
+  agent: string;
+  role: string;
+  stage: string;
+  status: AgentTraceStatus;
+  input_summary: string;
+  output_summary: string;
+  duration_ms: number;
+  confidence: number;
+  artifacts: string[];
+}
+
+export interface DemoLoadResult {
+  scenario: DemoScenario;
+  user_id: string;
+  session_id: string;
+  profile: LearnerProfileDetail;
+  path: PlannedPath;
+  package: ResourcePackage;
+  assessment: AssessmentReport;
+  strategy: StrategyDecision;
+  agent_trace: AgentTraceEvent[];
+  learning_loop: Array<Record<string, unknown>>;
+  teacher_panel: Record<string, unknown>;
+  runtime_warnings: string[];
+  live_prompt: string;
+  loaded_at: string;
 }
 
 // ============================================================================

@@ -67,6 +67,28 @@ def test_get_unconfigured_key_returns_false(tmp_path, monkeypatch) -> None:
     assert snapshot["embedding"]["api_key"]["configured"] is False
 
 
+def test_deepseek_llm_without_embedding_key_returns_clear_hint(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("TUTOR_EMBED_API_KEY", raising=False)
+    env = tmp_path / ".env"
+    env.write_text(
+        "TUTOR_LLM_PROVIDER=deepseek\n"
+        "TUTOR_LLM_MODEL=deepseek-chat\n"
+        "TUTOR_LLM_API_KEY=fake-deepseek-key\n"
+        "TUTOR_EMBED_PROVIDER=openai\n"
+        "TUTOR_EMBED_MODEL=text-embedding-3-small\n",
+        encoding="utf-8",
+    )
+    reset_settings_cache()
+    svc = RuntimeConfigService(env_path=env)
+    snapshot = svc.read()
+    hint = snapshot["embedding"]["api_key"]["hint"]
+    assert snapshot["llm"]["provider"] == "deepseek"
+    assert snapshot["embedding"]["api_key"]["configured"] is False
+    assert "DeepSeek" in hint
+    assert "separate" in hint
+
+
 def test_patch_with_null_api_key_preserves_existing(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
     _make_env(tmp_path)

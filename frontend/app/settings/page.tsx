@@ -45,7 +45,6 @@ const EMBED_PROVIDERS = [
   "azure_openai",
   "ollama",
   "custom",
-  "deepseek",
   "zhipu",
   "zhipuai",
 ];
@@ -151,6 +150,10 @@ export default function SettingsPage() {
         ]}
         apiKey={config.llm.api_key}
         providerOptions={LLM_PROVIDERS}
+        providerHelp={{
+          deepseek:
+            "DeepSeek 在本项目中只作为 LLM 生成/对话 provider；知识库向量检索仍需要单独配置 Embedding provider 和 key。",
+        }}
         onSave={async (patch) => {
           const next = await updateLLMConfig(patch as any);
           setConfig(next);
@@ -172,6 +175,16 @@ export default function SettingsPage() {
         ]}
         apiKey={config.embedding.api_key}
         providerOptions={EMBED_PROVIDERS}
+        providerHelp={{
+          openrouter:
+            "OpenRouter 可作为 OpenAI 兼容向量端点使用，需填写独立的 Embedding API Key 和 Base URL。",
+          zhipu:
+            "智谱 embedding-3 可用于国产向量模型演示，需使用智谱 API Key。",
+          zhipuai:
+            "智谱 embedding-3 可用于国产向量模型演示，需使用智谱 API Key。",
+          ollama:
+            "Ollama 本地向量模型通常不需要云端 API Key，但需要本机服务和模型已启动。",
+        }}
         onSave={async (patch) => {
           const next = await updateEmbeddingConfig(patch as any);
           setConfig(next);

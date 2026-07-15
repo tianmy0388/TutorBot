@@ -126,9 +126,10 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
             if (!ragEnabled) {
               scopeWire = "none";
             } else if (
-              scopeObj && scopeObj.kind && scopeObj.kind !== "all"
+              scopeObj &&
+              (scopeObj.kind === "course" || scopeObj.kind === "library")
             ) {
-              scopeWire = `${scopeObj.kind}:${scopeObj.id || ""}`;
+              scopeWire = `${scopeObj.kind}:${scopeObj.id}`;
             } else if (scopeObj && scopeObj.kind === "all") {
               scopeWire = "all";
             } else {

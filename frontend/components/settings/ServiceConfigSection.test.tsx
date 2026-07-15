@@ -63,6 +63,54 @@ describe("ServiceConfigSection", () => {
     expect(preview.textContent).toContain("未配置");
   });
 
+  it("renders an explicit warning when a required API key is missing", () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const onTest = vi.fn().mockResolvedValue({ ok: false, latency_ms: 0, message: "no" });
+    render(
+      <ServiceConfigSection
+        title="LLM"
+        description="x"
+        provider="openai"
+        model="gpt-4o-mini"
+        baseUrl="https://api.openai.com/v1"
+        apiKey={missingApiKey}
+        onSave={onSave}
+        onTest={onTest}
+      />,
+    );
+    expect(screen.getByTestId("LLM-missing-key-warning")).toHaveTextContent(
+      "当前未配置 API Key",
+    );
+  });
+
+  it("renders provider-specific help as the provider changes", () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const onTest = vi.fn().mockResolvedValue({ ok: true, latency_ms: 100, message: "ok" });
+    render(
+      <ServiceConfigSection
+        title="LLM"
+        description="x"
+        provider="openai"
+        model="gpt-4o-mini"
+        baseUrl="https://api.openai.com/v1"
+        apiKey={sampleApiKey}
+        providerOptions={["openai", "deepseek"]}
+        providerHelp={{
+          deepseek: "DeepSeek 只作为 LLM provider，Embedding 需要单独配置。",
+        }}
+        onSave={onSave}
+        onTest={onTest}
+      />,
+    );
+    expect(screen.queryByTestId("LLM-provider-hint")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("LLM-provider"), {
+      target: { value: "deepseek" },
+    });
+    expect(screen.getByTestId("LLM-provider-hint")).toHaveTextContent(
+      "Embedding 需要单独配置",
+    );
+  });
+
   it("omits api_key from the patch when the key input is left blank", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     const onTest = vi.fn().mockResolvedValue({ ok: true, latency_ms: 1, message: "ok" });

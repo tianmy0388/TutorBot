@@ -606,9 +606,7 @@ export const useTutorStore = create<TutorState>()(
           started_at: j.started_at ? Date.parse(j.started_at) : null,
           finished_at: j.finished_at ? Date.parse(j.finished_at) : null,
           event_count: j.event_count,
-          error: j.error
-            ? { code: "JOB_ERROR", message: j.error }
-            : null,
+          error: j.error ?? null,
         };
         jobsById[j.job_id] = seeded;
         jobOrder.push(j.job_id);
@@ -636,7 +634,8 @@ export const useTutorStore = create<TutorState>()(
       );
       if (reapedJobs.length > 0 && messagesWithInterrupt.length > 0) {
         const lastReap = reapedJobs[0];
-        const isTimeout = lastReap.error.includes("timed out");
+        const reapError = lastReap.error ?? "";
+        const isTimeout = reapError.includes("timed out");
         const interruptionMsg: ChatMessage = {
           id: `interrupted-${lastReap.job_id}`,
           role: "system",
@@ -647,7 +646,7 @@ export const useTutorStore = create<TutorState>()(
           metadata: {
             job_id: lastReap.job_id,
             interrupted: true,
-            reason: lastReap.error,
+            reason: reapError,
           },
         };
         messagesWithInterrupt.push(interruptionMsg);
@@ -716,7 +715,7 @@ export const useTutorStore = create<TutorState>()(
               last_seq: detail.events?.length ?? 0,
               events: detail.events ?? [],
               result: (detail.result as any) ?? null,
-              error: detail.error,
+              error: detail.error?.message ?? null,
               event_count: detail.event_count,
             },
           },

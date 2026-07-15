@@ -327,6 +327,18 @@ class RuntimeConfigService:
         s = self._get_settings()
         llm_secret = s.llm_api_key or os.environ.get("TUTOR_LLM_API_KEY", "")
         embed_secret = s.embed_api_key or os.environ.get("TUTOR_EMBED_API_KEY", "")
+        embed_hint = ""
+        if s.llm_provider == "deepseek" and not embed_secret:
+            embed_hint = (
+                "DeepSeek is only used as the LLM provider here. Configure a separate "
+                "Embedding provider/key for knowledge-base indexing and retrieval."
+            )
+        elif s.embed_provider == "deepseek":
+            embed_hint = (
+                "DeepSeek embedding is kept for compatibility, but the demo preset "
+                "expects a dedicated embedding provider such as OpenAI, OpenRouter, "
+                "Zhipu, Ollama, or a custom OpenAI-compatible endpoint."
+            )
         # Web-search uses a runtime-override-only model: the API key is
         # read straight from os.environ (because MCP / SearXNG / Bing
         # may consume it from a separate config). When the provider is
@@ -355,7 +367,7 @@ class RuntimeConfigService:
                 "model": s.embed_model,
                 "base_url": s.embed_base_url,
                 "dimensions": s.embed_dimensions,
-                "api_key": mask_key(embed_secret).model_dump(),
+                "api_key": mask_key(embed_secret, hint=embed_hint).model_dump(),
             },
             "web_search": {
                 "enabled": s.web_search_enabled,
@@ -548,7 +560,7 @@ def _test_llm(svc: RuntimeConfigService | None = None) -> dict[str, Any]:
         # Most providers expose ``call``; fall back to a one-shot
         # ``stream`` collection if not.
         try:
-            resp = provider.call(req)  # type: ignore[attr-defined]
+            resp = _run_async_from_sync(provider.call(req))  # type: ignore[attr-defined]
             resp_text = getattr(resp, "content", "") or ""
         except (NotImplementedError, AttributeError):
             resp_text = _collect_one_stream(provider, req)
@@ -570,6 +582,39 @@ def _test_llm(svc: RuntimeConfigService | None = None) -> dict[str, Any]:
             "message": f"{type(exc).__name__}: {exc}",
             "code": _classify_error(exc),
         }
+
+
+def _run_async_from_sync(coro):  # type: ignore[no-untyped-def]
+    """Run an async operation from sync config-test endpoints."""
+    import asyncio as _asyncio
+    import threading
+
+    try:
+        loop = _asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None or not loop.is_running():
+        return _asyncio.run(coro)
+
+    result_box: list[Any] = []
+    err_box: list[BaseException] = []
+
+    def _worker() -> None:
+        new_loop = _asyncio.new_event_loop()
+        try:
+            _asyncio.set_event_loop(new_loop)
+            result_box.append(new_loop.run_until_complete(coro))
+        except BaseException as exc:  # noqa: BLE001
+            err_box.append(exc)
+        finally:
+            new_loop.close()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join()
+    if err_box:
+        raise err_box[0]
+    return result_box[0] if result_box else None
 
 
 async def _async_collect_one_stream(provider, req) -> str:  # type: ignore[no-untyped-def]
@@ -629,7 +674,6 @@ def _collect_one_stream(provider, req) -> str:  # type: ignore[no-untyped-def]
 
 def _test_embedding(svc: RuntimeConfigService | None = None) -> dict[str, Any]:
     import time as _time
-    import asyncio as _asyncio
 
     s = svc._get_settings() if svc is not None else get_settings()
     started = _time.monotonic()
@@ -640,7 +684,7 @@ def _test_embedding(svc: RuntimeConfigService | None = None) -> dict[str, Any]:
         embedder = get_runtime_embedder(s)
         # ``embedder.embed`` is async. We must drive it to completion
         # regardless of whether the caller is inside a running loop.
-        resp = _asyncio.run(embedder.embed(EmbedRequest(input=["ping"])))
+        resp = _run_async_from_sync(embedder.embed(EmbedRequest(input=["ping"])))
         vec = resp.vectors
         latency_ms = int((_time.monotonic() - started) * 1000)
         return {

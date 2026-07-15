@@ -273,6 +273,16 @@ class ResourcePackageStore:
                 session.add(pkg_row)
 
                 for r in package.resources:
+                    resource_metadata = dict(r.metadata or {})
+                    resource_metadata.setdefault(
+                        "_evidence",
+                        {
+                            "citations": list(r.citations or []),
+                            "review": dict(r.review or {}),
+                            "safety": dict(r.safety or {}),
+                            "unverified_claims": list(r.unverified_claims or []),
+                        },
+                    )
                     session.add(
                         ResourceRow(
                             resource_id=r.resource_id,
@@ -289,7 +299,7 @@ class ResourcePackageStore:
                             confidence_score=float(r.confidence_score),
                             topic=r.topic or "",
                             tags=list(r.tags or []),
-                            resource_metadata=dict(r.metadata or {}),
+                            resource_metadata=resource_metadata,
                             created_at=r.created_at,
                         )
                     )
@@ -507,6 +517,8 @@ class ResourcePackageStore:
 
     @staticmethod
     def _row_to_resource(row: ResourceRow) -> Resource:
+        metadata = dict(row.resource_metadata or {})
+        evidence = metadata.get("_evidence") if isinstance(metadata.get("_evidence"), dict) else {}
         return Resource(
             resource_id=row.resource_id,
             type=row.type,  # ResourceType enum is str-typed
@@ -521,7 +533,15 @@ class ResourcePackageStore:
             topic=row.topic or "",
             tags=list(row.tags or []),
             created_at=row.created_at,
-            metadata=dict(row.resource_metadata or {}),
+            metadata=metadata,
+            citations=list(evidence.get("citations") or metadata.get("citations") or []),
+            review=dict(evidence.get("review") or metadata.get("review") or {}),
+            safety=dict(evidence.get("safety") or metadata.get("safety") or {}),
+            unverified_claims=list(
+                evidence.get("unverified_claims")
+                or metadata.get("unverified_claims")
+                or []
+            ),
         )
 
     @classmethod

@@ -98,6 +98,7 @@ function resourceEvent(
 
 function jobTerminalEvent(partialArtifacts: unknown[]): StreamEvent {
   return {
+    ...RESOURCE_BASE,
     type: "job_terminal",
     source: "job_runner",
     stage: "terminal",
@@ -121,7 +122,6 @@ function jobTerminalEvent(partialArtifacts: unknown[]): StreamEvent {
       },
     },
     seq: 100,
-    ...RESOURCE_BASE,
     event_id: "evt-terminal",
   };
 }
@@ -129,6 +129,15 @@ function jobTerminalEvent(partialArtifacts: unknown[]): StreamEvent {
 describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOURCE content", () => {
   beforeEach(() => {
     cleanup();
+    vi.stubGlobal(
+      "fetch",
+      async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+        text: async () => "",
+      }),
+    );
     mockStoreState.latestPackage = null;
     mockStoreState.setLatestPackage.mockClear();
     mockStoreState.applyStreamEvent.mockClear();
