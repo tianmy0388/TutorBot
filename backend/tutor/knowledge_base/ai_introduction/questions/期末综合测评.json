@@ -1,0 +1,101 @@
+{
+  "topic": "人工智能导论期末综合测评",
+  "course": "ai_introduction",
+  "version": "1.0.0",
+  "questions": [
+    {
+      "id": "final-001",
+      "type": "single_choice",
+      "difficulty": 2,
+      "knowledge_point": "机器学习基础",
+      "question": "验证集的主要作用是什么？",
+      "options": ["A. 更新模型参数", "B. 选择超参数并监控泛化能力", "C. 替代训练集", "D. 保存模型日志"],
+      "answer": "B",
+      "explanation": "验证集用于模型选择和超参数调整，测试集应保留到最终评估。"
+    },
+    {
+      "id": "final-002",
+      "type": "multiple_choice",
+      "difficulty": 3,
+      "knowledge_point": "深度学习",
+      "question": "下列哪些方法通常用于缓解深层网络训练问题？",
+      "options": ["A. 残差连接", "B. 归一化", "C. 合理初始化", "D. 永远增大学习率"],
+      "answer": "ABC",
+      "explanation": "残差、归一化和初始化能改善梯度传播；学习率需要调度而不是无限增大。"
+    },
+    {
+      "id": "final-003",
+      "type": "short_answer",
+      "difficulty": 4,
+      "knowledge_point": "注意力机制",
+      "question": "解释缩放点积注意力中除以 sqrt(d_k) 的原因。",
+      "answer_outline": "维度增大时点积方差随 d_k 增大，softmax 容易进入饱和区；缩放可稳定数值和梯度。",
+      "explanation": "回答应同时说明数值尺度、softmax 饱和和梯度稳定性。"
+    },
+    {
+      "id": "final-004",
+      "type": "single_choice",
+      "difficulty": 3,
+      "knowledge_point": "Transformer",
+      "question": "多头注意力的核心价值是什么？",
+      "options": ["A. 删除位置编码", "B. 在不同表示子空间并行建模关系", "C. 取消前馈网络", "D. 保证零幻觉"],
+      "answer": "B",
+      "explanation": "多个头可以在不同投影子空间关注不同关系，再拼接融合。"
+    },
+    {
+      "id": "final-005",
+      "type": "short_answer",
+      "difficulty": 4,
+      "knowledge_point": "RAG",
+      "question": "为什么 RAG 评测不能只看最终回答是否流畅？",
+      "answer_outline": "流畅不代表正确或有证据；还需评估召回、引用、忠实度、未支持声明、延迟与成本。",
+      "explanation": "应区分检索质量、生成质量和系统质量。"
+    },
+    {
+      "id": "final-006",
+      "type": "multiple_choice",
+      "difficulty": 4,
+      "knowledge_point": "智能体工程",
+      "question": "长时间多智能体任务需要哪些可靠性机制？",
+      "options": ["A. 状态持久化", "B. 幂等与重试", "C. 进度流式展示", "D. 隐藏所有失败"],
+      "answer": "ABC",
+      "explanation": "失败应透明呈现并允许恢复，不能静默隐藏。"
+    },
+    {
+      "id": "final-007",
+      "type": "true_false",
+      "difficulty": 3,
+      "knowledge_point": "防幻觉",
+      "question": "只要模型给出较高 confidence_score，就可以不提供来源。",
+      "answer": false,
+      "explanation": "模型自报置信度不能替代外部证据，关键事实仍需引用或标记为未验证。"
+    },
+    {
+      "id": "final-008",
+      "type": "short_answer",
+      "difficulty": 5,
+      "knowledge_point": "个性化学习",
+      "question": "设计一个实验，证明资源推荐确实使用了学生画像。",
+      "answer_outline": "固定主题和模型，构造视觉初学者与代码型进阶者两种画像；比较资源类型、难度、路径和推荐理由，并与无画像基线进行专家评分。",
+      "explanation": "需要控制变量、明确基线、指标和可重复过程。"
+    },
+    {
+      "id": "final-009",
+      "type": "code",
+      "difficulty": 4,
+      "knowledge_point": "向量检索",
+      "question": "用 NumPy 编写余弦相似度函数，并返回查询向量与候选向量的相似度。",
+      "answer_outline": "对向量做 L2 归一化，再计算矩阵乘法；需处理零向量。",
+      "explanation": "重点考查向量化、归一化和边界条件。"
+    },
+    {
+      "id": "final-010",
+      "type": "short_answer",
+      "difficulty": 5,
+      "knowledge_point": "安全与伦理",
+      "question": "学生画像系统应如何落实最小必要原则？",
+      "answer_outline": "只收集完成学习目标所需数据，说明用途和保留期，限制访问，支持查看与删除，日志脱敏，演示使用合成数据。",
+      "explanation": "回答应覆盖收集、使用、存储、访问和删除全生命周期。"
+    }
+  ]
+}

@@ -11,10 +11,14 @@ const mocks = vi.hoisted(() => {
     setLatestAssessment: vi.fn(),
     setLatestStrategy: vi.fn(),
     setSessionId: vi.fn(),
+    jobsById: {},
   };
   return {
     listDemoScenarios: vi.fn(),
     loadDemoScenario: vi.fn(),
+    submitDemoCheckpoint: vi.fn(),
+    subscribe: vi.fn(),
+    refresh: vi.fn().mockResolvedValue(undefined),
     storeState,
   };
 });
@@ -22,11 +26,20 @@ const mocks = vi.hoisted(() => {
 vi.mock("@/lib/api", () => ({
   listDemoScenarios: (...args: unknown[]) => mocks.listDemoScenarios(...args),
   loadDemoScenario: (...args: unknown[]) => mocks.loadDemoScenario(...args),
+  submitDemoCheckpoint: (...args: unknown[]) =>
+    mocks.submitDemoCheckpoint(...args),
 }));
 
 vi.mock("@/lib/store", () => ({
   useTutorStore: (selector: (s: typeof mocks.storeState) => unknown) =>
     selector(mocks.storeState),
+}));
+
+vi.mock("@/hooks/useJobQueue", () => ({
+  useJobQueue: () => ({
+    subscribe: mocks.subscribe,
+    refresh: mocks.refresh,
+  }),
 }));
 
 import DemoPage from "./page";
@@ -36,6 +49,10 @@ describe("DemoPage", () => {
     cleanup();
     mocks.listDemoScenarios.mockReset();
     mocks.loadDemoScenario.mockReset();
+    mocks.submitDemoCheckpoint.mockReset();
+    mocks.subscribe.mockReset();
+    mocks.refresh.mockReset();
+    mocks.refresh.mockResolvedValue(undefined);
     Object.values(mocks.storeState).forEach((value) => {
       if (typeof value === "function" && "mockReset" in value) {
         value.mockReset();
@@ -95,6 +112,57 @@ describe("DemoPage", () => {
     expect(screen.getByTestId("demo-export-pdf")).not.toBeDisabled();
     expect(mocks.storeState.setProfile).toHaveBeenCalled();
     expect(mocks.storeState.setLatestPackage).toHaveBeenCalled();
+  });
+
+  it("updates the visible mastery after the checkpoint", async () => {
+    mocks.listDemoScenarios.mockResolvedValueOnce({
+      items: [buildDemoResult().scenario],
+    });
+    mocks.loadDemoScenario.mockResolvedValueOnce(buildDemoResult());
+    mocks.submitDemoCheckpoint.mockResolvedValueOnce({
+      correct: true,
+      concept: "attention",
+      previous_mastery: 0.34,
+      updated_mastery: 0.54,
+      profile_version: 4,
+      recommendation: "进入 Transformer 编码器结构。",
+      next_path_node: "transformer",
+    });
+
+    render(<DemoPage />);
+    fireEvent.click(await screen.findByTestId("demo-load-seeded"));
+    fireEvent.click(await screen.findByTestId("demo-checkpoint-B"));
+
+    expect(await screen.findByTestId("demo-checkpoint-result")).toHaveTextContent(
+      "34% → 54%",
+    );
+    expect(mocks.submitDemoCheckpoint).toHaveBeenCalledWith(
+      "ai_intro_competition",
+      expect.objectContaining({ user_id: "u-test", answer: "B" }),
+    );
+  });
+
+  it("subscribes to the real job returned by live mode", async () => {
+    mocks.listDemoScenarios.mockResolvedValueOnce({
+      items: [buildDemoResult().scenario],
+    });
+    mocks.loadDemoScenario.mockResolvedValueOnce({
+      ...buildDemoResult(),
+      mode: "live",
+      live_job_id: "job-live-1",
+      live_job_status: "pending",
+    });
+
+    render(<DemoPage />);
+    fireEvent.click(await screen.findByTestId("demo-load-live"));
+
+    expect(await screen.findByTestId("demo-live-job")).toHaveTextContent(
+      "job-live-1",
+    );
+    expect(mocks.subscribe).toHaveBeenCalledWith(
+      "job-live-1",
+      "resource_generation",
+    );
   });
 });
 
@@ -288,6 +356,20 @@ function buildDemoResult() {
     },
     runtime_warnings: ["Embedding API key is not configured."],
     live_prompt: "请生成学习资源",
+    mode: "seeded",
+    live_job_id: "",
+    live_job_status: "",
+    checkpoint: {
+      id: "attention-scale-checkpoint",
+      concept: "attention",
+      question: "为什么除以 sqrt(d_k)？",
+      options: [
+        { value: "A", label: "减少序列长度" },
+        { value: "B", label: "稳定点积尺度" },
+      ],
+      answer: "B",
+      difficulty: 3,
+    },
     loaded_at: createdAt,
   };
 }

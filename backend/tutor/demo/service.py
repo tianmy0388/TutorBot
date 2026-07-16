@@ -9,6 +9,8 @@ from typing import Any
 
 from tutor.demo.schema import (
     AgentTraceEvent,
+    DemoCheckpointRequest,
+    DemoCheckpointResult,
     DemoLoadRequest,
     DemoLoadResult,
     DemoScenario,
@@ -20,6 +22,8 @@ from tutor.services.learning_events.schema import LearningEvent
 from tutor.services.learning_events.store import get_learning_event_store
 from tutor.services.resource_package.schema import ResourcePackage
 from tutor.services.resource_package.store import get_resource_package_store
+from tutor.services.jobs import JobSubmit, get_job_runner
+from tutor.services.learner_profile.builder import ExerciseResult, get_profile_builder
 
 
 class DemoScenarioNotFound(KeyError):
@@ -68,13 +72,24 @@ class DemoService:
             }
         )
 
-        if req.persist:
+        if req.persist or req.mode == "live":
             await self._persist_snapshot(
                 user_id=user_id,
                 profile=profile,
                 package=package,
                 events=raw.get("events") or [],
             )
+
+        live_job_id = ""
+        live_job_status = ""
+        if req.mode == "live":
+            live_job = await self._submit_live_job(
+                scenario=scenario,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            live_job_id = live_job.job_id
+            live_job_status = live_job.status.value
 
         return DemoLoadResult(
             scenario=scenario,
@@ -93,6 +108,85 @@ class DemoService:
             teacher_panel=dict(raw.get("teacher_panel", {})),
             runtime_warnings=self._runtime_warnings(),
             live_prompt=scenario.live_prompt,
+            mode=req.mode,
+            live_job_id=live_job_id,
+            live_job_status=live_job_status,
+            checkpoint=dict(raw.get("checkpoint", {})),
+        )
+
+    async def submit_checkpoint(
+        self,
+        scenario_id: str,
+        request: DemoCheckpointRequest,
+    ) -> DemoCheckpointResult:
+        raw = self._load_by_id(scenario_id)
+        checkpoint = dict(raw.get("checkpoint") or {})
+        concept = str(checkpoint.get("concept") or "attention")
+        expected = str(checkpoint.get("answer") or "").strip().casefold()
+        correct = request.answer.strip().casefold() == expected
+
+        builder = get_profile_builder()
+        profile = await builder.get(request.user_id)
+        previous_mastery = float(profile.knowledge_map.scores.get(concept, 0.0))
+        updated, _ = await builder.ingest_exercise(
+            request.user_id,
+            ExerciseResult(
+                concept=concept,
+                correct=correct,
+                difficulty=int(checkpoint.get("difficulty") or 3),
+                elapsed_seconds=request.elapsed_seconds,
+                mistake_type=None if correct else "conceptual_misunderstanding",
+                note=f"competition checkpoint answer={request.answer}",
+            ),
+        )
+        updated_mastery = float(updated.knowledge_map.scores.get(concept, 0.0))
+        if correct:
+            recommendation = "掌握度提升，下一步进入 Transformer 编码器结构。"
+            next_path_node = "transformer"
+        else:
+            recommendation = "继续学习注意力机制，并重做 Q/K/V 代码实验。"
+            next_path_node = concept
+
+        return DemoCheckpointResult(
+            correct=correct,
+            concept=concept,
+            previous_mastery=previous_mastery,
+            updated_mastery=updated_mastery,
+            profile_version=updated.version,
+            recommendation=recommendation,
+            next_path_node=next_path_node,
+        )
+
+    async def _submit_live_job(
+        self,
+        *,
+        scenario: DemoScenario,
+        user_id: str,
+        session_id: str,
+    ):
+        runner = get_job_runner()
+        return await runner.submit(
+            JobSubmit(
+                user_id=user_id,
+                session_id=session_id,
+                message=scenario.live_prompt,
+                capability="resource_generation",
+                language="zh",
+                metadata={
+                    "course": scenario.course,
+                    "knowledge_base_id": scenario.course,
+                    "retrieval_scope": f"course:{scenario.course}",
+                    "rag_enabled": True,
+                    "demo_scenario_id": scenario.id,
+                    "selected_resource_types": [
+                        "document",
+                        "mindmap",
+                        "exercise",
+                        "reading",
+                        "code",
+                    ],
+                },
+            )
         )
 
     async def _persist_snapshot(
@@ -125,11 +219,11 @@ class DemoService:
         warnings: list[str] = []
         if settings.llm_provider == "deepseek":
             warnings.append(
-                "DeepSeek is configured as the LLM provider. Embedding still needs a separate provider/key for vector indexing."
+                "DeepSeek 当前仅作为大模型服务；向量检索仍需单独配置 Embedding 服务。"
             )
         if not settings.embed_api_key and settings.embed_provider not in {"ollama"}:
             warnings.append(
-                "Embedding API key is not configured. Knowledge-base ingestion may fall back or fail depending on the provider settings."
+                "尚未配置 Embedding 密钥，知识库向量化与语义检索可能降级。"
             )
         return warnings
 

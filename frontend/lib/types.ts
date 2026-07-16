@@ -697,6 +697,25 @@ export interface AgentTraceEvent {
   artifacts: string[];
 }
 
+export interface DemoCheckpoint {
+  id: string;
+  concept: string;
+  question: string;
+  options: Array<{ value: string; label: string }>;
+  answer: string;
+  difficulty: number;
+}
+
+export interface DemoCheckpointResult {
+  correct: boolean;
+  concept: string;
+  previous_mastery: number;
+  updated_mastery: number;
+  profile_version: number;
+  recommendation: string;
+  next_path_node: string;
+}
+
 export interface DemoLoadResult {
   scenario: DemoScenario;
   user_id: string;
@@ -711,6 +730,10 @@ export interface DemoLoadResult {
   teacher_panel: Record<string, unknown>;
   runtime_warnings: string[];
   live_prompt: string;
+  mode: "seeded" | "live";
+  live_job_id: string;
+  live_job_status: string;
+  checkpoint: DemoCheckpoint;
   loaded_at: string;
 }
 

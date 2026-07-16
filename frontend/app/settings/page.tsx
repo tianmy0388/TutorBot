@@ -35,6 +35,7 @@ const LLM_PROVIDERS = [
   "openai",
   "anthropic",
   "deepseek",
+  "spark",
   "azure_openai",
   "ollama",
   "custom",
@@ -153,6 +154,8 @@ export default function SettingsPage() {
         providerHelp={{
           deepseek:
             "DeepSeek 在本项目中只作为 LLM 生成/对话 provider；知识库向量检索仍需要单独配置 Embedding provider 和 key。",
+          spark:
+            "讯飞星火使用开放平台 APIPassword，默认兼容地址为 https://spark-api-open.xf-yun.com/v1，推荐模型 4.0Ultra。Embedding 仍需单独配置。",
         }}
         onSave={async (patch) => {
           const next = await updateLLMConfig(patch as any);

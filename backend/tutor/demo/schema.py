@@ -42,6 +42,26 @@ class DemoLoadRequest(BaseModel):
     mode: Literal["seeded", "live"] = "seeded"
 
 
+class DemoCheckpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = "competition-demo"
+    answer: str
+    elapsed_seconds: int = Field(default=30, ge=0, le=3600)
+
+
+class DemoCheckpointResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    correct: bool
+    concept: str
+    previous_mastery: float
+    updated_mastery: float
+    profile_version: int
+    recommendation: str
+    next_path_node: str
+
+
 class AgentTraceEvent(BaseModel):
     """One visible multi-agent step for the demo timeline."""
 
@@ -77,11 +97,17 @@ class DemoLoadResult(BaseModel):
     teacher_panel: dict[str, Any]
     runtime_warnings: list[str] = Field(default_factory=list)
     live_prompt: str = ""
+    mode: Literal["seeded", "live"] = "seeded"
+    live_job_id: str = ""
+    live_job_status: str = ""
+    checkpoint: dict[str, Any] = Field(default_factory=dict)
     loaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 __all__ = [
     "AgentTraceEvent",
+    "DemoCheckpointRequest",
+    "DemoCheckpointResult",
     "DemoLoadRequest",
     "DemoLoadResult",
     "DemoScenario",

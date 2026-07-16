@@ -11,6 +11,7 @@ import type {
   ConfigTestResult,
   CourseGraph,
   CourseListResponse,
+  DemoCheckpointResult,
   DemoLoadResult,
   DemoScenario,
   EmbeddingSectionPatch,
@@ -157,6 +158,18 @@ export const loadDemoScenario = (
 ) =>
   request<DemoLoadResult>(
     `/demo/scenarios/${encodeURIComponent(scenarioId)}/load`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+
+export const submitDemoCheckpoint = (
+  scenarioId: string,
+  body: { user_id: string; answer: string; elapsed_seconds?: number },
+) =>
+  request<DemoCheckpointResult>(
+    `/demo/scenarios/${encodeURIComponent(scenarioId)}/checkpoint`,
     {
       method: "POST",
       body: JSON.stringify(body),

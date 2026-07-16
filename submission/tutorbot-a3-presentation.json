@@ -1,0 +1,167 @@
+{
+  "type": "presentation",
+  "version": "1.0",
+  "presentationTitle": "TutorBot 个性化学习多智能体系统",
+  "companyName": "中国软件杯 A3 参赛团队",
+  "theme": "editorial-wide",
+  "accentColor": "#0F9D8A",
+  "designTokens": {
+    "scale": "md",
+    "density": "balanced",
+    "shape": "sharp",
+    "typography": {
+      "fontStrategy": "system-safe",
+      "heroTitleSize": 38
+    }
+  },
+  "slides": [
+    {
+      "pattern": "title",
+      "content": {
+        "title": "TutorBot",
+        "subtitle": "基于大模型的个性化资源生成与学习多智能体系统"
+      }
+    },
+    {
+      "pattern": "statement",
+      "content": {
+        "title": "学生缺的不是更多资料，而是适合自己的下一步",
+        "prose": [
+          "海量资源缺少顺序、难度和可信来源，统一教学无法持续适配每位学生。",
+          "TutorBot 把学习目标、历史、错误和偏好转成可执行路径，并用练习结果持续更新。"
+        ]
+      }
+    },
+    {
+      "pattern": "dashboard",
+      "content": {
+        "title": "一条可验证的个性化学习闭环",
+        "subtitle": "目标 → 诊断 → 画像 → 资源 → 练习 → 评测 → 调整",
+        "kpis": [
+          { "label": "画像维度", "value": "6", "sublabel": "随学随新", "trend": "up" },
+          { "label": "资源类型", "value": "5+", "sublabel": "文档到代码/视频", "trend": "up" },
+          { "label": "核心能力", "value": "5", "sublabel": "画像/生成/路径/辅导/评测", "trend": "flat" },
+          { "label": "课程节点", "value": "11", "sublabel": "完整 AI 导论", "trend": "up" }
+        ]
+      }
+    },
+    {
+      "pattern": "bullets",
+      "content": {
+        "title": "六维画像不是标签，而是有证据的动态状态",
+        "bulletPoints": [
+          "知识基础：按概念记录掌握度与薄弱点",
+          "认知风格：视觉、分析、实践等偏好",
+          "易错模式：错误类型、频次与具体样例",
+          "学习节奏：时间预算、资源块长度与复习间隔",
+          "动机目标：课程、竞赛、项目与紧迫度",
+          "模态偏好：文本、图示、视频、代码和练习"
+        ]
+      }
+    },
+    {
+      "pattern": "bullets",
+      "content": {
+        "title": "多智能体不是角色命名，而是可追踪的生产流水线",
+        "subtitle": "每一步有结构化输入、输出、耗时、工件和终态",
+        "bulletPoints": [
+          "画像 Agent 识别基础、偏好和错误模式",
+          "路径 Agent 根据知识图谱与先修关系规划顺序",
+          "内容、教学、习题、代码和视频 Agent 并行生产",
+          "质量审核与防幻觉 Agent 执行发布门控",
+          "Job 持久化支持取消、断线恢复、部分失败和定向重试"
+        ]
+      }
+    },
+    {
+      "pattern": "comparison",
+      "content": {
+        "title": "同一个主题，两种画像，两套学习方案",
+        "subtitle": "用反事实对比证明个性化真正生效",
+        "prose": [
+          "视觉型初学者：思维导图、短动画、基础手算题、12 分钟资源块。",
+          "代码型进阶者：NumPy/PyTorch 实验、论文阅读、挑战题和项目任务。"
+        ],
+        "bulletPoints": [
+          "控制主题、知识库和模型，仅改变画像",
+          "比较资源类型、难度、顺序和推荐理由",
+          "与无画像基线进行教师评分"
+        ]
+      }
+    },
+    {
+      "pattern": "bullets",
+      "content": {
+        "title": "五类资源形成互补，而不是重复改写",
+        "bulletPoints": [
+          "课程讲解文档：分层解释概念、公式和学习建议",
+          "知识思维导图：呈现结构、先修关系和易混模块",
+          "分层练习：基础、进阶、挑战与错因回写",
+          "拓展阅读：论文、课程知识库和待验证声明",
+          "代码实操：受限沙箱执行、标准输出和图片工件",
+          "可选 Manim 视频与 PPT：长任务独立渲染并追踪进度"
+        ]
+      }
+    },
+    {
+      "pattern": "dashboard",
+      "content": {
+        "title": "可信生成：每份资源都带证据",
+        "kpis": [
+          { "label": "来源", "value": "citations", "sublabel": "论文与课程知识库", "trend": "flat" },
+          { "label": "质量", "value": "review", "sublabel": "通过/修改/拒绝", "trend": "flat" },
+          { "label": "安全", "value": "safety", "sublabel": "风险等级与说明", "trend": "flat" },
+          { "label": "不确定性", "value": "claims", "sublabel": "未验证内容显式提示", "trend": "flat" }
+        ]
+      }
+    },
+    {
+      "pattern": "bullets",
+      "content": {
+        "title": "现场演示：固定快照保稳定，真实 Job 证过程",
+        "bulletPoints": [
+          "加载演示数据：12 秒内讲清画像、路径、5 类资源、证据和策略",
+          "点击实时生成：返回真实 Job ID 并订阅流式阶段事件",
+          "展示代码执行输出、引用、质量审核与未验证声明",
+          "完成一次小测，说明画像和下一步推荐如何更新",
+          "导出 Markdown/PDF 学习报告"
+        ]
+      }
+    },
+    {
+      "pattern": "bullets",
+      "content": {
+        "title": "技术融合：讯飞星火 + RAG + 多智能体工程",
+        "bulletPoints": [
+          "讯飞星火 OpenAI 兼容接口作为比赛推荐 LLM provider",
+          "LlamaIndex 管理课程文档解析、向量检索和引用",
+          "知识图谱拓扑排序与画像剪枝生成动态路径",
+          "StreamBus + WebSocket 展示真实阶段和工件",
+          "SQLite 持久化画像、事件、资源包和 Job"
+        ]
+      }
+    },
+    {
+      "pattern": "dashboard",
+      "content": {
+        "title": "工程底座已经为比赛现场做过准备",
+        "kpis": [
+          { "label": "后端测试", "value": "500+", "sublabel": "单元/集成/E2E", "trend": "up" },
+          { "label": "前端测试", "value": "60+", "sublabel": "组件与状态机", "trend": "up" },
+          { "label": "课程讲义", "value": "12", "sublabel": "80 学时 AI 导论", "trend": "up" },
+          { "label": "一键启动", "value": "2", "sublabel": "start/stop 脚本", "trend": "flat" }
+        ]
+      }
+    },
+    {
+      "pattern": "statement",
+      "content": {
+        "title": "让每一次生成，都能回答三个问题",
+        "prose": [
+          "为什么适合这个学生？依据来自哪里？学习之后下一步如何变化？",
+          "TutorBot 把生成式 AI 从内容工具，变成可解释、可评测、可持续优化的学习系统。"
+        ]
+      }
+    }
+  ]
+}

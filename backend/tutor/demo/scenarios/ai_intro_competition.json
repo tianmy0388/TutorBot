@@ -13,6 +13,19 @@
   },
   "user_id": "competition-demo",
   "session_id": "demo-ai-intro",
+  "checkpoint": {
+    "id": "attention-scale-checkpoint",
+    "concept": "attention",
+    "question": "缩放点积注意力为什么要除以 sqrt(d_k)？",
+    "options": [
+      {"value": "A", "label": "减少序列长度"},
+      {"value": "B", "label": "稳定点积尺度，避免 softmax 过早饱和"},
+      {"value": "C", "label": "让所有注意力权重相同"},
+      {"value": "D", "label": "替代位置编码"}
+    ],
+    "answer": "B",
+    "difficulty": 3
+  },
   "profile": {
     "knowledge_map": {
       "scores": {
@@ -143,7 +156,8 @@
       "PedagogyAgent",
       "ExerciseGeneratorAgent",
       "QualityReviewerAgent",
-      "AntiHallucinationAgent"
+      "AntiHallucinationAgent",
+      "CodeSandboxAgent"
     ],
     "target_profile_snapshot": {
       "user_id": "competition-demo",
@@ -342,6 +356,59 @@
           "verdict": "safe",
           "risk_level": "low",
           "notes": "测验题无敏感内容。"
+        },
+        "unverified_claims": []
+      },
+      {
+        "resource_id": "demo_res_attention_code",
+        "type": "code",
+        "title": "Q/K/V 注意力权重可运行实验",
+        "content": "使用 NumPy 手算三个 token 的缩放点积注意力，并输出注意力权重和上下文向量。",
+        "format_specific": {
+          "language": "python",
+          "code": "import numpy as np\n\nQ = np.array([[1.0, 0.0]])\nK = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])\nV = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])\nscores = Q @ K.T / np.sqrt(K.shape[1])\nweights = np.exp(scores) / np.exp(scores).sum(axis=-1, keepdims=True)\ncontext = weights @ V\nprint('attention weights:', np.round(weights, 4))\nprint('context vector:', np.round(context, 4))",
+          "explanation": "代码把 QK^T、缩放、softmax 和对 V 的加权求和逐步显式化，适合公式到直觉存在缺口的学习者。",
+          "execution_status": "success",
+          "stdout": "attention weights: [[0.4011 0.1978 0.4011]]\ncontext vector: [[0.8022 0.5989]]",
+          "stderr": "",
+          "sandbox_url": null,
+          "error_code": null,
+          "execution_python": "Python 3.11+",
+          "dependency_versions": {
+            "numpy": "2.x"
+          },
+          "duration_seconds": 0.18,
+          "artifacts": []
+        },
+        "difficulty": 3,
+        "estimated_minutes": 15,
+        "prerequisites": ["attention"],
+        "generated_by": ["CodeSandboxAgent", "PedagogyAgent"],
+        "confidence_score": 0.9,
+        "topic": "Transformer 与注意力机制",
+        "tags": ["code", "numpy", "QKV"],
+        "metadata": {
+          "personalization": "面向喜欢动手练习的学生，把注意力公式转成可运行实验。"
+        },
+        "citations": [
+          {
+            "title": "Attention Is All You Need",
+            "url": "https://arxiv.org/abs/1706.03762",
+            "source": "paper",
+            "year": 2017
+          }
+        ],
+        "review": {
+          "verdict": "pass",
+          "quality_score": 0.89,
+          "issues": [],
+          "suggestions": ["可修改 Q/K/V 数值观察权重变化。"],
+          "reviewer": "QualityReviewerAgent"
+        },
+        "safety": {
+          "verdict": "safe",
+          "risk_level": "low",
+          "notes": "代码仅执行本地数值计算，无网络和文件访问。"
         },
         "unverified_claims": []
       },

@@ -20,7 +20,9 @@ from typing import Any, Literal
 class ModelSpec:
     """Concrete model configuration for a single provider call."""
 
-    provider: Literal["openai", "anthropic", "deepseek", "azure_openai", "ollama", "custom"]
+    provider: Literal[
+        "openai", "anthropic", "deepseek", "spark", "azure_openai", "ollama", "custom"
+    ]
     model: str
     api_key: str = ""
     base_url: str = ""

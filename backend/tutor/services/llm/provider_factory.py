@@ -19,6 +19,7 @@ from tutor.services.llm.openai_compat import OpenAICompatProvider
 _PROVIDERS: dict[str, type[LLMProvider]] = {
     "openai": OpenAICompatProvider,
     "deepseek": OpenAICompatProvider,
+    "spark": OpenAICompatProvider,
     "ollama": OpenAICompatProvider,
     "azure_openai": OpenAICompatProvider,
     "custom": OpenAICompatProvider,
@@ -65,6 +66,12 @@ def get_runtime_provider(
     # Per-provider defaults
     if provider_name == "deepseek" and not base_url:
         base_url = "https://api.deepseek.com/v1"
+    if provider_name == "spark" and (
+        not base_url or base_url == "https://api.openai.com/v1"
+    ):
+        base_url = "https://spark-api-open.xf-yun.com/v1"
+    if provider_name == "spark" and model == "gpt-4o-mini":
+        model = "4.0Ultra"
     if provider_name == "ollama" and not base_url:
         base_url = "http://localhost:11434/v1"
 

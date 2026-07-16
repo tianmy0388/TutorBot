@@ -55,6 +55,11 @@ async def test_jobs_kb_and_conversations_survive_restart(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        KnowledgeBaseService,
+        "_embed",
+        lambda self, chunks: ("offline-test", "offline", 0, []),
+    )
     reset_settings_cache()
     reset_job_store()
     reset_job_runner()

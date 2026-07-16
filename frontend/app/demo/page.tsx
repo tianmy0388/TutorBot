@@ -19,11 +19,16 @@ import {
 import {
   listDemoScenarios,
   loadDemoScenario,
+  submitDemoCheckpoint,
 } from "@/lib/api";
 import { useTutorStore } from "@/lib/store";
+import { useJobQueue } from "@/hooks/useJobQueue";
+import type { ClientJob } from "@/lib/job-reducer";
 import type {
   AgentTraceEvent,
   AssessmentReport,
+  DemoCheckpoint,
+  DemoCheckpointResult,
   DemoLoadResult,
   DemoScenario,
   LearnerProfileDetail,
@@ -53,6 +58,8 @@ export default function DemoPage() {
   const [loading, setLoading] = useState(true);
   const [loadingMode, setLoadingMode] = useState<DemoMode | null>(null);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [checkpointResult, setCheckpointResult] = useState<DemoCheckpointResult | null>(null);
+  const [submittingCheckpoint, setSubmittingCheckpoint] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const reportRef = useRef<HTMLDivElement | null>(null);
 
@@ -64,6 +71,10 @@ export default function DemoPage() {
   const setLatestAssessment = useTutorStore((s) => s.setLatestAssessment);
   const setLatestStrategy = useTutorStore((s) => s.setLatestStrategy);
   const setSessionId = useTutorStore((s) => s.setSessionId);
+  const liveJob = useTutorStore((s) =>
+    demo?.live_job_id ? s.jobsById[demo.live_job_id] : undefined,
+  );
+  const jobQueue = useJobQueue(userId);
 
   useEffect(() => {
     let alive = true;
@@ -92,6 +103,7 @@ export default function DemoPage() {
     if (!selectedScenario) return;
     setError(null);
     setLoadingMode(mode);
+    setCheckpointResult(null);
     try {
       const result = await loadDemoScenario(selectedScenario.id, {
         user_id: userId || "competition-demo",
@@ -106,10 +118,51 @@ export default function DemoPage() {
       setLatestAssessment(result.assessment as AssessmentReport);
       setLatestStrategy(result.strategy as StrategyDecision);
       if (result.session_id) setSessionId(result.session_id);
+      if (mode === "live" && result.live_job_id) {
+        await jobQueue.refresh();
+        jobQueue.subscribe(result.live_job_id, "resource_generation");
+      }
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
       setLoadingMode(null);
+    }
+  };
+
+  const handleCheckpoint = async (answer: string) => {
+    if (!demo) return;
+    setSubmittingCheckpoint(true);
+    setError(null);
+    try {
+      const result = await submitDemoCheckpoint(demo.scenario.id, {
+        user_id: demo.user_id,
+        answer,
+        elapsed_seconds: 20,
+      });
+      setCheckpointResult(result);
+      setDemo((current) => {
+        if (!current) return current;
+        const nextProfile: LearnerProfileDetail = {
+          ...current.profile,
+          version: result.profile_version,
+          knowledge_map: {
+            ...current.profile.knowledge_map,
+            [result.concept]: result.updated_mastery,
+          },
+          weak_concepts:
+            result.updated_mastery >= 0.6
+              ? current.profile.weak_concepts.filter(
+                  (concept) => concept !== result.concept,
+                )
+              : current.profile.weak_concepts,
+        };
+        setProfile(nextProfile);
+        return { ...current, profile: nextProfile };
+      });
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setSubmittingCheckpoint(false);
     }
   };
 
@@ -267,6 +320,13 @@ export default function DemoPage() {
 
         {demo && (
           <div ref={reportRef} className="space-y-5" data-testid="demo-report">
+            {demo.mode === "live" && demo.live_job_id && (
+              <LiveJobPanel
+                jobId={demo.live_job_id}
+                initialStatus={demo.live_job_status}
+                job={liveJob}
+              />
+            )}
             <RuntimeWarnings warnings={demo.runtime_warnings} />
             <SummaryBand demo={demo} />
 
@@ -282,6 +342,17 @@ export default function DemoPage() {
             <Panel title="学习闭环" icon={Route}>
               <LearningLoop items={demo.learning_loop} />
             </Panel>
+
+            {demo.checkpoint?.question && (
+              <Panel title="闭环验证小测" icon={CheckCircle2}>
+                <CheckpointPanel
+                  checkpoint={demo.checkpoint}
+                  result={checkpointResult}
+                  submitting={submittingCheckpoint}
+                  onAnswer={handleCheckpoint}
+                />
+              </Panel>
+            )}
 
             <div className="grid grid-cols-1 xl:grid-cols-[0.9fr_1.1fr] gap-4">
               <Panel title="学生画像与路径" icon={UserRound}>
@@ -307,6 +378,138 @@ export default function DemoPage() {
         )}
       </div>
     </div>
+  );
+}
+
+function CheckpointPanel({
+  checkpoint,
+  result,
+  submitting,
+  onAnswer,
+}: {
+  checkpoint: DemoCheckpoint;
+  result: DemoCheckpointResult | null;
+  submitting: boolean;
+  onAnswer: (answer: string) => void;
+}) {
+  return (
+    <div className="space-y-3" data-testid="demo-checkpoint">
+      <div>
+        <div className="text-xs text-fg-subtle">{checkpoint.concept}</div>
+        <p className="text-sm font-medium mt-1">{checkpoint.question}</p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        {checkpoint.options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            className="rounded-md border border-fg/10 bg-bg-card px-3 py-2 text-left text-sm hover:border-brand-400/40 hover:bg-brand-500/5 disabled:opacity-60"
+            disabled={submitting || result !== null}
+            onClick={() => onAnswer(option.value)}
+            data-testid={`demo-checkpoint-${option.value}`}
+          >
+            <span className="text-brand-300 mr-2">{option.value}</span>
+            {option.label}
+          </button>
+        ))}
+      </div>
+      {submitting && (
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          正在写入学习事件并更新画像
+        </div>
+      )}
+      {result && (
+        <div
+          className={cn(
+            "rounded-md border px-3 py-2 text-sm",
+            result.correct
+              ? "border-green-400/30 bg-green-500/10 text-green-100"
+              : "border-yellow-400/30 bg-yellow-500/10 text-yellow-100",
+          )}
+          data-testid="demo-checkpoint-result"
+        >
+          <div className="font-medium">
+            {result.correct ? "回答正确，画像已更新" : "需要巩固，路径已调整"}
+          </div>
+          <div className="text-xs mt-1 opacity-90">
+            {result.concept} 掌握度 {percent(result.previous_mastery)} → {percent(result.updated_mastery)} ·
+            画像 v{result.profile_version} · 下一节点 {result.next_path_node}
+          </div>
+          <div className="text-xs mt-1 opacity-90">{result.recommendation}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const LIVE_STAGE_LABELS: Record<string, string> = {
+  intent_understanding: "理解学习目标",
+  profile_loading: "读取学生画像",
+  knowledge_graph_query: "查询课程知识图谱",
+  resource_planning: "规划个性化资源",
+  content_and_pedagogy: "生成讲解与教学设计",
+  parallel_resource_generation: "并行生成多模态资源",
+  quality_review: "质量审核",
+  anti_hallucination: "事实核查与安全过滤",
+  package_assembly: "组装资源包",
+  path_integration: "更新学习路径",
+  persistence: "保存学习成果",
+};
+
+function LiveJobPanel({
+  jobId,
+  initialStatus,
+  job,
+}: {
+  jobId: string;
+  initialStatus: string;
+  job?: ClientJob;
+}) {
+  const status = job?.status || initialStatus || "pending";
+  const stageEvents = (job?.events || [])
+    .filter((event) => event.type === "stage_start" || event.type === "stage_end")
+    .slice(-8);
+  const activeStage = job?.stage || "等待任务启动";
+  const isTerminal = ["succeeded", "partial", "failed", "cancelled"].includes(status);
+
+  return (
+    <section
+      className="rounded-lg border border-brand-400/30 bg-brand-500/10 px-4 py-3"
+      data-testid="demo-live-job"
+    >
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-medium text-brand-100">
+            {isTerminal ? (
+              <CheckCircle2 className="w-4 h-4" />
+            ) : (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            )}
+            真实多智能体任务
+          </div>
+          <p className="text-xs text-fg-muted mt-1">
+            任务 {jobId} · 状态 {status} · 当前阶段 {LIVE_STAGE_LABELS[activeStage] || activeStage}
+          </p>
+        </div>
+        <div className="text-xs text-fg-muted">
+          已接收 {job?.event_count || 0} 条真实流式事件
+        </div>
+      </div>
+      {stageEvents.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-3">
+          {stageEvents.map((event, index) => (
+            <span
+              key={`${event.event_id || event.stage}-${index}`}
+              className="rounded-md border border-fg/10 bg-bg-card px-2 py-1 text-[11px] text-fg-muted"
+            >
+              {event.type === "stage_end" ? "完成" : "开始"}：
+              {LIVE_STAGE_LABELS[event.stage || ""] || event.stage || "未知阶段"}
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

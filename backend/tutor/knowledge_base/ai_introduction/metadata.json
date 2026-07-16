@@ -8,17 +8,22 @@
   "updated_at": "2026-06-19T00:00:00Z",
   "version": "1.0.0",
   "tags": ["AI", "机器学习", "深度学习", "神经网络", "LLM"],
-  "estimated_total_hours": 60,
+  "estimated_total_hours": 80,
   "prerequisites": ["Python 基础", "高等数学", "线性代数基础"],
   "rag_provider": "llamaindex",
   "embedding_model": "text-embedding-3-small",
   "raw_files": [
+    "00_课程大纲与学习指南.md",
     "01_什么是人工智能.md",
     "02_机器学习基础.md",
     "03_神经网络与深度学习.md",
     "04_CNN与计算机视觉.md",
     "05_RNN与序列建模.md",
     "06_Transformer与注意力机制.md",
-    "07_LLM与大语言模型.md"
+    "07_LLM与大语言模型.md",
+    "08_RAG与向量检索.md",
+    "09_智能体与工具调用.md",
+    "10_大模型评测安全与伦理.md",
+    "11_课程综合实践项目.md"
   ]
 }

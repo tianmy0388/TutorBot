@@ -168,8 +168,45 @@ def test_providers_constants_match_settings() -> None:
     # These constants are the source of truth for the HTTP API.
     assert "openai" in LLM_PROVIDERS
     assert "anthropic" in LLM_PROVIDERS
+    assert "spark" in LLM_PROVIDERS
     assert "openai" in EMBED_PROVIDERS
     assert "duckduckgo" in WEB_SEARCH_PROVIDERS
+
+
+def test_spark_provider_applies_official_openai_compatible_preset(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
+    _make_env(tmp_path)
+    reset_settings_cache()
+    from tutor.services.config.runtime import LLMSectionPatch
+
+    svc = RuntimeConfigService(env_path=tmp_path / ".env")
+    svc.apply_llm(LLMSectionPatch(provider="spark"))
+    contents = (tmp_path / ".env").read_text(encoding="utf-8")
+
+    assert "TUTOR_LLM_PROVIDER=spark" in contents
+    assert "TUTOR_LLM_MODEL=4.0Ultra" in contents
+    assert "TUTOR_LLM_BASE_URL=https://spark-api-open.xf-yun.com/v1" in contents
+
+
+def test_spark_provider_factory_uses_compatible_endpoint(monkeypatch) -> None:
+    monkeypatch.delenv("TUTOR_LLM_BASE_URL", raising=False)
+    from tutor.services.config.settings import Settings
+    from tutor.services.llm.provider_factory import get_runtime_provider
+
+    settings = Settings(
+        llm_provider="spark",
+        llm_model="4.0Ultra",
+        llm_api_key="fake-spark-api-password",
+        llm_base_url="",
+    )
+    provider = get_runtime_provider(settings)
+
+    assert provider.model == "4.0Ultra"
+    assert str(provider._client.base_url).rstrip("/") == (
+        "https://spark-api-open.xf-yun.com/v1"
+    )
 
 
 def test_mask_key_short_string() -> None:

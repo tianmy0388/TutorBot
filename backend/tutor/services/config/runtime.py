@@ -57,7 +57,7 @@ PROVIDER_LITERAL_FIELDS: dict[str, str] = {
 
 #: Allow-list of LLM providers (mirrors the Settings Literal).
 LLM_PROVIDERS: tuple[str, ...] = (
-    "openai", "anthropic", "deepseek", "azure_openai", "ollama", "custom",
+    "openai", "anthropic", "deepseek", "spark", "azure_openai", "ollama", "custom",
 )
 #: Allow-list of Web Search providers.
 WEB_SEARCH_PROVIDERS: tuple[str, ...] = (
@@ -496,6 +496,10 @@ class RuntimeConfigService:
 #: sets ``provider=zhipu`` AND ``model=embedding-2`` (deviance)
 #: keeps the manual override.
 _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    "spark": {
+        "model": "4.0Ultra",
+        "base_url": "https://spark-api-open.xf-yun.com/v1",
+    },
     "zhipu": {
         "model": "embedding-3",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",

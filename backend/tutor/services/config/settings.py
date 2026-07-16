@@ -136,7 +136,9 @@ class Settings(BaseSettings):
         return value
 
     # ---------- LLM ----------
-    llm_provider: Literal["openai", "anthropic", "deepseek", "azure_openai", "ollama", "custom"] = "openai"
+    llm_provider: Literal[
+        "openai", "anthropic", "deepseek", "spark", "azure_openai", "ollama", "custom"
+    ] = "openai"
     llm_model: str = "gpt-4o-mini"
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"

@@ -5,7 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from tutor.demo import DemoScenarioNotFound, get_demo_service
-from tutor.demo.schema import DemoLoadRequest, DemoLoadResult, DemoScenario
+from tutor.demo.schema import (
+    DemoCheckpointRequest,
+    DemoCheckpointResult,
+    DemoLoadRequest,
+    DemoLoadResult,
+    DemoScenario,
+)
 
 router = APIRouter()
 
@@ -27,6 +33,20 @@ async def load_demo_scenario(
             scenario_id,
             request or DemoLoadRequest(),
         )
+    except DemoScenarioNotFound:
+        raise HTTPException(status_code=404, detail="demo scenario not found")
+
+
+@router.post(
+    "/demo/scenarios/{scenario_id}/checkpoint",
+    response_model=DemoCheckpointResult,
+)
+async def submit_demo_checkpoint(
+    scenario_id: str,
+    request: DemoCheckpointRequest,
+) -> DemoCheckpointResult:
+    try:
+        return await get_demo_service().submit_checkpoint(scenario_id, request)
     except DemoScenarioNotFound:
         raise HTTPException(status_code=404, detail="demo scenario not found")
 

@@ -47,10 +47,11 @@ def test_plan_for_learner_with_nlp_path(fresh_service):
     profile.knowledge_map.set("ml_basics", 0.85)  # skipped (above threshold but not 0.95)
     plan = fresh_service.plan_for_learner("ai_introduction", profile, path_id="nlp_path")
     assert plan.path_id == "nlp_path"
-    # Sequence: ai_overview → ml_basics → neural_network → rnn → transformer → llm
+    # The NLP path now continues through RAG, agents, evaluation and capstone.
     seq = [n.node_id for n in plan.nodes]
     assert seq[0] == "ai_overview"
-    assert seq[-1] == "llm"
+    assert seq[-1] == "capstone"
+    assert "llm" in seq
     statuses = {n.node_id: n.status for n in plan.nodes}
     assert statuses["ai_overview"] == PathStatus.COMPLETED
     assert statuses["ml_basics"] == PathStatus.SKIPPED

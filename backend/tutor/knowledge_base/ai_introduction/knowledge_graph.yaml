@@ -92,6 +92,54 @@ nodes:
       - 了解 Prompt Engineering 与 RLHF
     source_file: 07_LLM与大语言模型.md
 
+  - id: rag
+    name: RAG 与向量检索
+    category: applications
+    difficulty: 4
+    prerequisites: [llm]
+    estimated_hours: 6
+    learning_outcomes:
+      - 理解文档解析、切分、向量化、召回与重排流程
+      - 能构建带来源引用的课程知识问答系统
+      - 能使用召回率与忠实度指标评估 RAG
+    source_file: 08_RAG与向量检索.md
+
+  - id: agents
+    name: 智能体与工具调用
+    category: applications
+    difficulty: 4
+    prerequisites: [llm]
+    estimated_hours: 6
+    learning_outcomes:
+      - 理解智能体的规划、记忆、工具和反思组件
+      - 能设计职责清晰的多智能体协作流程
+      - 能处理超时、重试、幂等与部分失败
+    source_file: 09_智能体与工具调用.md
+
+  - id: evaluation_safety
+    name: 大模型评测、安全与伦理
+    category: engineering
+    difficulty: 4
+    prerequisites: [llm]
+    estimated_hours: 5
+    learning_outcomes:
+      - 能设计准确性、忠实度、安全性与性能评测
+      - 理解提示注入、隐私泄露与生成内容标识风险
+      - 能编写可复现的模型应用测试报告
+    source_file: 10_大模型评测安全与伦理.md
+
+  - id: capstone
+    name: 个性化学习智能体综合项目
+    category: project
+    difficulty: 5
+    prerequisites: [rag, agents, evaluation_safety]
+    estimated_hours: 8
+    learning_outcomes:
+      - 完成一个可运行的个性化学习智能体
+      - 提交需求、设计、测试、部署和演示材料
+      - 用基线对比证明系统的个性化与可信性
+    source_file: 11_课程综合实践项目.md
+
 # ---------------------------------------------------------------------------
 # 边（先修关系）
 # ---------------------------------------------------------------------------
@@ -102,6 +150,12 @@ edges:
   - { from: neural_network, to: rnn, type: prerequisite }
   - { from: neural_network, to: transformer, type: prerequisite }
   - { from: transformer, to: llm, type: prerequisite }
+  - { from: llm, to: rag, type: prerequisite }
+  - { from: llm, to: agents, type: prerequisite }
+  - { from: llm, to: evaluation_safety, type: prerequisite }
+  - { from: rag, to: capstone, type: prerequisite }
+  - { from: agents, to: capstone, type: prerequisite }
+  - { from: evaluation_safety, to: capstone, type: prerequisite }
   - { from: rnn, to: transformer, type: related }
 
 # ---------------------------------------------------------------------------
@@ -116,9 +170,9 @@ learning_paths:
   - id: nlp_path
     name: 自然语言处理方向
     description: 偏向文本与序列建模
-    sequence: [ai_overview, ml_basics, neural_network, rnn, transformer, llm]
+    sequence: [ai_overview, ml_basics, neural_network, rnn, transformer, llm, rag, agents, evaluation_safety, capstone]
 
   - id: full_path
     name: 全栈 AI 工程师方向
     description: 完整学完所有章节
-    sequence: [ai_overview, ml_basics, neural_network, cnn, rnn, transformer, llm]
+    sequence: [ai_overview, ml_basics, neural_network, cnn, rnn, transformer, llm, rag, agents, evaluation_safety, capstone]

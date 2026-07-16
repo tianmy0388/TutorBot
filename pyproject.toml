@@ -93,9 +93,9 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourname/TutorBot"
-Documentation = "https://github.com/yourname/TutorBot/blob/main/docs/architecture.md"
-Repository = "https://github.com/yourname/TutorBot"
+Homepage = "https://github.com/tianmy0388/TutorBot"
+Documentation = "https://github.com/tianmy0388/TutorBot/blob/main/docs/architecture.md"
+Repository = "https://github.com/tianmy0388/TutorBot"
 
 [project.scripts]
 tutor = "tutor.cli.main:app"
