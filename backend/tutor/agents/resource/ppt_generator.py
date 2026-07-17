@@ -97,7 +97,58 @@ class PPTGeneratorAgent(BaseAgent):
             )
         )
         try:
-            pptx_path = await asyncio.shield(worker)
+            try:
+                pptx_path = await asyncio.shield(worker)
+            except Exception:  # noqa: BLE001
+                failure = public_failure(
+                    "PPT_RENDER_FAILED", "PPT rendering failed", retryable=True
+                )
+                logger.error("PPT_RENDER_FAILED agent={}", self.agent_name)
+                if stream is not None:
+                    await stream.error(
+                        "PPT rendering failed",
+                        source=self.agent_name,
+                        metadata=failure,
+                    )
+                # A failed renderer did not create a usable educational resource.
+                # Keep the typed diagnostic for trace/retry UI, but never retain
+                # the source document in this failed artifact.
+                resource.content = "PPT rendering failed. Please retry."
+                resource.format_specific = {
+                    "slide_count": 0,
+                    "pptx_path": None,
+                    "slide_titles": [],
+                    "failure": failure,
+                }
+                resource.confidence_score = 0.0
+                return resource
+
+            # Populate format_specific from the on-disk artifact.
+            try:
+                slide_titles, slide_count = _peek_pptx(pptx_path)
+            except Exception:  # noqa: BLE001
+                logger.warning("PPT_INSPECTION_FAILED file_usable=true")
+                slide_titles, slide_count = [], 0
+
+            payload = PPTResource(
+                slide_count=slide_count,
+                pptx_path=str(pptx_path),
+                slide_titles=slide_titles,
+            )
+            resource.format_specific = payload.model_dump()
+            resource.metadata["pptx_filename"] = os.path.basename(str(pptx_path))
+            resource.metadata["file_size"] = pptx_path.stat().st_size
+
+            if stream is not None:
+                await stream.observation(
+                    f"PPT 已生成 ({slide_count} 张): {pptx_path.name}",
+                    source=self.agent_name,
+                    metadata={
+                        "slide_count": slide_count,
+                        "package_id": pkg_id,
+                    },
+                )
+            return resource
         except asyncio.CancelledError:
             await _set_cancelled(cancel_event, publish_lock)
             with suppress(Exception):
@@ -110,56 +161,6 @@ class PPTGeneratorAgent(BaseAgent):
                     publish_lock=publish_lock,
                 )
             raise
-        except Exception:  # noqa: BLE001
-            failure = public_failure(
-                "PPT_RENDER_FAILED", "PPT rendering failed", retryable=True
-            )
-            logger.error("PPT_RENDER_FAILED agent={}", self.agent_name)
-            if stream is not None:
-                await stream.error(
-                    "PPT rendering failed",
-                    source=self.agent_name,
-                    metadata=failure,
-                )
-            # A failed renderer did not create a usable educational resource.
-            # Keep the typed diagnostic for trace/retry UI, but never retain
-            # the source document in this failed artifact.
-            resource.content = "PPT rendering failed. Please retry."
-            resource.format_specific = {
-                "slide_count": 0,
-                "pptx_path": None,
-                "slide_titles": [],
-                "failure": failure,
-            }
-            resource.confidence_score = 0.0
-            return resource
-
-        # Populate format_specific from the on-disk artifact.
-        try:
-            slide_titles, slide_count = _peek_pptx(pptx_path)
-        except Exception:  # noqa: BLE001
-            logger.warning("PPT_INSPECTION_FAILED file_usable=true")
-            slide_titles, slide_count = [], 0
-
-        payload = PPTResource(
-            slide_count=slide_count,
-            pptx_path=str(pptx_path),
-            slide_titles=slide_titles,
-        )
-        resource.format_specific = payload.model_dump()
-        resource.metadata["pptx_filename"] = os.path.basename(str(pptx_path))
-        resource.metadata["file_size"] = pptx_path.stat().st_size
-
-        if stream is not None:
-            await stream.observation(
-                f"PPT 已生成 ({slide_count} 张): {pptx_path.name}",
-                source=self.agent_name,
-                metadata={
-                    "slide_count": slide_count,
-                    "package_id": pkg_id,
-                },
-            )
-        return resource
 
 
 async def _set_cancelled(

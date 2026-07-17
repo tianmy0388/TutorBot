@@ -59,6 +59,20 @@ def _artifact_files(root: Path) -> list[Path]:
     return [path for path in root.rglob("*") if path.is_file()]
 
 
+def _render_complete(
+    slides: Any,
+    output_path: Path,
+    *,
+    title: str = "",
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    del slides, title
+    assert cancel_event is not None and not cancel_event.is_set()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"complete-pptx")
+    return output_path
+
+
 @pytest.mark.asyncio
 async def test_cancelled_ppt_worker_never_publishes_or_emits(
     tmp_path: Path,
@@ -196,6 +210,66 @@ def test_render_slides_honors_pre_cancel_before_writing(tmp_path: Path) -> None:
         )
 
     assert not output_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_preview_cancellation_removes_published_artifact_without_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def cancel_preview(_path: Path) -> tuple[list[str], int]:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("tutor.services.ppt.service.render_slides", _render_complete)
+    monkeypatch.setattr(
+        "tutor.agents.resource.ppt_generator._peek_pptx",
+        cancel_preview,
+    )
+    service = PPTGenerationService(output_dir=tmp_path / "ppt")
+    agent = PPTGeneratorAgent(ppt_service=service)
+    stream = StreamBus()
+    queue = stream.subscribe()
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent.process(
+            topic="Preview cancellation",
+            source_content="# Preview cancellation\n\n## One\ncontent",
+            stream=stream,
+        )
+
+    assert _artifact_files(tmp_path / "ppt") == []
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_observation_cancellation_removes_published_artifact_without_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CancellingObservationStream(StreamBus):
+        async def observation(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("tutor.services.ppt.service.render_slides", _render_complete)
+    monkeypatch.setattr(
+        "tutor.agents.resource.ppt_generator._peek_pptx",
+        lambda _path: (["Intro"], 1),
+    )
+    service = PPTGenerationService(output_dir=tmp_path / "ppt")
+    agent = PPTGeneratorAgent(ppt_service=service)
+    stream = CancellingObservationStream()
+    queue = stream.subscribe()
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent.process(
+            topic="Observation cancellation",
+            source_content="# Observation cancellation\n\n## One\ncontent",
+            stream=stream,
+        )
+
+    assert _artifact_files(tmp_path / "ppt") == []
+    assert queue.empty()
 
 
 @pytest.mark.asyncio
