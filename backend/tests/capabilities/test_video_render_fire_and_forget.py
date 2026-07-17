@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -308,11 +309,95 @@ async def test_stale_video_owner_cannot_overwrite_new_owner_package_or_terminal(
 
     assert durable is not None and durable.status == JobStatus.SUCCEEDED
     assert sum(event.get("type") == "job_terminal" for event in durable.events) == 1
+    assert not any(event.get("type") == "resource" for event in durable.events)
     assert reloaded is not None
     assert (
         reloaded.resources[0].format_specific["video_url"]
         == "https://cdn.example.com/owner-2.mp4"
     )
+    await second_store.close()
+    await first_store.close()
+    await package_store.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_guard_holds_generation_stable_through_resource_commit(
+    tmp_path,
+) -> None:
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    package_store = ResourcePackageStore(tmp_path / "packages.db")
+    await package_store.init()
+    package = ResourcePackage(topic="t", resources=[_video_resource()])
+    await package_store.save(package, user_id="local-user")
+    first_store = JobStore(tmp_path / "jobs.db")
+    await first_store.init()
+    second_store = JobStore(tmp_path / "jobs.db")
+    await second_store.init()
+    parent = Job(
+        job_id="guard-parent",
+        user_id="local-user",
+        status=JobStatus.SUCCEEDED,
+    )
+    await first_store.save(parent)
+    spec = ResourceGenerationCapability._video_follow_up_specs(package, parent.user_id)[0]
+    child = (await FollowUpScheduler(first_store).enqueue(parent.job_id, (spec,)))[0]
+    old = await first_store.claim_child(
+        child.job_id,
+        owner="old-owner",
+        lease_seconds=60,
+    )
+    assert old is not None
+    snapshot = await package_store.get(package.package_id)
+    assert snapshot is not None
+    stale_resource = snapshot.resources[0]
+    stale_resource.format_specific["render_status"] = "ready"
+    stale_resource.format_specific["video_url"] = "https://cdn.example.com/old.mp4"
+    operation_entered = asyncio.Event()
+    release_operation = asyncio.Event()
+
+    async def persist_stale_resource() -> None:
+        operation_entered.set()
+        await release_operation.wait()
+        await package_store.update_resource(
+            package.package_id,
+            stale_resource,
+            user_id="local-user",
+        )
+
+    guarded_write = asyncio.create_task(
+        first_store.run_if_current_claim(
+            child.job_id,
+            owner="old-owner",
+            generation=old.claim_generation,
+            operation=persist_stale_resource,
+        )
+    )
+    await asyncio.wait_for(operation_entered.wait(), timeout=2)
+    assert old.claim_expires_at is not None
+    replacement_claim = asyncio.create_task(
+        second_store.claim_child(
+            child.job_id,
+            owner="new-owner",
+            lease_seconds=2,
+            now=old.claim_expires_at + timedelta(seconds=1),
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not replacement_claim.done()
+
+    release_operation.set()
+    assert await asyncio.wait_for(guarded_write, timeout=2)
+    new = await asyncio.wait_for(replacement_claim, timeout=2)
+    assert new is not None
+    assert new.claim_generation == old.claim_generation + 1
+    reloaded = await package_store.get(package.package_id)
+    assert reloaded is not None
+    assert (
+        reloaded.resources[0].format_specific["video_url"]
+        == "https://cdn.example.com/old.mp4"
+    )
+
     await second_store.close()
     await first_store.close()
     await package_store.close()

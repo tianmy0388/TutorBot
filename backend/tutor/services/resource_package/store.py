@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -324,11 +324,8 @@ class ResourcePackageStore:
         resource: Resource,
         *,
         user_id: str,
-        claim_validator: Callable[[], Awaitable[bool]] | None = None,
     ) -> Resource:
         """Atomically replace one resource row without rewriting siblings."""
-        if claim_validator is not None and not await claim_validator():
-            raise PermissionError("follow-up claim is no longer current")
         self._ensure_engine()
         assert self._write_lock is not None
         async with self._write_lock, self._with_session() as session:

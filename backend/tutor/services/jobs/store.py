@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -517,6 +518,46 @@ class JobStore:
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=UTC)
         return expires_at > datetime.now(UTC)
+
+    async def run_if_current_claim(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        generation: int,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> bool:
+        """Run an external commit while fencing replacement job claims.
+
+        The operation must not call this JobStore: the jobs write transaction
+        stays open until it returns so another process cannot advance the
+        claim generation between validation and the external commit.
+        """
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if (
+                row is None
+                or row.parent_job_id is None
+                or row.status != JobStatus.RUNNING.value
+                or row.claim_owner != owner
+                or int(row.claim_generation or 0) != generation
+                or row.claim_expires_at is None
+            ):
+                return False
+            expires_at = row.claim_expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if expires_at <= datetime.now(UTC):
+                return False
+            await operation()
+            return True
 
     async def append_event(
         self,

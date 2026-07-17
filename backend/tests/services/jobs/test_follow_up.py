@@ -961,6 +961,42 @@ async def test_shutdown_job_runner_clears_singleton_after_gather(
 
 
 @pytest.mark.asyncio
+async def test_sync_reset_requests_shutdown_and_cancels_outstanding_tasks(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from tutor.services.jobs import runner as runner_module
+
+    store = JobStore(tmp_path / "jobs.db")
+    await store.init()
+    runner = JobRunner(
+        job_store=store,
+        capability_registry=_CapabilitiesStub(),  # type: ignore[arg-type]
+    )
+    cancelled = asyncio.Event()
+
+    async def block() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    task = asyncio.create_task(block())
+    runner._claim_retry_tasks["retry"] = task
+    monkeypatch.setattr(runner_module, "_runner", runner)
+    await asyncio.sleep(0)
+
+    runner_module.reset_job_runner()
+    await asyncio.sleep(0)
+
+    assert cancelled.is_set()
+    assert task.done()
+    assert runner._shutting_down
+    assert runner_module._runner is None
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_expired_claim_recovers_and_active_old_claim_retries_after_lease_expiry(
     tmp_path,
     monkeypatch,

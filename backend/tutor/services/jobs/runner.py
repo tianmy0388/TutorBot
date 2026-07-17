@@ -170,6 +170,13 @@ class JobRunner:
         self._tasks[job.job_id] = task
         task.add_done_callback(lambda t, jid=job.job_id: self._on_task_done(jid, t))
 
+    def request_shutdown(self) -> None:
+        """Synchronously stop accepting work and request task cancellation."""
+        self._shutting_down = True
+        for task in (*self._tasks.values(), *self._claim_retry_tasks.values()):
+            if not task.done():
+                task.cancel()
+
     async def cancel(self, job_id: str, *, user_id: str | None = None) -> bool:
         """Cancel a PENDING or RUNNING job."""
         job = await self.store.get(job_id)
@@ -396,7 +403,16 @@ class JobRunner:
                     generation=job.claim_generation,
                 )
 
+            async def _claim_guard(operation) -> bool:  # type: ignore[no-untyped-def]
+                return await self.store.run_if_current_claim(
+                    job.job_id,
+                    owner=str(job.claim_owner or ""),
+                    generation=job.claim_generation,
+                    operation=operation,
+                )
+
             context_metadata["_claim_validator"] = _claim_validator
+            context_metadata["_claim_guard"] = _claim_guard
             context_metadata["_claim_generation"] = job.claim_generation
         context = UnifiedContext(
             session_id=job.session_id,
@@ -970,14 +986,12 @@ class JobRunner:
 
     async def shutdown(self) -> None:
         """Cancel and gather all in-process execution and lease-monitor tasks."""
-        self._shutting_down = True
         tasks = {
             task
             for task in (*self._tasks.values(), *self._claim_retry_tasks.values())
             if not task.done()
         }
-        for task in tasks:
-            task.cancel()
+        self.request_shutdown()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
@@ -1230,8 +1244,17 @@ def get_job_runner() -> JobRunner:
 
 
 def reset_job_runner() -> None:
+    """Detach the singleton and synchronously request cancellation.
+
+    Active callers should prefer ``await shutdown_job_runner()`` so cancelled
+    tasks are also gathered before teardown continues.
+    """
     global _runner
-    _runner = None
+    with _runner_lock:
+        runner = _runner
+        _runner = None
+    if runner is not None:
+        runner.request_shutdown()
 
 
 async def shutdown_job_runner() -> None:

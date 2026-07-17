@@ -64,6 +64,7 @@ class VideoRenderFollowUpCapability(BaseCapability):
         package_id = str(context.metadata.get("package_id") or "")
         resource_id = str(context.metadata.get("resource_id") or "")
         claim_validator = context.metadata.get("_claim_validator")
+        claim_guard = context.metadata.get("_claim_guard")
 
         async def require_current_claim() -> None:
             if callable(claim_validator) and not await claim_validator():
@@ -97,18 +98,16 @@ class VideoRenderFollowUpCapability(BaseCapability):
             emit_resource=False,
         )
         await require_current_claim()
-        await package_store.update_resource(
-            package.package_id,
-            resource,
-            user_id=context.user_id,
-            claim_validator=(claim_validator if callable(claim_validator) else None),
-        )
-        await require_current_claim()
-        await stream.resource(
-            resource,
-            source="resource_capability",
-            stage="video_rendering",
-        )
+
+        async def persist_resource() -> None:
+            await package_store.update_resource(
+                package.package_id,
+                resource,
+                user_id=context.user_id,
+            )
+
+        if not callable(claim_guard) or not await claim_guard(persist_resource):
+            raise PermissionError("follow-up claim is no longer current")
         render_status = str(
             (resource.format_specific or {}).get("render_status") or "failed"
         )
