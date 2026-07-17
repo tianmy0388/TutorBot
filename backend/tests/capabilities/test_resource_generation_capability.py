@@ -10,12 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.agents.resource.code_sandbox import CodeSandboxAgent
 from tutor.agents.resource.content_expert import ContentExpertAgent
 from tutor.agents.resource.exercise_generator import ExerciseGeneratorAgent
@@ -29,7 +26,6 @@ from tutor.core.context import UnifiedContext
 from tutor.core.stream import StreamEventType
 from tutor.core.stream_bus import StreamBus
 from tutor.services.learner_profile.builder import (
-    ProfileBuilder,
     get_profile_builder,
 )
 from tutor.services.learner_profile.store import (
@@ -39,7 +35,6 @@ from tutor.services.resource_package.schema import (
     ResourceType,
     ReviewVerdict,
 )
-
 
 # ---------------------------------------------------------------------------
 # Smart mock LLM
@@ -311,7 +306,7 @@ async def fresh_builder(tmp_path, monkeypatch):
     await builder.initialize()
 
     # Seed a learner with some mastery
-    from tutor.services.learner_profile.schema import LearnerProfile, CognitiveStyle
+    from tutor.services.learner_profile.schema import CognitiveStyle, LearnerProfile
 
     profile = LearnerProfile(user_id="alice")
     profile.knowledge_map.set("ai_overview", 0.95)
@@ -351,8 +346,14 @@ def capability(fresh_builder):
 
 
 @pytest.mark.asyncio
-async def test_full_pipeline_emits_all_stages(capability, fresh_builder):
+async def test_full_pipeline_emits_all_stages(capability, fresh_builder, tmp_path):
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    package_store = ResourcePackageStore(db_path=tmp_path / "resource_packages.db")
+    await package_store.init()
+    capability.package_store = package_store
     context = UnifiedContext(
+        job_id="job-resource-generation",
         user_id="alice",
         user_message="系统学习 LSTM",
         language="zh",
@@ -386,6 +387,11 @@ async def test_full_pipeline_emits_all_stages(capability, fresh_builder):
     assert "parallel_resource_generation" in stages_started
     assert "quality_review" in stages_started
     assert "path_integration" in stages_started
+
+    packages = await capability._store.list_for_session(context.session_id)
+    assert len(packages) == 1
+    assert packages[0].originating_job_id == "job-resource-generation"
+    await package_store.close()
 
     # Done event at the end
     done_events = [t for t, _ in events if t == "done"]
@@ -546,7 +552,7 @@ class _CannedReviewer:
     def __init__(self, verdicts: list[str]):
         self._verdicts = list(verdicts)
         self.agent_name = "canned_reviewer"
-        from tutor.services.resource_package.schema import ReviewVerdict, ResourceReview
+        from tutor.services.resource_package.schema import ResourceReview
 
         self._map = {
             "pass": ReviewVerdict.PASS,
@@ -584,12 +590,13 @@ async def test_rejected_resources_filtered_from_package(capability, fresh_builde
     Drive the filter logic by attaching a canned reviewer and
     pre-built package, then asserting the package shrinks.
     """
+    import uuid
+
     from tutor.services.resource_package.schema import (
         Resource,
         ResourcePackage,
         ResourceType,
     )
-    import uuid
 
     pkg = ResourcePackage(
         package_id=f"pkg_{uuid.uuid4().hex[:8]}",
@@ -645,7 +652,7 @@ async def test_rejected_resources_filtered_from_package(capability, fresh_builde
 
     # Apply the same post-filter logic that's in run().
     review_by_id = {r.resource_id: r for r in reviews}
-    for idx, r in enumerate(pkg.resources):
+    for r in pkg.resources:
         rev = review_by_id.get(r.resource_id)
         if rev is not None:
             r.metadata["review"] = {
@@ -682,12 +689,13 @@ async def test_prefilter_drops_failed_video_resources():
     Drive the pre-filter helper directly so the test is fast and
     focused.
     """
+    import uuid
+
     from tutor.services.resource_package.schema import (
         Resource,
         ResourcePackage,
         ResourceType,
     )
-    import uuid
 
     pkg = ResourcePackage(
         package_id=f"pkg_{uuid.uuid4().hex[:8]}",
@@ -771,12 +779,13 @@ async def test_prefilter_drops_failed_video_resources():
 @pytest.mark.asyncio
 async def test_prefilter_no_op_when_nothing_failed():
     """When no resources have render_status=failed, the filter is a no-op."""
+    import uuid
+
     from tutor.services.resource_package.schema import (
         Resource,
         ResourcePackage,
         ResourceType,
     )
-    import uuid
 
     pkg = ResourcePackage(
         package_id=f"pkg_{uuid.uuid4().hex[:8]}",
@@ -885,7 +894,7 @@ async def test_intent_understanding_fallback_keyword():
 @pytest.mark.asyncio
 async def test_resource_planning_respects_modality():
     """Resource planner should include diagram/mindmap type when modality is 'diagram'."""
-    from tutor.agents.resource.intent_understanding import Intent, parse_intent_keyword
+    from tutor.agents.resource.intent_understanding import Intent
     from tutor.services.resource_package.schema import ResourceType
 
     cap = ResourceGenerationCapability.__new__(ResourceGenerationCapability)

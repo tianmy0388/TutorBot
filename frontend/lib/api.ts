@@ -526,7 +526,8 @@ export interface RecoveryWarning {
   code:
     | "migrated_ownership"
     | "interrupted_job_repaired"
-    | "missing_artifact";
+    | "missing_artifact"
+    | "recovery_association_missing";
   message: string;
   job_id?: string | null;
   package_id?: string | null;

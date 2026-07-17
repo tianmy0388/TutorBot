@@ -212,13 +212,36 @@ async def download_resource_file(
     user_id: str, package_id: str, resource_id: str, request: Request
 ) -> FileResponse:
     """Download an on-disk artifact for a resource (e.g. the .pptx file)."""
-    user_id = identity_policy_for(request).resolve(user_id)
+    policy = identity_policy_for(request)
+    user_id = policy.resolve(user_id)
     store = get_resource_package_store()
     res = await store.get_resource(resource_id)
     if res is None:
         raise HTTPException(status_code=404, detail="resource not found")
     pkg = await store.get(package_id)
-    if pkg is None or (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
+    from sqlalchemy import select
+
+    from tutor.services.resource_package.store import ResourceRow
+
+    store._ensure_engine()  # noqa: SLF001
+    async with store._with_session() as session:  # noqa: SLF001
+        row = (
+            await session.execute(
+                select(ResourceRow).where(ResourceRow.resource_id == resource_id)
+            )
+        ).scalar_one_or_none()
+    if (
+        pkg is None
+        or row is None
+        or row.package_id != package_id
+        or (
+            policy.multi_user_enabled
+            and (
+                (pkg.metadata or {}).get("user_id", "anonymous") != user_id
+                or row.user_id != user_id
+            )
+        )
+    ):
         raise HTTPException(status_code=404, detail="resource not found")
 
     # Currently only PPT resources have on-disk artifacts; route by type.
@@ -425,10 +448,11 @@ def _resolve_stored_artifact(raw: str, *, is_key: bool) -> Path:
         if is_key:
             return resolve_artifact_key(raw, data_dir)
         legacy = Path(raw)
-        if legacy.is_absolute():
-            key = to_artifact_key(legacy, data_dir)
-        else:
-            key = raw.replace("\\", "/")
+        key = (
+            to_artifact_key(legacy, data_dir)
+            if legacy.is_absolute()
+            else raw.replace("\\", "/")
+        )
         return resolve_artifact_key(key, data_dir)
     except UnsafeArtifactKey:
         raise HTTPException(

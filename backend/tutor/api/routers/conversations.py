@@ -96,9 +96,10 @@ async def get_conversation_aggregate(
     Returns a single payload containing:
 
       * the conversation header + message history
-      * jobs filtered by ``session_id`` (newest first, capped by ``jobs_limit``)
-      * resource package summaries filtered by ``session_id`` (newest first,
-        capped by ``packages_limit``)
+      * jobs filtered by ``session_id`` (newest capped window, returned
+        chronologically)
+      * resource packages filtered by ``session_id`` (newest capped window,
+        returned chronologically)
 
     The front-end uses this when the user clicks a history row so it
     can replace ``jobsById`` / ``latestPackage`` / chat messages in one
@@ -186,8 +187,28 @@ def _mark_missing_artifacts(packages, jobs):
     from tutor.services.resource_package.store import portable_format_specific
 
     data_dir = get_settings().data_dir
+    eligible_jobs = [
+        job
+        for job in jobs
+        if job.get("capability") == "resource_generation"
+        and job.get("status") in {"succeeded", "failed", "partial"}
+    ]
+
+    def recovery_parent_for(package):
+        job_id = package.originating_job_id
+        if job_id:
+            parent = next(
+                (job for job in eligible_jobs if job.get("job_id") == job_id),
+                None,
+            )
+            return parent, parent is None
+        if len(eligible_jobs) == 1:
+            return eligible_jobs[0], False
+        return None, True
+
     recovered = []
     warnings: list[RecoveryWarning] = []
+    association_warned: set[str] = set()
     for package in packages:
         resources = []
         for resource in package.resources:
@@ -242,36 +263,28 @@ def _mark_missing_artifacts(packages, jobs):
                 metadata["artifact_missing"] = True
                 metadata["missing_artifact_keys"] = missing
                 if not metadata.get("recovery_contract"):
-                    preferred_job_id = (package.metadata or {}).get("job_id")
-                    retry_parent = next(
-                        (
-                            job
-                            for job in reversed(jobs)
-                            if job.get("capability") == "resource_generation"
-                            and job.get("status") in {"succeeded", "failed", "partial"}
-                            and (
-                                not preferred_job_id
-                                or job.get("job_id") == preferred_job_id
-                            )
-                        ),
-                        None,
-                    )
-                    if retry_parent is None:
-                        retry_parent = next(
-                            (
-                                job
-                                for job in reversed(jobs)
-                                if job.get("capability") == "resource_generation"
-                                and job.get("status")
-                                in {"succeeded", "failed", "partial"}
-                            ),
-                            None,
-                        )
+                    retry_parent, association_missing = recovery_parent_for(package)
                     if retry_parent:
                         metadata["recovery_contract"] = {
                             "job_id": retry_parent.get("job_id"),
                             "resource_types": [resource.type.value],
                         }
+                    elif (
+                        association_missing
+                        and package.package_id not in association_warned
+                    ):
+                        warnings.append(
+                            RecoveryWarning(
+                                code="recovery_association_missing",
+                                message=(
+                                    "The missing artifact cannot be associated with "
+                                    "one generation job safely."
+                                ),
+                                package_id=package.package_id,
+                                resource_id=resource.resource_id,
+                            )
+                        )
+                        association_warned.add(package.package_id)
                 resource = resource.model_copy(
                     update={"format_specific": fs, "metadata": metadata}
                 )

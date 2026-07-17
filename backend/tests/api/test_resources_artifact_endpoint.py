@@ -467,5 +467,44 @@ async def test_legacy_url_normalizes_local_but_preserves_external(
     assert external_response.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_ppt_download_local_mode_accepts_historical_owner_but_multi_denies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+
+    data_dir = tmp_path / "data"
+    pptx = data_dir / "ppt" / "legacy-package" / "deck.pptx"
+    pptx.parent.mkdir(parents=True)
+    pptx.write_bytes(b"pptx")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        resource_id="ppt-download-resource",
+        type=ResourceType.PPT,
+        title="Legacy deck",
+        format_specific={"pptx_path": str(pptx), "slide_count": 1},
+    )
+    package = ResourcePackage(
+        package_id="legacy-package",
+        topic="legacy",
+        resources=[resource],
+    )
+    await isolated_store.save(package, user_id="historical-owner")
+    path = (
+        f"/api/v1/resources/packages/stale-browser/{package.package_id}/resources/"
+        f"{resource.resource_id}/download"
+    )
+
+    local_response = _make_client(multi_user_enabled=False).get(path)
+    multi_response = _make_client(multi_user_enabled=True).get(path)
+
+    assert local_response.status_code == 200, local_response.text
+    assert local_response.content == b"pptx"
+    assert multi_response.status_code == 404
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))

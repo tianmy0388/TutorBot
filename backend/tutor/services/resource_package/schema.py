@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -30,13 +30,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from tutor.services.artifacts import UnsafeArtifactKey, resolve_artifact_key
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
 
-class ResourceType(str, Enum):
+class ResourceType(str, Enum):  # noqa: UP042 - persisted enum compatibility
     """All supported resource types (≥6 per idea.md)."""
 
     DOCUMENT = "document"      # 课程讲解文档 (Markdown)
@@ -48,7 +47,7 @@ class ResourceType(str, Enum):
     PPT = "ppt"                # PPT 教案 (optional, Phase 5)
 
 
-class ReviewVerdict(str, Enum):
+class ReviewVerdict(str, Enum):  # noqa: UP042 - persisted enum compatibility
     """Outcome of a quality review."""
 
     PASS = "pass"
@@ -73,7 +72,7 @@ class ArtifactRef(BaseModel):
     path: str | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
-    def _promote_legacy_relative_path(self) -> "ArtifactRef":
+    def _promote_legacy_relative_path(self) -> ArtifactRef:
         if self.artifact_key is None and self.path:
             try:
                 candidate = resolve_artifact_key(self.path, Path("."))
@@ -258,7 +257,7 @@ class Resource(BaseModel):
     confidence_score: float = 0.7
     topic: str = ""
     tags: list[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------
@@ -306,7 +305,7 @@ class Resource(BaseModel):
         return max(0.0, min(1.0, float(v)))
 
     @model_validator(mode="after")
-    def _validate_format_specific(self) -> "Resource":
+    def _validate_format_specific(self) -> Resource:
         expected_type = self.type
         expected_key = _format_specific_key(expected_type)
         if not self.format_specific:
@@ -352,7 +351,7 @@ class ResourceReview(BaseModel):
     issues: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     reviewer: str = "QualityReviewerAgent"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_validator("quality_score")
     @classmethod
@@ -378,9 +377,20 @@ class ResourcePackage(BaseModel):
     target_profile_snapshot: dict[str, Any] = Field(default_factory=dict)
     # ^ snapshot of LearnerProfile.to_summary() at generation time
     learning_path_summary: dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     generated_by: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def originating_job_id(self) -> str | None:
+        """Return the generation job explicitly associated with this package."""
+        value = self.metadata.get("job_id")
+        return str(value) if value else None
+
+    def associate_originating_job(self, job_id: str | None) -> None:
+        """Persist a typed association using the compatible metadata field."""
+        if job_id:
+            self.metadata["job_id"] = str(job_id)
 
     # ------------------------------------------------------------------
     # Convenience

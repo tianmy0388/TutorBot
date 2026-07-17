@@ -22,13 +22,12 @@ persistence layer.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from tutor.services.resource_package.schema import ResourcePackage
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -40,6 +39,7 @@ RecoveryWarningCode = Literal[
     "migrated_ownership",
     "interrupted_job_repaired",
     "missing_artifact",
+    "recovery_association_missing",
 ]
 
 
@@ -59,7 +59,7 @@ class Message(BaseModel):
     job_id: str | None = None
     # The capability that produced the assistant message, if any.
     capability: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -73,8 +73,8 @@ class Conversation(BaseModel):
     title: str = ""
     message_count: int = 0
     last_message_preview: str = ""
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ConversationDetail(Conversation):

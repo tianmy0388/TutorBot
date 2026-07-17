@@ -8,17 +8,14 @@ and a ``job_terminal`` event must be broadcast with the same contract.
 from __future__ import annotations
 
 import asyncio
-import json
-from datetime import datetime, timezone
 
 import pytest
-
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.jobs.contracts import JobResultContract
 from tutor.services.jobs.runner import JobRunner
-from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
-from tutor.services.jobs.store import JobStore, get_job_store, reset_job_store
+from tutor.services.jobs.schema import JobStatus, JobSubmit
+from tutor.services.jobs.store import get_job_store, reset_job_store
 
 
 class _FakeCapability:
@@ -26,8 +23,10 @@ class _FakeCapability:
 
     def __init__(self, payload: dict) -> None:
         self._payload = payload
+        self.context_job_id: str | None = None
 
     async def run(self, context: UnifiedContext, bus: StreamBus) -> None:  # noqa: D401
+        self.context_job_id = context.job_id
         await bus.result(self._payload, source="fake")
         await bus.done()
 
@@ -83,6 +82,7 @@ async def test_runner_persists_succeeded_contract(tmp_path, monkeypatch) -> None
     assert contract.status.value == "succeeded"
     assert contract.job_id == job.job_id
     assert contract.capability == "tutoring"
+    assert cap.context_job_id == job.job_id
 
     await store.close()
     reset_job_store()

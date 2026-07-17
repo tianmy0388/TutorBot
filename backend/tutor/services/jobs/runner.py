@@ -33,14 +33,14 @@ import threading
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
-from functools import lru_cache
+from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
+from pydantic import ValidationError
 
 from tutor.core.context import UnifiedContext
-from tutor.core.stream import StreamEvent
 from tutor.core.stream_bus import StreamBus
 from tutor.runtime.registry.capability_registry import (
     CapabilityRegistry,
@@ -54,7 +54,6 @@ from tutor.services.jobs.contracts import (
 )
 from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
 from tutor.services.jobs.store import JobStore, get_job_store
-from pydantic import ValidationError
 
 
 class JobRunner:
@@ -135,7 +134,7 @@ class JobRunner:
         await self.store.update_status(
             job_id,
             status=JobStatus.CANCELLED,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(UTC),
             error="cancelled by user",
         )
         # Broadcast a cancellation event
@@ -150,7 +149,7 @@ class JobRunner:
                 "session_id": job.session_id,
                 "turn_id": "",
                 "seq": 0,
-                "timestamp": datetime.now(timezone.utc).timestamp(),
+                "timestamp": datetime.now(UTC).timestamp(),
                 "event_id": uuid.uuid4().hex,
             },
         )
@@ -222,9 +221,11 @@ class JobRunner:
         # Lightweight lock context manager; we don't want to block event
         # delivery on a heavyweight lock.
         class _Null:
-            def __enter__(self_): return self_
+            def __enter__(self):
+                return self
 
-            def __exit__(self_, *args): return False
+            def __exit__(self, *args):
+                return False
 
         return _Null()
 
@@ -269,7 +270,7 @@ class JobRunner:
 
         cap = self.capabilities.get(job.capability)
         if cap is None:
-            finished_at = datetime.now(timezone.utc)
+            finished_at = datetime.now(UTC)
             contract = JobResultContract(
                 job_id=job.job_id,
                 capability=job.capability,
@@ -296,7 +297,7 @@ class JobRunner:
         await self.store.update_status(
             job.job_id,
             status=JobStatus.RUNNING,
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
         self._running_user[job.job_id] = job.user_id
 
@@ -304,6 +305,7 @@ class JobRunner:
         # we can subscribe_iter() to it cleanly.
         context = UnifiedContext(
             session_id=job.session_id,
+            job_id=job.job_id,
             user_id=job.user_id,
             user_message=job.message,
             language=job.language,
@@ -354,7 +356,7 @@ class JobRunner:
                     await asyncio.wait_for(run_task, timeout=timeout_seconds)
                 else:
                     await run_task
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 nonlocal timeout_exceeded
                 timeout_exceeded = True
                 run_task.cancel()
@@ -423,7 +425,7 @@ class JobRunner:
                     "session_id": job.session_id,
                     "turn_id": "",
                     "seq": 0,
-                    "timestamp": datetime.now(timezone.utc).timestamp(),
+                    "timestamp": datetime.now(UTC).timestamp(),
                     "event_id": uuid.uuid4().hex,
                 },
             )
@@ -437,15 +439,13 @@ class JobRunner:
             if not run_task.done():
                 try:
                     await asyncio.wait_for(run_task, timeout=5.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning(
                         f"JobRunner capability did not finish promptly job={job.job_id[:12]}…"
                     )
                     run_task.cancel()
-                    try:
+                    with suppress(asyncio.CancelledError, Exception):
                         await run_task
-                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                        pass
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(f"Capability exited with: {exc!r}")
             # Ensure watchdog is cleaned up.
@@ -460,12 +460,10 @@ class JobRunner:
             # ``CancelledError`` so the terminal block always runs.
             if not watchdog.done():
                 watchdog.cancel()
-                try:
+                with suppress(asyncio.CancelledError, Exception):
                     await watchdog
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
 
-            finished_at = datetime.now(timezone.utc)
+            finished_at = datetime.now(UTC)
             # 2026-06-21 plan (B3): when the global timeout fires,
             # surface a distinct error code so the UI can show
             # "任务超时" rather than a generic "failed".
@@ -530,15 +528,13 @@ class JobRunner:
                     err=exc,
                 )
                 # Emergency write so the DB never stays RUNNING forever.
-                try:
+                with suppress(Exception):
                     await self.store.update_status(
                         job.job_id,
                         status=JobStatus.FAILED,
-                        finished_at=datetime.now(timezone.utc),
+                        finished_at=datetime.now(UTC),
                         error=f"terminal-shield raised: {exc!r}",
                     )
-                except Exception:  # noqa: BLE001
-                    pass
 
     # ------------------------------------------------------------------
     # Contract helpers
@@ -733,7 +729,7 @@ class JobRunner:
             "session_id": job.session_id,
             "turn_id": "",
             "seq": seq,
-            "timestamp": datetime.now(timezone.utc).timestamp(),
+            "timestamp": datetime.now(UTC).timestamp(),
             "event_id": uuid.uuid4().hex,
             "metadata": {
                 "job_id": job.job_id,
@@ -808,7 +804,7 @@ class JobRunner:
                 await self.store.update_status(
                     job.job_id,
                     status=JobStatus.FAILED,
-                    finished_at=datetime.now(timezone.utc),
+                    finished_at=datetime.now(UTC),
                     error=error_msg,
                 )
                 count += 1
@@ -820,7 +816,7 @@ class JobRunner:
                 await self.store.update_status(
                     job.job_id,
                     status=JobStatus.FAILED,
-                    finished_at=datetime.now(timezone.utc),
+                    finished_at=datetime.now(UTC),
                     error=error_msg,
                 )
                 count += 1
@@ -866,7 +862,7 @@ class JobRunner:
                     message=error_msg,
                     retryable=True,
                 ),
-                finished_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(UTC),
                 partial_artifacts=partial_artifacts,
             )
             seq = await self._next_seq(job.job_id)

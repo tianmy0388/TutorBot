@@ -12,6 +12,8 @@ Pins the new ``/conversations`` endpoints:
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import httpx
 import pytest
 from httpx import ASGITransport
@@ -29,7 +31,7 @@ async def test_aggregate_recovers_all_session_records_after_owner_migration(
     Jobs/packages imported from a legacy local identity still belong to the
     conversation by ``session_id`` and must not disappear after a refresh.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from tutor.services.jobs import Job, JobStatus, get_job_store, reset_job_store
     from tutor.services.learner_profile import get_profile_store
@@ -43,7 +45,7 @@ async def test_aggregate_recovers_all_session_records_after_owner_migration(
 
     reset_job_store()
     reset_resource_package_store()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async with _client(tmp_path, monkeypatch) as client:
         created = await client.post(
@@ -174,6 +176,7 @@ async def test_aggregate_removes_legacy_absolute_paths_from_response(
 
     reset_resource_package_store()
     reset_job_store()
+
     async with _client(tmp_path, monkeypatch) as client:
         response = await client.post(
             "/api/v1/conversations",
@@ -296,6 +299,121 @@ async def test_aggregate_removes_legacy_absolute_paths_from_response(
 
     reset_resource_package_store()
     reset_job_store()
+
+
+@pytest.mark.asyncio
+async def test_aggregate_uses_exact_package_job_and_omits_ambiguous_legacy_retry(
+    tmp_path, monkeypatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from tutor.services.jobs import Job, JobStatus, get_job_store, reset_job_store
+    from tutor.services.learner_profile import get_profile_store
+    from tutor.services.resource_package import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+        get_resource_package_store,
+        reset_resource_package_store,
+    )
+
+    reset_job_store()
+    reset_resource_package_store()
+    async with _client(tmp_path, monkeypatch) as client:
+        created = await client.post(
+            "/api/v1/conversations",
+            json={"session_id": "multi-job-session", "user_id": "owner"},
+        )
+        assert created.status_code == 201
+        now = datetime.now(UTC)
+        job_store = get_job_store()
+        await job_store.init()
+        for index, job_id in enumerate(("job-first", "job-second")):
+            await job_store.save(
+                Job(
+                    job_id=job_id,
+                    user_id="owner",
+                    session_id="multi-job-session",
+                    capability="resource_generation",
+                    status=JobStatus.SUCCEEDED,
+                    created_at=now + timedelta(seconds=index),
+                )
+            )
+
+        package_store = get_resource_package_store()
+        await package_store.init()
+        packages = (
+            ResourcePackage(
+                package_id="package-first",
+                topic="first",
+                resources=[
+                    Resource(
+                        resource_id="resource-first",
+                        type=ResourceType.CODE,
+                        title="first",
+                        format_specific={"artifact_key": "missing/first.py"},
+                    )
+                ],
+                metadata={"session_id": "multi-job-session", "job_id": "job-first"},
+            ),
+            ResourcePackage(
+                package_id="package-second",
+                topic="second",
+                resources=[
+                    Resource(
+                        resource_id="resource-second",
+                        type=ResourceType.VIDEO,
+                        title="second",
+                        format_specific={"artifact_key": "missing/second.mp4"},
+                    )
+                ],
+                metadata={"session_id": "multi-job-session", "job_id": "job-second"},
+            ),
+            ResourcePackage(
+                package_id="package-legacy",
+                topic="legacy",
+                resources=[
+                    Resource(
+                        resource_id="resource-legacy",
+                        type=ResourceType.PPT,
+                        title="legacy",
+                        format_specific={"artifact_key": "missing/legacy.pptx"},
+                    )
+                ],
+                metadata={"session_id": "multi-job-session"},
+            ),
+        )
+        for package in packages:
+            await package_store.save(package, user_id="owner")
+        await get_profile_store().init()
+
+        response = await client.get(
+            "/api/v1/conversations/multi-job-session/aggregate?user_id=owner"
+        )
+
+        assert response.status_code == 200, response.text
+        resources = {
+            resource["resource_id"]: resource
+            for package in response.json()["packages"]
+            for resource in package["resources"]
+        }
+        assert resources["resource-first"]["metadata"]["recovery_contract"] == {
+            "job_id": "job-first",
+            "resource_types": ["code"],
+        }
+        assert resources["resource-second"]["metadata"]["recovery_contract"] == {
+            "job_id": "job-second",
+            "resource_types": ["video"],
+        }
+        assert "recovery_contract" not in resources["resource-legacy"]["metadata"]
+        assert any(
+            warning["code"] == "recovery_association_missing"
+            and warning["package_id"] == "package-legacy"
+            for warning in response.json()["recovery_warnings"]
+        )
+
+    reset_job_store()
+    reset_resource_package_store()
 
 
 @pytest.mark.asyncio

@@ -195,7 +195,6 @@ class ResourceGenerationCapability(BaseCapability):
         # Stage 3: Knowledge graph query
         # ------------------------------------------------------------------
         kg_summary: dict[str, Any] = {}
-        kg_recommendations: list[Any] = []
         async with stream.stage("knowledge_graph_query", source="resource_capability"):
             try:
                 svc = get_knowledge_graph_service()
@@ -212,9 +211,6 @@ class ResourceGenerationCapability(BaseCapability):
                         else LearnerProfile()
                     )
                     locate = svc.locate(course, prof_obj)
-                    kg_recommendations = svc.recommend_next(
-                        course, prof_obj, limit=5
-                    )
                     kg_summary = {
                         "course": course,
                         "mastered_count": len(locate["mastered"]),
@@ -402,9 +398,11 @@ class ResourceGenerationCapability(BaseCapability):
                 ),
             },
         )
+        package.associate_originating_job(context.job_id)
+        for resource in package.resources:
+            resource.metadata.setdefault("package_id", package.package_id)
         # Attach review + safety to each resource
         review_by_id = {r.resource_id: r for r in reviews}
-        safety_by_id = {s.fact_check.topic if False else i: s for i, s in enumerate(safety_reports)}
         # Match safety to resource by order (same iteration order as resources)
         for idx, r in enumerate(package.resources):
             rev = review_by_id.get(r.resource_id)
@@ -541,6 +539,8 @@ class ResourceGenerationCapability(BaseCapability):
             self._relocate_ppt_artifacts(package)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"PPT artifact relocation failed: {exc!r}")
+        for resource in package.resources:
+            self._canonicalize_resource_artifacts(resource)
 
         async with stream.stage("persistence", source="resource_capability"):
             try:
@@ -636,27 +636,37 @@ class ResourceGenerationCapability(BaseCapability):
 
     def _relocate_ppt_artifacts(self, package: ResourcePackage) -> None:
         """Move any PPT files written under ``ad_hoc/`` to
-        ``<data_dir>/ppt/<package_id>/`` and update the resource's
-        ``format_specific["pptx_path"]`` in place.
+        ``<data_dir>/ppt/<package_id>/`` and retain only a portable key.
         """
         from pathlib import Path
 
+        from tutor.services.artifacts import resolve_artifact_key, to_artifact_key
         from tutor.services.config.settings import get_settings
         from tutor.services.ppt import get_ppt_service
 
+        data_dir = get_settings().data_dir
         ppt_root = get_ppt_service().output_dir
         for r in package.resources:
             if r.type != ResourceType.PPT:
                 continue
-            pptx_path = (r.format_specific or {}).get("pptx_path")
-            if not pptx_path:
+            fs = r.format_specific or {}
+            artifact_key = fs.get("artifact_key")
+            raw = artifact_key or fs.get("pptx_path")
+            if not raw:
                 continue
-            src = Path(pptx_path)
+            src = (
+                resolve_artifact_key(str(raw), data_dir)
+                if artifact_key
+                else Path(str(raw))
+            )
             if not src.exists():
+                self._canonicalize_resource_artifacts(r)
                 continue
             # Already under the right package dir?
             try:
                 if src.parent.parent == ppt_root and src.parent.name == package.package_id:
+                    r.format_specific["artifact_key"] = to_artifact_key(src, data_dir)
+                    r.format_specific.pop("pptx_path", None)
                     continue
             except Exception:
                 pass
@@ -672,7 +682,19 @@ class ResourceGenerationCapability(BaseCapability):
                 import shutil
 
                 shutil.copy2(src, dst)
-            r.format_specific["pptx_path"] = str(dst)
+            r.format_specific["artifact_key"] = to_artifact_key(dst, data_dir)
+            r.format_specific.pop("pptx_path", None)
+
+    @staticmethod
+    def _canonicalize_resource_artifacts(resource: Resource) -> None:
+        """Remove host paths from a resource before persistence or streaming."""
+        from tutor.services.config.settings import get_settings
+        from tutor.services.resource_package.store import portable_format_specific
+
+        resource.format_specific = portable_format_specific(
+            resource.format_specific,
+            get_settings().data_dir,
+        )
 
     # ------------------------------------------------------------------
     # Video rendering (2026-06-21 plan, C2)
@@ -739,7 +761,6 @@ class ResourceGenerationCapability(BaseCapability):
         """
         try:
             from tutor.services.manim_render.service import (
-                ManimRenderService,
                 get_manim_render_service,
             )
 
@@ -922,10 +943,13 @@ class ResourceGenerationCapability(BaseCapability):
             types = [t for t in types if t != ResourceType.VIDEO]
 
         # Always include document unless explicitly excluded
-        if ResourceType.DOCUMENT not in types and intent.scope != "deep_dive":
+        if (
+            ResourceType.DOCUMENT not in types
+            and intent.scope != "deep_dive"
+            and "document" in msg
+        ):
             # Document is optional for deep_dive (video/reading may suffice)
-            if "document" in msg:
-                types.append(ResourceType.DOCUMENT)
+            types.append(ResourceType.DOCUMENT)
 
         # Deduplicate but preserve order
         seen: set[ResourceType] = set()
@@ -1094,13 +1118,13 @@ class ResourceGenerationCapability(BaseCapability):
         # done. ``asyncio.as_completed`` lets us interleave completion
         # events with the gather waiting on the rest.
         finished: list[Resource] = []
-        pending_tasks = {t[1]: t[0] for t in tasks}
         for fut in asyncio.as_completed([t[1] for t in tasks]):
             r = await fut
             if r is None:
                 continue
             finished.append(r)
             try:
+                self._canonicalize_resource_artifacts(r)
                 await stream.resource(
                     r,
                     source="resource_capability",
@@ -1332,9 +1356,7 @@ def _is_failed_resource(r: Resource) -> bool:
     reviewer decides.
     """
     fs = r.format_specific or {}
-    if r.type == ResourceType.VIDEO and fs.get("render_status") == "failed":
-        return True
-    return False
+    return r.type == ResourceType.VIDEO and fs.get("render_status") == "failed"
 
 
 __all__ = ["ResourceGenerationCapability"]
