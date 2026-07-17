@@ -41,6 +41,7 @@ class WorkflowNode(Generic[TIn, TOut]):
     degrade: NodeDegrade[TIn, TOut] | None = None
     input_model: Any | None = None
     output_model: Any | None = None
+    degrade_input_model: Any | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dependencies", tuple(self.dependencies))
@@ -197,6 +198,34 @@ class WorkflowGraph:
             raise TypeError("workflow node inputs must be a mapping")
         input_snapshots[node.name] = inputs
 
+        blocked = any(
+            completed[dependency].status in {"failed", "skipped"} for dependency in node.dependencies
+        )
+        if blocked:
+            if node.degrade is None:
+                return NodeOutcome(
+                    status="skipped",
+                    error_code="WORKFLOW_DEPENDENCY_FAILED",
+                )
+            try:
+                partial_inputs = (
+                    _adapter(node.degrade_input_model).validate_python(
+                        _clone(inputs)
+                    )
+                    if node.degrade_input_model is not None
+                    else inputs
+                )
+            except ValidationError:
+                return NodeOutcome(
+                    status="failed",
+                    error_code="WORKFLOW_INPUT_VALIDATION_FAILED",
+                )
+            return await self._degrade(
+                node,
+                partial_inputs,
+                "WORKFLOW_DEPENDENCY_FAILED",
+            )
+
         try:
             typed_inputs = (
                 _adapter(node.input_model).validate_python(_clone(inputs))
@@ -207,21 +236,6 @@ class WorkflowGraph:
             return NodeOutcome(
                 status="failed",
                 error_code="WORKFLOW_INPUT_VALIDATION_FAILED",
-            )
-
-        blocked = any(
-            completed[dependency].status in {"failed", "skipped"} for dependency in node.dependencies
-        )
-        if blocked:
-            if node.degrade is None:
-                return NodeOutcome(
-                    status="skipped",
-                    error_code="WORKFLOW_DEPENDENCY_FAILED",
-                )
-            return await self._degrade(
-                node,
-                typed_inputs,
-                "WORKFLOW_DEPENDENCY_FAILED",
             )
 
         try:

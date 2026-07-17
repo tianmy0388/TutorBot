@@ -32,6 +32,19 @@ class _IntegerInput(BaseModel):
     source: _IntegerOutput
 
 
+class _StrictDependencyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    failed: _IntegerOutput
+    healthy: _IntegerOutput
+
+
+class _PartialHealthyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    healthy: _IntegerOutput
+
+
 class _ResourceOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -203,6 +216,108 @@ async def test_failed_upstream_can_explicitly_degrade_consumer() -> None:
     assert execution.outcomes["consumer"] == NodeOutcome(
         status="degraded",
         output="local fallback",
+        error_code="WORKFLOW_DEPENDENCY_FAILED",
+    )
+
+
+@pytest.mark.asyncio
+async def test_blocked_node_skips_before_strict_input_validation() -> None:
+    async def fail(_inputs: _EmptyInput) -> _IntegerOutput:
+        raise RuntimeError("unavailable")
+
+    async def healthy(_inputs: _EmptyInput) -> _IntegerOutput:
+        return _IntegerOutput(value=7)
+
+    execution = await WorkflowGraph(
+        [
+            WorkflowNode(
+                "failed",
+                (),
+                1.0,
+                fail,
+                input_model=_EmptyInput,
+                output_model=_IntegerOutput,
+            ),
+            WorkflowNode(
+                "healthy",
+                (),
+                1.0,
+                healthy,
+                input_model=_EmptyInput,
+                output_model=_IntegerOutput,
+            ),
+            WorkflowNode(
+                "consumer",
+                ("failed", "healthy"),
+                1.0,
+                lambda _inputs: _SeenOutput(marker="unreachable"),
+                input_model=_StrictDependencyInput,
+                output_model=_SeenOutput,
+            ),
+        ]
+    ).execute({})
+
+    assert execution.outcomes["consumer"] == NodeOutcome(
+        status="skipped",
+        error_code="WORKFLOW_DEPENDENCY_FAILED",
+    )
+    assert set(execution.inputs_seen_by("consumer")) == {"healthy"}
+
+
+@pytest.mark.asyncio
+async def test_blocked_node_degrades_with_typed_partial_usable_inputs() -> None:
+    degraded_inputs: list[_PartialHealthyInput] = []
+
+    async def fail(_inputs: _EmptyInput) -> _IntegerOutput:
+        raise RuntimeError("unavailable")
+
+    async def healthy(_inputs: _EmptyInput) -> _IntegerOutput:
+        return _IntegerOutput(value=11)
+
+    async def degrade(
+        inputs: _PartialHealthyInput,
+        error_code: str,
+    ) -> _SeenOutput:
+        degraded_inputs.append(inputs)
+        assert error_code == "WORKFLOW_DEPENDENCY_FAILED"
+        return _SeenOutput(marker=str(inputs.healthy.value))
+
+    execution = await WorkflowGraph(
+        [
+            WorkflowNode(
+                "failed",
+                (),
+                1.0,
+                fail,
+                input_model=_EmptyInput,
+                output_model=_IntegerOutput,
+            ),
+            WorkflowNode(
+                "healthy",
+                (),
+                1.0,
+                healthy,
+                input_model=_EmptyInput,
+                output_model=_IntegerOutput,
+            ),
+            WorkflowNode(
+                "consumer",
+                ("failed", "healthy"),
+                1.0,
+                lambda _inputs: _SeenOutput(marker="unreachable"),
+                degrade=degrade,
+                input_model=_StrictDependencyInput,
+                output_model=_SeenOutput,
+                degrade_input_model=_PartialHealthyInput,
+            ),
+        ]
+    ).execute({})
+
+    assert len(degraded_inputs) == 1
+    assert degraded_inputs[0].healthy.value == 11
+    assert execution.outcomes["consumer"] == NodeOutcome(
+        status="degraded",
+        output={"marker": "11"},
         error_code="WORKFLOW_DEPENDENCY_FAILED",
     )
 

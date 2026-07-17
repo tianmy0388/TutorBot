@@ -3,18 +3,24 @@ from __future__ import annotations
 import asyncio
 import threading
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import pytest
 from tutor.agents.resource.ppt_generator import PPTGeneratorAgent
 from tutor.core.stream_bus import StreamBus
-from tutor.services.ppt.service import PPTGenerationService
+from tutor.services.ppt.service import (
+    PPTGenerationService,
+    Slide,
+    render_slides,
+)
 
 
-class _BlockingRenderer:
+class _CooperativeBlockingRenderer:
     def __init__(self) -> None:
         self.entered = threading.Event()
         self.release = threading.Event()
+        self.cancel_seen = threading.Event()
         self.finished = threading.Event()
         self.render_path: Path | None = None
 
@@ -24,6 +30,7 @@ class _BlockingRenderer:
         output_path: Path,
         *,
         title: str = "",
+        cancel_event: threading.Event | None = None,
     ) -> Path:
         del slides, title
         self.render_path = output_path
@@ -31,14 +38,21 @@ class _BlockingRenderer:
         output_path.write_bytes(b"private-partial-pptx")
         self.entered.set()
         try:
-            assert self.release.wait(timeout=5)
+            while not self.release.wait(timeout=0.005):
+                if cancel_event is not None and cancel_event.is_set():
+                    self.cancel_seen.set()
+                    assert self.release.wait(timeout=5)
+                    raise RuntimeError("cancelled by test")
             return output_path
         finally:
             self.finished.set()
 
 
 async def _wait_thread_event(event: threading.Event) -> None:
-    assert await asyncio.to_thread(event.wait, 2)
+    deadline = monotonic() + 2
+    while not event.is_set() and monotonic() < deadline:
+        await asyncio.sleep(0.005)
+    assert event.is_set()
 
 
 def _artifact_files(root: Path) -> list[Path]:
@@ -50,7 +64,9 @@ async def test_cancelled_ppt_worker_never_publishes_or_emits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    renderer = _BlockingRenderer()
+    await asyncio.to_thread(lambda: None)
+    baseline_threads = {thread.ident for thread in threading.enumerate()}
+    renderer = _CooperativeBlockingRenderer()
     monkeypatch.setattr("tutor.services.ppt.service.render_slides", renderer)
     service = PPTGenerationService(output_dir=tmp_path / "ppt")
     agent = PPTGeneratorAgent(ppt_service=service)
@@ -66,12 +82,17 @@ async def test_cancelled_ppt_worker_never_publishes_or_emits(
     )
     await _wait_thread_event(renderer.entered)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    renderer.release.set()
-    await _wait_thread_event(renderer.finished)
-    await asyncio.sleep(0)
+    try:
+        await _wait_thread_event(renderer.cancel_seen)
+        assert not task.done(), "cancellation returned before the worker cleaned up"
+        renderer.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        renderer.release.set()
 
+    assert renderer.finished.is_set()
+    assert {thread.ident for thread in threading.enumerate()} == baseline_threads
     assert _artifact_files(tmp_path / "ppt") == []
     assert queue.empty()
 
@@ -81,7 +102,7 @@ async def test_timed_out_ppt_worker_never_publishes_or_emits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    renderer = _BlockingRenderer()
+    renderer = _CooperativeBlockingRenderer()
     monkeypatch.setattr("tutor.services.ppt.service.render_slides", renderer)
     service = PPTGenerationService(output_dir=tmp_path / "ppt")
     agent = PPTGeneratorAgent(ppt_service=service)
@@ -98,14 +119,83 @@ async def test_timed_out_ppt_worker_never_publishes_or_emits(
 
     task = asyncio.create_task(run_with_timeout())
     await _wait_thread_event(renderer.entered)
-    with pytest.raises(TimeoutError):
-        await task
-    renderer.release.set()
-    await _wait_thread_event(renderer.finished)
-    await asyncio.sleep(0)
+    try:
+        await _wait_thread_event(renderer.cancel_seen)
+        assert not task.done(), "timeout returned before the worker cleaned up"
+        renderer.release.set()
+        with pytest.raises(TimeoutError):
+            await task
+    finally:
+        renderer.release.set()
 
+    assert renderer.finished.is_set()
     assert _artifact_files(tmp_path / "ppt") == []
     assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_publish_barrier_removes_canonical_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replace_entered = threading.Event()
+    release_replace = threading.Event()
+    original_replace = Path.replace
+
+    def render(
+        slides: Any,
+        output_path: Path,
+        *,
+        title: str = "",
+        cancel_event: threading.Event | None = None,
+    ) -> Path:
+        del slides, title, cancel_event
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"complete-before-publish")
+        return output_path
+
+    def blocking_replace(path: Path, target: Path) -> Path:
+        replace_entered.set()
+        assert release_replace.wait(timeout=5)
+        return original_replace(path, target)
+
+    monkeypatch.setattr("tutor.services.ppt.service.render_slides", render)
+    monkeypatch.setattr(Path, "replace", blocking_replace)
+    service = PPTGenerationService(output_dir=tmp_path / "ppt")
+    agent = PPTGeneratorAgent(ppt_service=service)
+    task = asyncio.create_task(
+        agent.process(
+            topic="Publish race",
+            source_content="# Publish race\n\n## One\ncontent",
+        )
+    )
+    await _wait_thread_event(replace_entered)
+    task.cancel()
+    try:
+        await asyncio.sleep(0.05)
+        assert not task.done(), "cancellation crossed an in-flight publish"
+        release_replace.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_replace.set()
+
+    assert _artifact_files(tmp_path / "ppt") == []
+
+
+def test_render_slides_honors_pre_cancel_before_writing(tmp_path: Path) -> None:
+    cancel_event = threading.Event()
+    cancel_event.set()
+    output_path = tmp_path / "cancelled.pptx"
+
+    with pytest.raises(RuntimeError, match="cancel"):
+        render_slides(
+            [Slide(title="Never written")],
+            output_path,
+            cancel_event=cancel_event,
+        )
+
+    assert not output_path.exists()
 
 
 @pytest.mark.asyncio
@@ -115,8 +205,15 @@ async def test_successful_ppt_atomically_publishes_from_private_temp(
 ) -> None:
     rendered_paths: list[Path] = []
 
-    def render(slides: Any, output_path: Path, *, title: str = "") -> Path:
+    def render(
+        slides: Any,
+        output_path: Path,
+        *,
+        title: str = "",
+        cancel_event: threading.Event | None = None,
+    ) -> Path:
         del slides, title
+        assert cancel_event is not None and not cancel_event.is_set()
         rendered_paths.append(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"complete-pptx")

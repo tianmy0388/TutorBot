@@ -472,6 +472,7 @@ class ResourceGenerationCapability(BaseCapability):
                     quality_degrade,
                     input_model=ResourceQualityNodeInput,
                     output_model=ResourceQualityNodeOutput,
+                    degrade_input_model=ResourceQualityNodeInput,
                 ),
                 WorkflowNode(
                     "safety",

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+from contextlib import suppress
 from typing import Any
 
 from loguru import logger
@@ -82,8 +83,9 @@ class PPTGeneratorAgent(BaseAgent):
         # Render (off-thread to avoid blocking the event loop on slow disks)
         pkg_id = package_id or "ad_hoc"
         cancel_event = threading.Event()
-        try:
-            pptx_path = await asyncio.to_thread(
+        publish_lock = threading.Lock()
+        worker = asyncio.create_task(
+            asyncio.to_thread(
                 self.ppt_service.build,
                 topic=topic,
                 markdown=source_content or "",
@@ -91,9 +93,22 @@ class PPTGeneratorAgent(BaseAgent):
                 resource_id=resource.resource_id,
                 title=topic,
                 cancel_event=cancel_event,
+                publish_lock=publish_lock,
             )
+        )
+        try:
+            pptx_path = await asyncio.shield(worker)
         except asyncio.CancelledError:
-            cancel_event.set()
+            await _set_cancelled(cancel_event, publish_lock)
+            with suppress(Exception):
+                await asyncio.shield(worker)
+            cleanup = getattr(self.ppt_service, "cleanup_cancelled", None)
+            if cleanup is not None:
+                cleanup(
+                    package_id=pkg_id,
+                    resource_id=resource.resource_id,
+                    publish_lock=publish_lock,
+                )
             raise
         except Exception:  # noqa: BLE001
             failure = public_failure(
@@ -145,6 +160,20 @@ class PPTGeneratorAgent(BaseAgent):
                 },
             )
         return resource
+
+
+async def _set_cancelled(
+    cancel_event: threading.Event,
+    publish_lock: threading.Lock,
+) -> None:
+    """Set cancellation in publish order without blocking the event loop."""
+
+    while not publish_lock.acquire(blocking=False):
+        await asyncio.sleep(0)
+    try:
+        cancel_event.set()
+    finally:
+        publish_lock.release()
 
 
 def _peek_pptx(path) -> tuple[list[str], int]:
