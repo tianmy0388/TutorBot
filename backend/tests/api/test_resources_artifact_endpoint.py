@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -27,16 +28,8 @@ from fastapi.testclient import TestClient
 # Load the resources router bypassing ``tutor.api.__init__`` (which
 # triggers the full app, including unrelated modules that fail to
 # import in the test environment).
-_RESOURCES_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "tutor"
-    / "api"
-    / "routers"
-    / "resources.py"
-)
-_spec = importlib.util.spec_from_file_location(
-    "_resources_router_under_test", _RESOURCES_PATH
-)
+_RESOURCES_PATH = Path(__file__).resolve().parents[2] / "tutor" / "api" / "routers" / "resources.py"
+_spec = importlib.util.spec_from_file_location("_resources_router_under_test", _RESOURCES_PATH)
 _resources_module = importlib.util.module_from_spec(_spec)
 sys.modules["_resources_router_under_test"] = _resources_module
 _spec.loader.exec_module(_resources_module)
@@ -47,6 +40,7 @@ _resources_module_pkg = _resources_module
 
 def _make_client() -> TestClient:
     app = FastAPI()
+    app.state.settings = SimpleNamespace(multi_user_enabled=True)
     app.include_router(resources_router, prefix="/api/v1")
     return TestClient(app)
 
@@ -93,9 +87,7 @@ async def test_artifact_endpoint_serves_png_inside_data_dir(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     # Build a sandbox artifact: PNG file inside data_dir/code_runs/run_X/figure_1.png
     art_dir = data_dir / "code_runs" / "run_X"
@@ -158,9 +150,7 @@ async def test_artifact_endpoint_404_when_artifact_not_in_manifest(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     await isolated_store.init()
 
@@ -201,9 +191,7 @@ async def test_artifact_endpoint_403_for_path_outside_data_dir(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     await isolated_store.init()
 
@@ -233,17 +221,13 @@ async def test_artifact_endpoint_403_for_path_outside_data_dir(
     assert loaded_pkg is not None, "save() did not persist the package"
     loaded_res = await isolated_store.get_resource(resource.resource_id)
     assert loaded_res is not None, "save() did not persist the resource"
-    assert loaded_res.format_specific.get("artifacts"), (
-        "format_specific.artifacts was not round-tripped"
-    )
+    assert loaded_res.format_specific.get("artifacts"), "format_specific.artifacts was not round-tripped"
 
     client = _make_client()
     resp = client.get(
         f"/api/v1/resources/packages/u-test/{pkg.package_id}/resources/{resource.resource_id}/artifacts/passwd"
     )
-    assert resp.status_code == 403, (
-        f"expected 403 for traversal; got {resp.status_code}: {resp.text}"
-    )
+    assert resp.status_code == 403, f"expected 403 for traversal; got {resp.status_code}: {resp.text}"
 
 
 @pytest.mark.asyncio
@@ -271,9 +255,7 @@ async def test_artifact_endpoint_works_without_package_id(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     art_dir = data_dir / "code_runs" / "run_X"
     art_dir.mkdir(parents=True)
@@ -330,9 +312,7 @@ async def test_artifact_endpoint_package_less_404_wrong_user(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     art_dir = data_dir / "code_runs" / "run_X"
     art_dir.mkdir(parents=True)
@@ -356,9 +336,7 @@ async def test_artifact_endpoint_package_less_404_wrong_user(
     await isolated_store.save(pkg, user_id="u-test")
 
     client = _make_client()
-    resp = client.get(
-        f"/api/v1/resources/u-WRONG/resources/{resource.resource_id}/artifacts/figure_1.png"
-    )
+    resp = client.get(f"/api/v1/resources/u-WRONG/resources/{resource.resource_id}/artifacts/figure_1.png")
     assert resp.status_code == 404
 
 

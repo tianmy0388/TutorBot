@@ -14,7 +14,6 @@ Design inspired by DeepTutor's ``deeptutor/api/main.py``.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +23,6 @@ from loguru import logger
 
 from tutor import __version__
 from tutor.runtime import get_capability_registry, get_orchestrator, get_tool_registry
-from tutor.runtime.orchestrator import MainOrchestrator
 from tutor.services.config.settings import Settings, get_settings
 
 
@@ -37,8 +35,9 @@ async def lifespan(app: FastAPI):
     # defined in .env (e.g. MINIMAX_API_KEY) would be missing when the
     # subprocess is spawned.
     try:
-        from dotenv import load_dotenv
         from pathlib import Path
+
+        from dotenv import load_dotenv
 
         for candidate in (Path.cwd() / ".env", Path.cwd().parent / ".env"):
             if candidate.is_file():
@@ -105,11 +104,11 @@ async def lifespan(app: FastAPI):
     # ``get_course_service()``. Wrapping that work here is just a
     # chance to log a clean "ready" message.
     try:
-        from tutor.services.knowledge_base.sqlite_store import (
-            get_kb_store,
-        )
         from tutor.services.courses import (
             get_course_service,
+        )
+        from tutor.services.knowledge_base.sqlite_store import (
+            get_kb_store,
         )
 
         get_kb_store()
@@ -146,6 +145,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
         lifespan=lifespan,
     )
+    # Available before lifespan startup as well (notably to ASGI test
+    # transports and identity dependencies).
+    app.state.settings = settings
 
     # CORS — development friendly; restrict in production
     app.add_middleware(
@@ -172,8 +174,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # ``check_dir=False`` is critical: the service may publish a
         # brand-new file *after* startup. StaticFiles re-scans on
         # each request anyway.
-        from starlette.staticfiles import StaticFiles as _SM  # noqa: F401
-
         app.mount(
             "/static/manim",
             StaticFiles(directory=str(manim_videos_dir), check_dir=False),

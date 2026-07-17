@@ -740,7 +740,7 @@ function cryptoRandom(): string {
   return `s_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
 }
 
-const USER_ID_KEY = "tutor:user_id";
+const USER_ID_KEY = "tutor-user-id";
 
 /**
  * Return the per-browser user id from localStorage, or create and
@@ -748,19 +748,27 @@ const USER_ID_KEY = "tutor:user_id";
  * the same user on every page load instead of a fresh "anonymous"
  * literal that no profile lookup can resolve.
  */
-function getOrCreateUserId(): string {
-  if (typeof window === "undefined") {
-    return "anonymous";
+export function getOrCreateUserId(multiUserEnabled = false): string {
+  if (!multiUserEnabled) {
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(USER_ID_KEY, "local-user");
+      }
+    } catch {
+      // localStorage blocked; the in-memory identity is still canonical.
+    }
+    return "local-user";
   }
+  if (typeof window === "undefined") return "anonymous";
   try {
     const existing = window.localStorage.getItem(USER_ID_KEY);
-    if (existing && existing.length >= 8) {
+    if (existing) {
       return existing;
     }
   } catch {
     // localStorage blocked (private mode etc.) — fall through.
   }
-  const fresh = `u_${cryptoRandom().replace(/-/g, "").slice(0, 16)}`;
+  const fresh = `u_${cryptoRandom().replace(/-/g, "")}`;
   try {
     window.localStorage.setItem(USER_ID_KEY, fresh);
   } catch {

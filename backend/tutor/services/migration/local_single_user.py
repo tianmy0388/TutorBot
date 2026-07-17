@@ -17,8 +17,11 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tutor.services.identity import LOCAL_USER_ID
+
 _SQLITE_SUFFIXES = frozenset({".db", ".sqlite", ".sqlite3"})
 _SQLITE_SIDECAR_SUFFIXES = ("-journal", "-shm", "-wal")
+_OWNERSHIP_COLUMNS = ("user_id", "owner_user_id")
 _ARTIFACT_PATH_COLUMNS = frozenset(
     {
         "artifact_key",
@@ -81,7 +84,7 @@ def run_local_migration(
 
 
 def _validate_target_user_id(target_user_id: str) -> None:
-    if target_user_id != "local-user":
+    if target_user_id != LOCAL_USER_ID:
         raise ValueError("--target-user-id must be exactly 'local-user'")
 
 
@@ -91,11 +94,12 @@ def _discover_user_ids(source_dirs: Iterable[Path]) -> set[str]:
         for database in _iter_sqlite_files(source_dir):
             try:
                 with _open_read_only(database) as connection:
-                    for table in _user_id_tables(connection):
-                        query = f"SELECT DISTINCT {_quote('user_id')} FROM {_quote(table)}"
-                        for (user_id,) in connection.execute(query):
-                            if user_id is not None and str(user_id).strip():
-                                users.add(str(user_id))
+                    for table, columns in _ownership_tables(connection):
+                        for ownership_column in columns:
+                            query = f"SELECT DISTINCT {_quote(ownership_column)} FROM {_quote(table)}"
+                            for (user_id,) in connection.execute(query):
+                                if user_id is not None and str(user_id).strip():
+                                    users.add(str(user_id))
             except sqlite3.Error:
                 # A dry-run inventory must still report the other stores when
                 # one stale or unrelated ``*.db`` file is not valid SQLite.
@@ -209,12 +213,23 @@ def _merge_sqlite_database(source: Path, target: Path, target_user_id: str) -> b
 
             selected = ", ".join(_quote(column) for column in columns)
             placeholders = ", ".join("?" for _ in columns)
-            insert = f"INSERT OR IGNORE INTO {_quote(table)} ({selected}) VALUES ({placeholders})"
-            user_index = columns.index("user_id") if "user_id" in columns else None
+            ownership_columns = [column for column in _OWNERSHIP_COLUMNS if column in columns]
+            insert = f"INSERT INTO {_quote(table)} ({selected}) VALUES ({placeholders})"
+            if ownership_columns:
+                assignments = ", ".join(
+                    f"{_quote(column)} = excluded.{_quote(column)}" for column in ownership_columns
+                )
+                ownership_changed = " OR ".join(
+                    f"{_quote(column)} IS NOT excluded.{_quote(column)}" for column in ownership_columns
+                )
+                insert += f" ON CONFLICT DO UPDATE SET {assignments} WHERE {ownership_changed}"
+            else:
+                insert += " ON CONFLICT DO NOTHING"
+            ownership_indexes = [columns.index(column) for column in ownership_columns]
             for row in source_connection.execute(f"SELECT {selected} FROM {_quote(table)}"):
                 values = list(row)
-                if user_index is not None:
-                    values[user_index] = target_user_id
+                for ownership_index in ownership_indexes:
+                    values[ownership_index] = target_user_id
                 cursor = target_connection.execute(insert, values)
                 changed = changed or cursor.rowcount > 0
 
@@ -226,18 +241,21 @@ def _rewrite_user_ids(database: Path, target_user_id: str) -> bool:
     changed = False
     try:
         with sqlite3.connect(database) as connection:
-            for table in _user_id_tables(connection):
+            for table, ownership_columns in _ownership_tables(connection):
+                needs_rewrite = " OR ".join(
+                    f"({_quote(column)} IS NOT NULL AND {_quote(column)} != ?)"
+                    for column in ownership_columns
+                )
                 legacy_rows = connection.execute(
-                    f"SELECT rowid FROM {_quote(table)} "
-                    f"WHERE {_quote('user_id')} IS NOT NULL "
-                    f"AND {_quote('user_id')} != ? ORDER BY rowid",
-                    (target_user_id,),
+                    f"SELECT rowid FROM {_quote(table)} WHERE {needs_rewrite} ORDER BY rowid",
+                    (target_user_id,) * len(ownership_columns),
                 ).fetchall()
+                assignments = ", ".join(f"{_quote(column)} = ?" for column in ownership_columns)
                 for (rowid,) in legacy_rows:
                     try:
                         cursor = connection.execute(
-                            f"UPDATE {_quote(table)} SET {_quote('user_id')} = ? WHERE rowid = ?",
-                            (target_user_id, rowid),
+                            f"UPDATE {_quote(table)} SET {assignments} WHERE rowid = ?",
+                            (target_user_id,) * len(ownership_columns) + (rowid,),
                         )
                     except sqlite3.IntegrityError:
                         # A canonical row already owns the same unique business
@@ -250,10 +268,8 @@ def _rewrite_user_ids(database: Path, target_user_id: str) -> bool:
                     changed = changed or cursor.rowcount > 0
 
                 remaining = connection.execute(
-                    f"SELECT COUNT(*) FROM {_quote(table)} "
-                    f"WHERE {_quote('user_id')} IS NOT NULL "
-                    f"AND {_quote('user_id')} != ?",
-                    (target_user_id,),
+                    f"SELECT COUNT(*) FROM {_quote(table)} WHERE {needs_rewrite}",
+                    (target_user_id,) * len(ownership_columns),
                 ).fetchone()[0]
                 if remaining:
                     raise MigrationError(f"could not rewrite all user IDs in {database}:{table}")
@@ -424,11 +440,19 @@ def _open_read_only(database: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
 
 
-def _user_id_tables(connection: sqlite3.Connection) -> tuple[str, ...]:
+def _ownership_tables(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
     tables = connection.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     ).fetchall()
-    return tuple(table for (table,) in tables if "user_id" in _table_columns(connection, table))
+    ownership_tables: list[tuple[str, tuple[str, ...]]] = []
+    for (table,) in tables:
+        table_columns = set(_table_columns(connection, table))
+        ownership_columns = tuple(column for column in _OWNERSHIP_COLUMNS if column in table_columns)
+        if ownership_columns:
+            ownership_tables.append((table, ownership_columns))
+    return tuple(ownership_tables)
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> list[str]:

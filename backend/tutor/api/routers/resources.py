@@ -20,13 +20,14 @@ persistence layer records completed packages there.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from tutor.services.identity import identity_policy_for
 from tutor.services.resource_package.schema import Resource, ResourceType
 from tutor.services.resource_package.store import get_resource_package_store
 
@@ -112,6 +113,7 @@ async def resource_types() -> dict[str, Any]:
 @router.get("/resources/packages/{user_id}")
 async def list_packages(
     user_id: str,
+    request: Request,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     since_hours: int | None = Query(None, ge=1, le=24 * 365),
@@ -123,15 +125,10 @@ async def list_packages(
     :meth:`ResourcePackage.summary`, plus ``user_id``. Use the package
     detail endpoint to fetch the full payload (including all resources).
     """
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_resource_package_store()
-    since = (
-        datetime.now(timezone.utc) - timedelta(hours=since_hours)
-        if since_hours is not None
-        else None
-    )
-    items = await store.list(
-        user_id, limit=limit, offset=offset, since=since, topic=topic
-    )
+    since = datetime.now(UTC) - timedelta(hours=since_hours) if since_hours is not None else None
+    items = await store.list(user_id, limit=limit, offset=offset, since=since, topic=topic)
     total = await store.count(user_id)
     return {
         "user_id": user_id,
@@ -143,15 +140,17 @@ async def list_packages(
 
 
 @router.get("/resources/packages/{user_id}/stats")
-async def user_stats(user_id: str) -> dict[str, Any]:
+async def user_stats(user_id: str, request: Request) -> dict[str, Any]:
     """Aggregate stats for one user's generated resources."""
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_resource_package_store()
     return await store.stats(user_id)
 
 
 @router.get("/resources/packages/{user_id}/{package_id}")
-async def get_package(user_id: str, package_id: str) -> dict[str, Any]:
+async def get_package(user_id: str, package_id: str, request: Request) -> dict[str, Any]:
     """Return one full :class:`ResourcePackage` (header + all resources)."""
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_resource_package_store()
     pkg = await store.get(package_id)
     if pkg is None:
@@ -162,13 +161,10 @@ async def get_package(user_id: str, package_id: str) -> dict[str, Any]:
     return pkg.model_dump(mode="json")
 
 
-@router.get(
-    "/resources/packages/{user_id}/{package_id}/resources/{resource_id}"
-)
-async def get_resource(
-    user_id: str, package_id: str, resource_id: str
-) -> dict[str, Any]:
+@router.get("/resources/packages/{user_id}/{package_id}/resources/{resource_id}")
+async def get_resource(user_id: str, package_id: str, resource_id: str, request: Request) -> dict[str, Any]:
     """Return one resource inside a package (lighter than the full package)."""
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_resource_package_store()
     res: Resource | None = await store.get_resource(resource_id)
     if res is None:
@@ -180,8 +176,9 @@ async def get_resource(
 
 
 @router.delete("/resources/packages/{user_id}/{package_id}")
-async def delete_package(user_id: str, package_id: str) -> dict[str, Any]:
+async def delete_package(user_id: str, package_id: str, request: Request) -> dict[str, Any]:
     """Delete one package (and its child resources)."""
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_resource_package_store()
     pkg = await store.get(package_id)
     if pkg is None or (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
@@ -191,8 +188,9 @@ async def delete_package(user_id: str, package_id: str) -> dict[str, Any]:
 
 
 @router.delete("/resources/packages/{user_id}")
-async def delete_all_packages(user_id: str) -> dict[str, Any]:
+async def delete_all_packages(user_id: str, request: Request) -> dict[str, Any]:
     """Delete **all** packages for a user (use with care)."""
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_resource_package_store()
     count = await store.delete_user(user_id)
     return {"deleted": count, "user_id": user_id}
@@ -203,13 +201,12 @@ async def delete_all_packages(user_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@router.get(
-    "/resources/packages/{user_id}/{package_id}/resources/{resource_id}/download"
-)
+@router.get("/resources/packages/{user_id}/{package_id}/resources/{resource_id}/download")
 async def download_resource_file(
-    user_id: str, package_id: str, resource_id: str
+    user_id: str, package_id: str, resource_id: str, request: Request
 ) -> FileResponse:
     """Download an on-disk artifact for a resource (e.g. the .pptx file)."""
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_resource_package_store()
     res = await store.get_resource(resource_id)
     if res is None:
@@ -222,9 +219,7 @@ async def download_resource_file(
     if res.type == ResourceType.PPT:
         pptx_path = (res.format_specific or {}).get("pptx_path")
         if not pptx_path:
-            raise HTTPException(
-                status_code=404, detail="pptx_path not set on this resource"
-            )
+            raise HTTPException(status_code=404, detail="pptx_path not set on this resource")
         p = Path(pptx_path)
         if not p.exists():
             raise HTTPException(status_code=410, detail="pptx file is gone")
@@ -232,10 +227,7 @@ async def download_resource_file(
         safe_title = _safe_filename(res.title) + ".pptx"
         return FileResponse(
             path=str(p),
-            media_type=(
-                "application/vnd.openxmlformats-officedocument."
-                "presentationml.presentation"
-            ),
+            media_type=("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
             filename=safe_title,
         )
 
@@ -281,6 +273,7 @@ async def get_resource_artifact(
     package_id: str,
     resource_id: str,
     artifact_name: str,
+    request: Request,
 ) -> FileResponse:
     """Serve one on-disk artifact (PNG / SVG / PDF) for a resource.
 
@@ -289,6 +282,7 @@ async def get_resource_artifact(
     path is constrained to ``settings.data_dir`` so a tampered
     manifest cannot serve arbitrary files.
     """
+    user_id = identity_policy_for(request).resolve(user_id)
     return await _serve_resource_artifact(
         user_id=user_id,
         package_id=package_id,
@@ -297,13 +291,12 @@ async def get_resource_artifact(
     )
 
 
-@router.get(
-    "/resources/{user_id}/resources/{resource_id}/artifacts/{artifact_name:path}"
-)
+@router.get("/resources/{user_id}/resources/{resource_id}/artifacts/{artifact_name:path}")
 async def get_resource_artifact_by_id_only(
     user_id: str,
     resource_id: str,
     artifact_name: str,
+    request: Request,
 ) -> FileResponse:
     """Same as the package-scoped variant, but skips the
     ``package_id`` lookup. Used when the frontend only has a
@@ -314,6 +307,7 @@ async def get_resource_artifact_by_id_only(
     Resource id is globally unique, so we resolve it directly and
     only check that it belongs to ``user_id``.
     """
+    user_id = identity_policy_for(request).resolve(user_id)
     return await _serve_resource_artifact(
         user_id=user_id,
         package_id=None,
@@ -347,16 +341,13 @@ async def _serve_resource_artifact(
         # actually belongs to user_id. The ResourceRow carries
         # user_id directly.
         from sqlalchemy import select
+
         from tutor.services.resource_package.store import ResourceRow
 
-        engine = store._ensure_engine()  # noqa: SLF001
+        engine = store._ensure_engine()  # noqa: F841, SLF001
         async with store._with_session() as session:  # noqa: SLF001
             row = (
-                await session.execute(
-                    select(ResourceRow).where(
-                        ResourceRow.resource_id == resource_id
-                    )
-                )
+                await session.execute(select(ResourceRow).where(ResourceRow.resource_id == resource_id))
             ).scalar_one_or_none()
             if row is None or row.user_id != user_id:
                 raise HTTPException(status_code=404, detail="resource not found")
@@ -374,9 +365,7 @@ async def _serve_resource_artifact(
             match = entry
             break
     if match is None:
-        raise HTTPException(
-            status_code=404, detail=f"artifact '{artifact_name}' not declared"
-        )
+        raise HTTPException(status_code=404, detail=f"artifact '{artifact_name}' not declared")
 
     path_str = match.get("path")
     if not path_str:
@@ -391,7 +380,7 @@ async def _serve_resource_artifact(
         raise HTTPException(
             status_code=403,
             detail="artifact path is outside the data directory",
-        )
+        ) from None
 
     if not p.exists():
         raise HTTPException(status_code=410, detail="artifact file is gone")

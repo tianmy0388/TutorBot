@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from tutor.services.identity import identity_policy_for
 from tutor.services.jobs import (
     JobStatus,
     JobSubmit,
@@ -19,7 +20,6 @@ from tutor.services.jobs import (
     get_job_store,
 )
 from tutor.services.jobs.contracts import (
-    ArtifactResult,
     JobResultContract,
 )
 from tutor.services.resource_plan.schema import SUPPORTED_RESOURCE_TYPES
@@ -40,20 +40,20 @@ __all__ = ["router"]
 @router.get("/jobs/{user_id}")
 async def list_jobs(
     user_id: str,
+    request: Request,
     status: str | None = Query(None, description="Filter by status"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
     """List jobs for a user (newest first)."""
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_job_store()
     st: JobStatus | None = None
     if status:
         try:
             st = JobStatus(status)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=422, detail=f"invalid status: {status}"
-            ) from exc
+            raise HTTPException(status_code=422, detail=f"invalid status: {status}") from exc
     items = await store.list(user_id, status=st, limit=limit, offset=offset)
     total = await store.count(user_id, status=st)
     return {
@@ -66,13 +66,15 @@ async def list_jobs(
 
 
 @router.get("/jobs/{user_id}/stats")
-async def job_stats(user_id: str) -> dict[str, Any]:
+async def job_stats(user_id: str, request: Request) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_job_store()
     return await store.stats(user_id)
 
 
 @router.get("/jobs/{user_id}/{job_id}")
-async def get_job(user_id: str, job_id: str) -> dict[str, Any]:
+async def get_job(user_id: str, job_id: str, request: Request) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_job_store()
     job = await store.get(job_id)
     if job is None or job.user_id != user_id:
@@ -81,7 +83,8 @@ async def get_job(user_id: str, job_id: str) -> dict[str, Any]:
 
 
 @router.post("/jobs/{user_id}/{job_id}/cancel")
-async def cancel_job(user_id: str, job_id: str) -> dict[str, Any]:
+async def cancel_job(user_id: str, job_id: str, request: Request) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     runner = get_job_runner()
     ok = await runner.cancel(job_id, user_id=user_id)
     if not ok:
@@ -93,7 +96,8 @@ async def cancel_job(user_id: str, job_id: str) -> dict[str, Any]:
 
 
 @router.delete("/jobs/{user_id}/{job_id}")
-async def delete_job(user_id: str, job_id: str) -> dict[str, Any]:
+async def delete_job(user_id: str, job_id: str, request: Request) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_job_store()
     job = await store.get(job_id)
     if job is None or job.user_id != user_id:
@@ -103,14 +107,15 @@ async def delete_job(user_id: str, job_id: str) -> dict[str, Any]:
 
 
 @router.delete("/jobs/{user_id}")
-async def delete_all_jobs(user_id: str) -> dict[str, Any]:
+async def delete_all_jobs(user_id: str, request: Request) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_job_store()
     count = await store.delete_user(user_id)
     return {"deleted": count, "user_id": user_id}
 
 
 @router.post("/jobs/{user_id}/{job_id}/retry")
-async def retry_job(user_id: str, job_id: str, req: RetryRequest) -> dict[str, Any]:
+async def retry_job(user_id: str, job_id: str, req: RetryRequest, request: Request) -> dict[str, Any]:
     """Submit a child job that retries only the failed resource types.
 
     The endpoint validates that every requested type actually failed in
@@ -120,6 +125,7 @@ async def retry_job(user_id: str, job_id: str, req: RetryRequest) -> dict[str, A
     already succeeded — a downstream re-package step uses that list to
     reassemble the full package.
     """
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_job_store()
     parent = await store.get(job_id)
     if parent is None or parent.user_id != user_id:
@@ -144,11 +150,7 @@ async def retry_job(user_id: str, job_id: str, req: RetryRequest) -> dict[str, A
         )
 
     # Look at the parent's contract to see which types failed.
-    parent_result = (
-        JobResultContract.model_validate(parent.result)
-        if parent.result
-        else None
-    )
+    parent_result = JobResultContract.model_validate(parent.result) if parent.result else None
     parent_failed: set[str] = set()
     parent_succeeded: set[str] = set()
     if parent_result is not None:
@@ -162,9 +164,7 @@ async def retry_job(user_id: str, job_id: str, req: RetryRequest) -> dict[str, A
     if not_failed:
         raise HTTPException(
             status_code=422,
-            detail=(
-                f"cannot retry types that did not fail in the parent: {not_failed}"
-            ),
+            detail=(f"cannot retry types that did not fail in the parent: {not_failed}"),
         )
 
     # Build the child job metadata.

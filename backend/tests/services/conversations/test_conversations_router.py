@@ -12,20 +12,17 @@ Pins the new ``/conversations`` endpoints:
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timezone
-
+import httpx
 import pytest
 from httpx import ASGITransport
-import httpx
-
 from tutor.api.main import create_app
 from tutor.services.config.settings import reset_settings_cache
 from tutor.services.conversations import reset_conversation_store
 
 
-def _client(tmp_path, monkeypatch) -> httpx.AsyncClient:
+def _client(tmp_path, monkeypatch, *, multi_user_enabled: bool = True) -> httpx.AsyncClient:
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("TUTOR_MULTI_USER_ENABLED", str(multi_user_enabled).lower())
     reset_settings_cache()
     reset_conversation_store()
     app = create_app()
@@ -33,6 +30,22 @@ def _client(tmp_path, monkeypatch) -> httpx.AsyncClient:
         transport=ASGITransport(app=app),
         base_url="http://test",
     )
+
+
+@pytest.mark.asyncio
+async def test_local_mode_stale_browser_identity_reads_canonical_conversation(tmp_path, monkeypatch) -> None:
+    async with _client(tmp_path, monkeypatch, multi_user_enabled=False) as client:
+        created = await client.post(
+            "/api/v1/conversations",
+            json={"session_id": "sess_ebb5a8f5dfdb", "user_id": "u_old_owner"},
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["user_id"] == "local-user"
+
+        response = await client.get("/api/v1/conversations/sess_ebb5a8f5dfdb?user_id=u_stale_browser")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["user_id"] == "local-user"
 
 
 @pytest.mark.asyncio
@@ -180,9 +193,7 @@ async def test_history_survives_app_restart(tmp_path, monkeypatch) -> None:
 
     # First "session": write a conversation.
     app1 = create_app()
-    async with httpx.AsyncClient(
-        transport=ASGITransport(app=app1), base_url="http://test"
-    ) as client:
+    async with httpx.AsyncClient(transport=ASGITransport(app=app1), base_url="http://test") as client:
         r = await client.post(
             "/api/v1/conversations",
             json={"user_id": "u1"},
@@ -199,9 +210,7 @@ async def test_history_survives_app_restart(tmp_path, monkeypatch) -> None:
     # equivalent of restarting the backend process.
     reset_conversation_store()
     app2 = create_app()
-    async with httpx.AsyncClient(
-        transport=ASGITransport(app=app2), base_url="http://test"
-    ) as client:
+    async with httpx.AsyncClient(transport=ASGITransport(app=app2), base_url="http://test") as client:
         r = await client.get(
             f"/api/v1/conversations/{sid}?user_id=u1",
         )

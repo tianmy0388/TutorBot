@@ -33,14 +33,14 @@ Other client messages:
 
 from __future__ import annotations
 
-import asyncio
 import json
+from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
-from tutor.core.context import UnifiedContext
+from tutor.services.identity import IdentityPolicy, identity_policy_for
 from tutor.services.jobs import JobSubmit, get_job_runner
 
 router = APIRouter()
@@ -50,6 +50,7 @@ router = APIRouter()
 async def unified_ws(websocket: WebSocket) -> None:
     """Single WebSocket endpoint handling all client interactions."""
     await websocket.accept()
+    identity_policy = identity_policy_for(websocket)
     runner = get_job_runner()
 
     try:
@@ -68,7 +69,7 @@ async def unified_ws(websocket: WebSocket) -> None:
                 continue
 
             if msg_type == "submit_job":
-                await _handle_submit(websocket, runner, envelope)
+                await _handle_submit(websocket, runner, envelope, identity_policy)
                 continue
 
             if msg_type == "subscribe_job":
@@ -76,12 +77,12 @@ async def unified_ws(websocket: WebSocket) -> None:
                 continue
 
             if msg_type == "cancel":
-                await _handle_cancel(websocket, runner, envelope)
+                await _handle_cancel(websocket, runner, envelope, identity_policy)
                 continue
 
             # Legacy: start_turn — internally routed through JobRunner
             if msg_type == "start_turn":
-                await _handle_legacy_start_turn(websocket, runner, envelope)
+                await _handle_legacy_start_turn(websocket, runner, envelope, identity_policy)
                 continue
 
             await _send_error(websocket, f"Unknown message type: {msg_type!r}")
@@ -90,10 +91,8 @@ async def unified_ws(websocket: WebSocket) -> None:
         logger.debug("WebSocket disconnected")
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"Unified WS error: {exc!r}")
-        try:
+        with suppress(Exception):
             await _send_error(websocket, f"Server error: {exc}")
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +104,12 @@ async def _handle_submit(
     websocket: WebSocket,
     runner,
     envelope: dict[str, Any],
+    identity_policy: IdentityPolicy,
 ) -> None:
     """Accept a job, persist it, ack with job_id, then close the WS."""
     try:
         req = JobSubmit(
-            user_id=envelope.get("user_id") or "anonymous",
+            user_id=identity_policy.resolve(envelope.get("user_id")),
             message=envelope.get("message") or "",
             capability=envelope.get("capability") or None,
             language=envelope.get("language") or "zh",
@@ -180,9 +180,7 @@ async def _handle_subscribe(
             try:
                 await websocket.send_text(json.dumps(evt, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    f"subscribe_job: send failed job={job_id[:12]}… exc={exc!r}"
-                )
+                logger.warning(f"subscribe_job: send failed job={job_id[:12]}… exc={exc!r}")
                 return
     except KeyError as exc:
         await _send_error(websocket, str(exc))
@@ -198,22 +196,25 @@ async def _handle_cancel(
     websocket: WebSocket,
     runner,
     envelope: dict[str, Any],
+    identity_policy: IdentityPolicy,
 ) -> None:
     job_id = envelope.get("job_id") or ""
-    user_id = envelope.get("user_id")
     if not job_id:
         await _send_error(websocket, "cancel requires job_id")
         return
-    ok = await runner.cancel(job_id, user_id=user_id)
     try:
+        user_id = identity_policy.resolve(envelope.get("user_id"))
+    except ValueError as exc:
+        await _send_error(websocket, str(exc))
+        return
+    ok = await runner.cancel(job_id, user_id=user_id)
+    with suppress(Exception):
         await websocket.send_text(
             json.dumps(
                 {"type": "ack", "for": "cancel", "job_id": job_id, "cancelled": ok},
                 ensure_ascii=False,
             )
         )
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +226,7 @@ async def _handle_legacy_start_turn(
     websocket: WebSocket,
     runner,
     envelope: dict[str, Any],
+    identity_policy: IdentityPolicy,
 ) -> None:
     """Back-compat: accept a ``start_turn`` envelope, run it as a job,
     and stream events back over the same WS until the job terminates.
@@ -232,22 +234,21 @@ async def _handle_legacy_start_turn(
     The job is persisted just like a normal submit, so the client can
     later reconnect and ``subscribe_job`` to recover.
     """
-    user_id = envelope.get("user_id") or "anonymous"
     user_message = envelope.get("message") or ""
     history = envelope.get("history") or []
     language = envelope.get("language") or "zh"
     capability = envelope.get("capability") or None
     session_id = envelope.get("session_id") or ""
 
-    req = JobSubmit(
-        user_id=user_id,
-        message=user_message,
-        capability=capability,
-        language=language,
-        session_id=session_id,
-        metadata={"history_count": len(history), "legacy": True},
-    )
     try:
+        req = JobSubmit(
+            user_id=identity_policy.resolve(envelope.get("user_id")),
+            message=user_message,
+            capability=capability,
+            language=language,
+            session_id=session_id,
+            metadata={"history_count": len(history), "legacy": True},
+        )
         job = await runner.submit(req)
     except ValueError as exc:
         await _send_error(websocket, str(exc))
@@ -290,12 +291,8 @@ async def _handle_legacy_start_turn(
 
 
 async def _send_error(websocket: WebSocket, message: str) -> None:
-    try:
-        await websocket.send_text(
-            json.dumps({"type": "error", "content": message}, ensure_ascii=False)
-        )
-    except Exception:
-        pass
+    with suppress(Exception):
+        await websocket.send_text(json.dumps({"type": "error", "content": message}, ensure_ascii=False))
 
 
 __all__ = ["router"]

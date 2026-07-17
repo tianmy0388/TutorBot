@@ -10,19 +10,15 @@ the full package.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 from httpx import ASGITransport
-
 from tutor.api.main import create_app
-from tutor.services.config.settings import reset_settings_cache
+from tutor.services.config.settings import get_settings, reset_settings_cache
 from tutor.services.jobs import (
     Job,
-    JobStatus,
-    JobSubmit,
-    get_job_runner,
     get_job_store,
     reset_job_runner,
     reset_job_store,
@@ -35,7 +31,9 @@ def _client() -> httpx.AsyncClient:
     reset_settings_cache()
     reset_job_store()
     reset_job_runner()
-    app = create_app()
+    settings = get_settings()
+    settings.multi_user_enabled = True
+    app = create_app(settings)
     return httpx.AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -59,7 +57,7 @@ async def _seed_parent_job(
     deterministic.
     """
     job_id = f"job_{uuid.uuid4().hex[:12]}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     contract = JobResultContract(
         job_id=job_id,
         capability=capability,
@@ -207,4 +205,3 @@ async def test_retry_preserves_parent_metadata(tmp_path, monkeypatch) -> None:
         await store.close()
         reset_job_store()
         reset_job_runner()
-

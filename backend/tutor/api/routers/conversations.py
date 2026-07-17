@@ -19,18 +19,17 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from tutor.services.conversations import (
     AppendMessageRequest,
-    Conversation,
-    ConversationDetail,
     ConversationListResponse,
     CreateConversationRequest,
     Message,
     UpdateConversationRequest,
     get_conversation_store,
 )
+from tutor.services.identity import identity_policy_for
 
 router = APIRouter()
 
@@ -38,21 +37,23 @@ router = APIRouter()
 @router.post("/conversations", status_code=201)
 async def create_or_get_conversation(
     req: CreateConversationRequest,
+    request: Request,
 ) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(req.user_id)
     store = get_conversation_store()
     session_id = req.session_id or f"sess_{uuid.uuid4().hex[:12]}"
-    conv = await store.get_or_create(
-        session_id=session_id, user_id=req.user_id, title=req.title
-    )
+    conv = await store.get_or_create(session_id=session_id, user_id=user_id, title=req.title)
     return conv.model_dump(mode="json")
 
 
 @router.get("/conversations")
 async def list_conversations(
+    request: Request,
     user_id: str = Query(..., min_length=1, max_length=64),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_conversation_store()
     items, total = await store.list_for_user(user_id, limit=limit, offset=offset)
     return ConversationListResponse(
@@ -66,8 +67,11 @@ async def list_conversations(
 
 @router.get("/conversations/{session_id}")
 async def get_conversation(
-    session_id: str, user_id: str = Query(..., min_length=1, max_length=64)
+    session_id: str,
+    request: Request,
+    user_id: str = Query(..., min_length=1, max_length=64),
 ) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_conversation_store()
     detail = await store.get_conversation_with_messages(session_id)
     if detail is None:
@@ -80,6 +84,7 @@ async def get_conversation(
 @router.get("/conversations/{session_id}/aggregate")
 async def get_conversation_aggregate(
     session_id: str,
+    request: Request,
     user_id: str = Query(..., min_length=1, max_length=64),
     jobs_limit: int = Query(50, ge=1, le=200),
     packages_limit: int = Query(20, ge=1, le=100),
@@ -98,6 +103,7 @@ async def get_conversation_aggregate(
     atomic store update — no flicker, no cross-session bleed, and
     background jobs running in other sessions are NOT cancelled.
     """
+    user_id = identity_policy_for(request).resolve(user_id)
     conv_store = get_conversation_store()
     detail = await conv_store.get_conversation_with_messages(session_id)
     if detail is None:
@@ -113,12 +119,8 @@ async def get_conversation_aggregate(
     job_store = get_job_store()
     pkg_store = get_resource_package_store()
 
-    jobs = await job_store.list(
-        user_id, limit=jobs_limit, session_id=session_id
-    )
-    packages = await pkg_store.list(
-        user_id, limit=packages_limit, session_id=session_id
-    )
+    jobs = await job_store.list(user_id, limit=jobs_limit, session_id=session_id)
+    packages = await pkg_store.list(user_id, limit=packages_limit, session_id=session_id)
     return {
         "conversation": detail.model_dump(mode="json"),
         "jobs": jobs,
@@ -130,8 +132,10 @@ async def get_conversation_aggregate(
 async def update_conversation(
     session_id: str,
     req: UpdateConversationRequest,
+    request: Request,
     user_id: str = Query(..., min_length=1, max_length=64),
 ) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_conversation_store()
     existing = await store.get(session_id)
     if existing is None:
@@ -146,8 +150,11 @@ async def update_conversation(
 
 @router.delete("/conversations/{session_id}")
 async def delete_conversation(
-    session_id: str, user_id: str = Query(..., min_length=1, max_length=64)
+    session_id: str,
+    request: Request,
+    user_id: str = Query(..., min_length=1, max_length=64),
 ) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_conversation_store()
     existing = await store.get(session_id)
     if existing is None:
@@ -165,8 +172,10 @@ async def delete_conversation(
 async def append_message(
     session_id: str,
     req: AppendMessageRequest,
+    request: Request,
     user_id: str = Query(..., min_length=1, max_length=64),
 ) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
     store = get_conversation_store()
     existing = await store.get(session_id)
     if existing is None:
