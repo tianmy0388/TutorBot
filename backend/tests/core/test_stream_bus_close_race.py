@@ -37,3 +37,21 @@ async def test_emit_cannot_enqueue_after_close_sentinel() -> None:
     assert await asyncio.wait_for(queue.get(), timeout=1) is None
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(queue.get(), timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_stage_failure_metadata_redacts_exception_details() -> None:
+    secret = "SECRET_TOKEN_STREAM_STAGE_123"
+    bus = StreamBus()
+    queue = bus.subscribe()
+
+    with pytest.raises(RuntimeError):
+        async with bus.stage("nested", source="capability"):
+            raise RuntimeError(secret)
+
+    start = await queue.get()
+    end = await queue.get()
+    assert start is not None
+    assert end is not None
+    assert secret not in str(end.to_dict())
+    assert end.metadata["status"] == "failed"

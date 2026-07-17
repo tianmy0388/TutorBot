@@ -147,6 +147,70 @@ async def test_cancel_commits_terminal_before_return_and_replays_it(store: JobSt
 
 
 @pytest.mark.asyncio
+async def test_cancel_returns_false_when_success_commits_after_active_read(
+    tmp_path: Path,
+) -> None:
+    class WinningSuccessStore(JobStore):
+        intercepted = False
+
+        async def get(self, job_id: str):  # type: ignore[no-untyped-def]
+            snapshot = await super().get(job_id)
+            task = asyncio.current_task()
+            if (
+                task is not None
+                and task.get_name() == "cancel-race"
+                and not self.intercepted
+                and snapshot is not None
+            ):
+                self.intercepted = True
+                contract = JobResultContract(
+                    job_id=snapshot.job_id,
+                    capability=snapshot.capability,
+                    status="succeeded",
+                    assistant_message="success won",
+                )
+                assert await self.set_terminal(
+                    snapshot.job_id,
+                    status=JobStatus.SUCCEEDED,
+                    finished_at=contract.finished_at,
+                    result=contract.model_dump(mode="json"),
+                    terminal_events=[
+                        {"type": "result", "content": "success won"},
+                        {"type": "done", "content": ""},
+                        {
+                            "type": "job_terminal",
+                            "content": "success won",
+                            "metadata": {
+                                "contract": contract.model_dump(mode="json")
+                            },
+                        },
+                    ],
+                )
+            return snapshot
+
+    race_store = WinningSuccessStore(db_path=tmp_path / "cancel-race.db")
+    await race_store.init()
+    job = Job(user_id="u1", status=JobStatus.RUNNING)
+    await race_store.save(job)
+    runner = JobRunner(
+        job_store=race_store,
+        capability_registry=_Capabilities(object()),  # type: ignore[arg-type]
+    )
+
+    cancelled = await asyncio.create_task(
+        runner.cancel(job.job_id),
+        name="cancel-race",
+    )
+    stored = await race_store.get(job.job_id)
+
+    assert cancelled is False
+    assert stored is not None
+    assert stored.status == JobStatus.SUCCEEDED
+    assert sum(event.get("type") == "job_terminal" for event in stored.events) == 1
+    await race_store.close()
+
+
+@pytest.mark.asyncio
 async def test_terminalization_between_subscribe_read_and_register_is_replayed(
     store: JobStore,
 ) -> None:

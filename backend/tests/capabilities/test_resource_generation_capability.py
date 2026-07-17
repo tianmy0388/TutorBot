@@ -340,6 +340,48 @@ def capability(fresh_builder):
     )
 
 
+@pytest.mark.asyncio
+async def test_caught_intent_error_redacts_secret_and_emits_stable_code(
+    capability,
+    tmp_path,
+    capsys,
+):
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    secret = "SECRET_TOKEN_RESOURCE_123"
+
+    class FailingIntentAgent:
+        agent_name = "FailingIntentAgent"
+
+        async def process(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError(secret)
+
+    package_store = ResourcePackageStore(db_path=tmp_path / "secret_packages.db")
+    await package_store.init()
+    capability.package_store = package_store
+    capability.intent_agent = FailingIntentAgent()
+    bus = StreamBus()
+    queue = bus.subscribe()
+    await capability.run(
+        UnifiedContext(
+            job_id="secret-resource-job",
+            user_id="alice",
+            user_message="生成 LSTM 文档",
+        ),
+        bus,
+    )
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event.to_dict())
+    await package_store.close()
+
+    captured = capsys.readouterr()
+    public_blob = json.dumps(events, ensure_ascii=False, default=str)
+    assert secret not in public_blob + captured.out + captured.err
+    assert "RESOURCE_INTENT_FAILED" in public_blob
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

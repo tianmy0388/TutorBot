@@ -144,6 +144,32 @@ async def test_full_pipeline_emits_all_stages(capability):
 
 
 @pytest.mark.asyncio
+async def test_caught_collection_error_redacts_secret_and_emits_stable_code(
+    capability,
+    monkeypatch,
+    capsys,
+):
+    secret = "SECRET_TOKEN_ASSESSMENT_123"
+
+    async def fail_query(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(capability.event_store, "query", fail_query)
+    bus = StreamBus()
+    queue = bus.subscribe()
+    await capability.run(UnifiedContext(user_id="alice", user_message="评估"), bus)
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event.to_dict())
+
+    captured = capsys.readouterr()
+    public_blob = json.dumps(events, ensure_ascii=False, default=str)
+    assert secret not in public_blob + captured.out + captured.err
+    assert "ASSESSMENT_EVENT_COLLECTION_FAILED" in public_blob
+
+
+@pytest.mark.asyncio
 async def test_result_includes_report_and_strategy(capability):
     ctx = UnifiedContext(user_id="alice", user_message="评估")
     bus = StreamBus()

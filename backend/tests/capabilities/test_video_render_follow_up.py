@@ -198,7 +198,7 @@ async def test_render_success_streams_portable_artifact_key(
 
 @pytest.mark.asyncio
 async def test_render_failure_emits_resource_event_with_failed_status() -> None:
-    """A render exception must still emit ``RESOURCE`` so the right
+    """A render failure must emit a redacted ``RESOURCE`` so the right
     pane shows '渲染失败' instead of a forever-pending placeholder."""
     cap = _cap()
     fake = _FakeRenderService(success=False)
@@ -226,7 +226,9 @@ async def test_render_failure_emits_resource_event_with_failed_status() -> None:
     md = evt.metadata
     payload = md["resource"]
     assert payload["format_specific"]["render_status"] == "failed"
-    assert "manim exit 1" in payload["format_specific"].get("render_error", "")
+    assert payload["format_specific"]["render_error_code"] == "VIDEO_RENDER_FAILED"
+    assert payload["format_specific"]["render_error"] == "Video rendering failed"
+    assert "manim exit 1" not in str(payload)
 
 
 # ---------------------------------------------------------------------------

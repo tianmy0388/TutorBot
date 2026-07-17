@@ -158,7 +158,8 @@ class JobRunner:
                 force_cancelled=True,
             )
         self._cancel_requested.discard(job_id)
-        return True
+        durable = await self.store.get(job_id)
+        return durable is not None and durable.status == JobStatus.CANCELLED
 
     def _on_task_done(self, job_id: str, task: asyncio.Task) -> None:
         # Clean up the in-process task reference. Persistent state lives

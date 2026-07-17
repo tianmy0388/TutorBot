@@ -105,6 +105,35 @@ def tutor_capability(fresh_builder):
 
 
 @pytest.mark.asyncio
+async def test_caught_understanding_error_redacts_secret_and_emits_stable_code(
+    tutor_capability,
+    capsys,
+):
+    secret = "SECRET_TOKEN_TUTORING_123"
+
+    class FailingQuestionAgent:
+        async def process(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError(secret)
+
+    tutor_capability.question_agent = FailingQuestionAgent()
+    bus = StreamBus()
+    queue = bus.subscribe()
+    await tutor_capability.run(
+        UnifiedContext(user_id="secret-tutor", user_message="解释 LSTM"),
+        bus,
+    )
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event.to_dict())
+
+    captured = capsys.readouterr()
+    public_blob = json.dumps(events, ensure_ascii=False, default=str)
+    assert secret not in public_blob + captured.out + captured.err
+    assert "TUTORING_QUESTION_UNDERSTANDING_FAILED" in public_blob
+
+
+@pytest.mark.asyncio
 async def test_full_pipeline_emits_all_5_stages(tutor_capability, fresh_builder):
     ctx = UnifiedContext(
         user_id="alice",

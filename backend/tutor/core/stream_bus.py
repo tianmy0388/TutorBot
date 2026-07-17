@@ -444,8 +444,11 @@ class StreamBus:
         try:
             yield
             status = "completed"
-        except BaseException as exc:
-            status = f"failed: {type(exc).__name__}: {exc}"
+        except BaseException:
+            # Nested capability/tool failures can contain provider payloads,
+            # credentials or user data. Detailed uncaught tracebacks belong
+            # only in the JobRunner's protected error artifact.
+            status = "failed"
             raise
         finally:
             popped_name, popped_source, popped_md = self._stage_stack.pop()

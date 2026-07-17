@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 from tutor.core.capability_result import CapabilityResult
@@ -320,3 +321,65 @@ async def test_concurrent_terminal_calls_preserve_first_outcome(tmp_path) -> Non
     assert len(terminals) == 1
     assert stored.result["assistant_message"] == terminals[0]["content"]
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_independent_stores_race_one_database_terminal_transition(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "jobs.db"
+    first_store = JobStore(db_path=db_path)
+    second_store = JobStore(db_path=db_path)
+    await first_store.init()
+    await second_store.init()
+    job = Job(user_id="u1", status=JobStatus.RUNNING)
+    await first_store.save(job)
+    start = asyncio.Event()
+
+    async def finish(
+        store: JobStore,
+        label: str,
+        status: JobStatus,
+    ) -> bool:
+        contract = JobResultContract(
+            job_id=job.job_id,
+            capability=job.capability,
+            status=status.value,
+            assistant_message=label,
+            finished_at=datetime.now(UTC),
+        )
+        compatibility_type = "result" if status == JobStatus.SUCCEEDED else "error"
+        await start.wait()
+        return await store.set_terminal(
+            job.job_id,
+            status=status,
+            finished_at=contract.finished_at,
+            result=contract.model_dump(mode="json"),
+            terminal_events=[
+                {"type": compatibility_type, "content": label},
+                {
+                    "type": "job_terminal",
+                    "content": label,
+                    "metadata": {"contract": contract.model_dump(mode="json")},
+                },
+            ],
+        )
+
+    attempts = [
+        asyncio.create_task(finish(first_store, "success", JobStatus.SUCCEEDED)),
+        asyncio.create_task(finish(second_store, "failure", JobStatus.FAILED)),
+    ]
+    start.set()
+    changed = await asyncio.gather(*attempts)
+
+    stored = await first_store.get(job.job_id)
+    assert sorted(changed) == [False, True]
+    assert stored is not None
+    assert stored.terminal_event_id
+    terminals = [event for event in stored.events if event.get("type") == "job_terminal"]
+    assert len(terminals) == 1
+    assert stored.result["assistant_message"] == terminals[0]["content"]
+    assert stored.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}
+    assert len(stored.events) == 2
+    await first_store.close()
+    await second_store.close()

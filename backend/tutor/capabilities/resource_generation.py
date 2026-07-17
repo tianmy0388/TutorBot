@@ -27,7 +27,6 @@ the whole generation. The package will simply have one fewer resource.
 from __future__ import annotations
 
 import asyncio
-import traceback
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -50,6 +49,7 @@ from tutor.agents.safety.anti_hallucination import (
     AntiHallucinationAgent,
     OverallVerdict,
 )
+from tutor.capabilities.failure_reporting import log_degraded, report_degraded
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
 from tutor.core.context import UnifiedContext
@@ -160,10 +160,13 @@ class ResourceGenerationCapability(BaseCapability):
             )
             try:
                 intent = await self.intent_agent.process(context, stream=stream)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"IntentUnderstandingAgent failed: {exc!r}")
-                await stream.observation(
-                    f"意图解析失败 (回退): {exc}", source="resource_capability"
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code="RESOURCE_INTENT_FAILED",
+                    summary="意图解析失败，已使用本地规则回退",
+                    source="resource_capability",
+                    stage="intent_understanding",
                 )
                 intent = parse_intent_keyword(context.user_message)
 
@@ -178,10 +181,13 @@ class ResourceGenerationCapability(BaseCapability):
                 profile = await self._builder.get(context.user_id)
                 profile_snapshot = profile.to_summary()
                 context.metadata["learner_profile"] = profile
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"Profile load failed: {exc!r}")
-                await stream.observation(
-                    f"画像加载失败: {exc}", source="resource_capability"
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code="RESOURCE_PROFILE_LOAD_FAILED",
+                    summary="画像加载失败，将使用默认生成策略",
+                    source="resource_capability",
+                    stage="profile_loading",
                 )
                 profile_snapshot = {}
 
@@ -221,11 +227,13 @@ class ResourceGenerationCapability(BaseCapability):
                         stage="knowledge_graph_query",
                         metadata=kg_summary,
                     )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"KG query failed: {exc!r}")
-                await stream.observation(
-                    f"知识图谱查询失败 (回退): {exc}",
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code="RESOURCE_KNOWLEDGE_GRAPH_FAILED",
+                    summary="知识图谱查询失败，已跳过图谱增强",
                     source="resource_capability",
+                    stage="knowledge_graph_query",
                 )
 
         # ------------------------------------------------------------------
@@ -284,12 +292,19 @@ class ResourceGenerationCapability(BaseCapability):
                             source="resource_capability",
                             stage="content_and_pedagogy",
                         )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(f"stream.resource() emission failed: {exc!r}")
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception(f"Content/Pedagogy failed: {exc!r}")
-                    await stream.observation(
-                        f"内容生成失败: {exc}", source="resource_capability"
+                    except Exception:  # noqa: BLE001
+                        log_degraded(
+                            code="RESOURCE_STREAM_EMIT_FAILED",
+                            source="resource_capability",
+                            stage="content_and_pedagogy",
+                        )
+                except Exception:  # noqa: BLE001
+                    await report_degraded(
+                        stream,
+                        code="RESOURCE_CONTENT_GENERATION_FAILED",
+                        summary="内容生成失败",
+                        source="resource_capability",
+                        stage="content_and_pedagogy",
                     )
             else:
                 await stream.observation(
@@ -523,8 +538,12 @@ class ResourceGenerationCapability(BaseCapability):
                 profile.metadata["last_package_id"] = package.package_id
                 profile.metadata["last_topic"] = package.topic
                 await self._builder.store.replace(profile, source="resource_capability")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Profile metadata update failed: {exc!r}")
+            except Exception:  # noqa: BLE001
+                log_degraded(
+                    code="RESOURCE_PROFILE_METADATA_FAILED",
+                    source="resource_capability",
+                    stage="path_integration",
+                )
 
         # ------------------------------------------------------------------
         # Stage 11: Persistence — write the package to the persistent store
@@ -534,8 +553,12 @@ class ResourceGenerationCapability(BaseCapability):
         # so the file layout mirrors the resource_packages DB layout.
         try:
             self._relocate_ppt_artifacts(package)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"PPT artifact relocation failed: {exc!r}")
+        except Exception:  # noqa: BLE001
+            log_degraded(
+                code="RESOURCE_PPT_RELOCATION_FAILED",
+                source="resource_capability",
+                stage="persistence",
+            )
         for resource in package.resources:
             self._canonicalize_resource_artifacts(resource)
 
@@ -565,11 +588,13 @@ class ResourceGenerationCapability(BaseCapability):
                         "resource_count": len(package.resources),
                     },
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"ResourcePackage persistence failed: {exc!r}")
-                await stream.observation(
-                    f"资源包持久化失败 (不影响本轮): {exc}",
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code="RESOURCE_PERSIST_FAILED",
+                    summary="资源包持久化失败，本轮结果仍可查看",
                     source="resource_capability",
+                    stage="persistence",
                 )
 
         follow_up_tasks = self._video_follow_up_specs(package, context.user_id)
@@ -767,8 +792,9 @@ class ResourceGenerationCapability(BaseCapability):
                     res.format_specific["duration_seconds"] = (
                         render_result.duration_seconds
                     )
-                if render_result.error:
-                    res.format_specific["render_error"] = render_result.error
+                if not render_result.success:
+                    res.format_specific["render_error_code"] = "VIDEO_RENDER_FAILED"
+                    res.format_specific["render_error"] = "Video rendering failed"
                 await stream.observation(
                     (
                         f"视频渲染{'成功' if render_result.success else '失败'}: "
@@ -782,15 +808,16 @@ class ResourceGenerationCapability(BaseCapability):
                         "attempts": render_result.attempts,
                     },
                 )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                f"Video render failed res={res.resource_id}: {exc!r}"
-            )
+        except Exception:  # noqa: BLE001
             res.format_specific["render_status"] = "failed"
-            res.format_specific["render_error"] = f"{type(exc).__name__}: {exc}"
-            await stream.observation(
-                f"视频渲染异常: {res.title} — {exc}",
+            res.format_specific["render_error_code"] = "VIDEO_RENDER_FAILED"
+            res.format_specific["render_error"] = "Video rendering failed"
+            await report_degraded(
+                stream,
+                code="VIDEO_RENDER_FAILED",
+                summary=f"视频渲染失败: {res.title}",
                 source="resource_capability",
+                stage="video_rendering",
             )
         finally:
             # **2026-07-08 fix:** emit a fresh ``RESOURCE`` event so the
@@ -804,14 +831,22 @@ class ResourceGenerationCapability(BaseCapability):
                     source="resource_capability",
                     stage="video_rendering",
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"stream.resource() emission failed: {exc!r}")
+            except Exception:  # noqa: BLE001
+                log_degraded(
+                    code="RESOURCE_STREAM_EMIT_FAILED",
+                    source="resource_capability",
+                    stage="video_rendering",
+                )
             # Re-save the package so the updated format_specific is
             # persisted for reconnection / reload.
             try:
                 await self._store.save(package, user_id=context.user_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Video render re-save failed: {exc!r}")
+            except Exception:  # noqa: BLE001
+                log_degraded(
+                    code="VIDEO_RENDER_PERSIST_FAILED",
+                    source="resource_capability",
+                    stage="video_rendering",
+                )
 
     # ------------------------------------------------------------------
     # Resource planning
@@ -942,17 +977,6 @@ class ResourceGenerationCapability(BaseCapability):
         """Run the type-specific agents in parallel."""
         tasks: list[tuple[ResourceType, asyncio.Task]] = []
 
-        async def _safe(coro, rtype: ResourceType) -> Resource | None:
-            try:
-                return await coro
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"{rtype.value} generation failed: {exc!r}")
-                await stream.observation(
-                    f"{rtype.value} 生成失败: {exc}",
-                    source="resource_capability",
-                )
-                return None
-
         # **2026-07-08 fix (187b2955):** wrap each agent call in a semaphore-
         # bounded task so we don't fan out 6+ concurrent LLM calls if the
         # topic requests many resource types. Before this, the trace showed
@@ -976,11 +1000,13 @@ class ResourceGenerationCapability(BaseCapability):
                     async with sem:
                         return await coro
                 return await coro
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"{rtype.value} generation failed: {exc!r}")
-                await stream.observation(
-                    f"{rtype.value} 生成失败: {exc}",
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code=f"RESOURCE_{rtype.value.upper()}_GENERATION_FAILED",
+                    summary=f"{rtype.value} 生成失败",
                     source="resource_capability",
+                    stage="parallel_resource_generation",
                 )
                 return None
 
@@ -1094,11 +1120,15 @@ class ResourceGenerationCapability(BaseCapability):
                     source="resource_capability",
                     stage="parallel_resource_generation",
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 # Stream emission must NEVER block the pipeline. A failed
                 # event broadcast (closed bus, full queue) must not
                 # invalidate an already-finished resource.
-                logger.debug(f"stream.resource() emission failed: {exc!r}")
+                log_degraded(
+                    code="RESOURCE_STREAM_EMIT_FAILED",
+                    source="resource_capability",
+                    stage="parallel_resource_generation",
+                )
         return finished
 
     async def _generate_reading(
@@ -1250,8 +1280,12 @@ class ResourceGenerationCapability(BaseCapability):
         async def _review_one(r: Resource) -> ResourceReview | None:
             try:
                 return await self.quality_reviewer.process(context, resource=r, stream=stream)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Quality review failed for {r.resource_id}: {exc!r}")
+            except Exception:  # noqa: BLE001
+                log_degraded(
+                    code="RESOURCE_QUALITY_REVIEW_FAILED",
+                    source="resource_capability",
+                    stage="quality_review",
+                )
                 return None
 
         tasks = [asyncio.create_task(_review_one(r)) for r in resources]
@@ -1283,14 +1317,16 @@ class ResourceGenerationCapability(BaseCapability):
                     resource_content=r.content,
                     topic=r.topic or intent.topic,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    f"AntiHallucination failed for {r.resource_id}: {exc!r}"
+            except Exception:  # noqa: BLE001
+                log_degraded(
+                    code="RESOURCE_SAFETY_CHECK_FAILED",
+                    source="resource_capability",
+                    stage="safety_check",
                 )
                 return AntiHallucinationReport(
                     overall_verdict=OverallVerdict.UNVERIFIED,
                     overall_confidence=0.5,
-                    notes=f"safety check failed: {exc}",
+                    notes="Safety check failed",
                 )
 
         tasks = [asyncio.create_task(_check_one(r)) for r in resources]
@@ -1324,8 +1360,3 @@ def _is_failed_resource(r: Resource) -> bool:
 
 
 __all__ = ["ResourceGenerationCapability"]
-
-
-def _unused_traceback_import() -> None:
-    """Reference import to keep it for debugging future use."""
-    _ = traceback.format_exc

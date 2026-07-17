@@ -17,11 +17,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from loguru import logger
-
 from tutor.agents.profile.cognitive_diagnostic import CognitiveDiagnosticAgent
 from tutor.agents.profile.feature_extractor import FeatureExtractorAgent
 from tutor.agents.profile.profile_updater import ProfileUpdaterAgent
+from tutor.capabilities.failure_reporting import report_degraded
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
@@ -89,10 +88,13 @@ class LearnerProfileCapability(BaseCapability):
             )
             try:
                 profile = await self._builder.get(user_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"Failed to load profile for {user_id}: {exc!r}")
-                await stream.observation(
-                    f"加载画像失败: {exc}", source="profile_capability"
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code="PROFILE_LOAD_FAILED",
+                    summary="加载画像失败，已使用空画像",
+                    source="profile_capability",
+                    stage="load_profile",
                 )
                 profile = empty_profile(user_id=user_id)
             context.metadata["learner_profile"] = profile
@@ -126,10 +128,11 @@ class LearnerProfileCapability(BaseCapability):
         signal = None
         try:
             signal = await self.feature_extractor.process(context, stream=stream)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(f"FeatureExtractor failed: {exc!r}")
-            await stream.observation(
-                f"特征抽取失败: {exc}",
+        except Exception:  # noqa: BLE001
+            await report_degraded(
+                stream,
+                code="PROFILE_FEATURE_EXTRACTION_FAILED",
+                summary="特征抽取失败，已跳过本次信号",
                 source="profile_capability",
                 stage="feature_extraction",
             )
@@ -142,10 +145,11 @@ class LearnerProfileCapability(BaseCapability):
         # ------------------------------------------------------------------
         try:
             updated_profile = await self.profile_updater.process(context, stream=stream)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(f"ProfileUpdater failed: {exc!r}")
-            await stream.observation(
-                f"画像更新失败: {exc}",
+        except Exception:  # noqa: BLE001
+            await report_degraded(
+                stream,
+                code="PROFILE_UPDATE_FAILED",
+                summary="画像更新失败，已保留原画像",
                 source="profile_capability",
                 stage="profile_update",
             )
@@ -166,10 +170,11 @@ class LearnerProfileCapability(BaseCapability):
                 probe_questions = await self.cognitive_diagnostic.process(
                     context, stream=stream
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"CognitiveDiagnostic failed: {exc!r}")
-                await stream.observation(
-                    f"诊断问题生成失败: {exc}",
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code="PROFILE_DIAGNOSTIC_FAILED",
+                    summary="诊断问题生成失败",
                     source="profile_capability",
                     stage="diagnostic_probing",
                 )

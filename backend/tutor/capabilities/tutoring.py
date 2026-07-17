@@ -45,8 +45,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from loguru import logger
-
 from tutor.agents.tutor.multimodal_enrichment import (
     EnrichmentSuggestion,
     MultiModalEnrichmentAgent,
@@ -56,6 +54,7 @@ from tutor.agents.tutor.question_understanding import (
     QuestionUnderstandingAgent,
 )
 from tutor.agents.tutor.tutoring import TutoringAgent, TutoringAnswer
+from tutor.capabilities.failure_reporting import log_degraded, report_degraded
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
@@ -163,9 +162,10 @@ class TutoringCapability(BaseCapability):
             return
         # error
         await stream.observation(
-            f"检索失败 ({rag.error_code}): {rag.error_message}",
+            f"检索失败 ({rag.error_code or 'RETRIEVAL_FAILED'})",
             source="tutoring_capability",
             stage="context_retrieval",
+            metadata={"code": rag.error_code or "RETRIEVAL_FAILED"},
         )
 
     # ------------------------------------------------------------------
@@ -184,10 +184,13 @@ class TutoringCapability(BaseCapability):
             try:
                 understanding = await self.question_agent.process(context, stream=stream)
                 context.metadata["tutor_understanding"] = understanding
-            except Exception as exc:
-                logger.exception(f"QuestionUnderstanding failed: {exc!r}")
-                await stream.observation(
-                    f"问题理解失败: {exc}", source="tutoring_capability"
+            except Exception:
+                await report_degraded(
+                    stream,
+                    code="TUTORING_QUESTION_UNDERSTANDING_FAILED",
+                    summary="问题理解失败，已使用通用问题类型",
+                    source="tutoring_capability",
+                    stage="question_understanding",
                 )
                 understanding = QuestionUnderstanding(
                     question_type=__import__(
@@ -221,10 +224,13 @@ class TutoringCapability(BaseCapability):
                     user_id=context.user_id,
                 )
                 await self._emit_retrieval_observation(stream, rag_context)
-            except Exception as exc:
-                logger.exception(f"RAG retrieval failed: {exc!r}")
-                await stream.observation(
-                    f"RAG 检索失败: {exc}", source="tutoring_capability"
+            except Exception:
+                await report_degraded(
+                    stream,
+                    code="TUTORING_RETRIEVAL_FAILED",
+                    summary="RAG 检索失败，本次回答不使用检索结果",
+                    source="tutoring_capability",
+                    stage="context_retrieval",
                 )
 
         # Serialise to the legacy ``rag_context: str`` field the
@@ -253,10 +259,13 @@ class TutoringCapability(BaseCapability):
                     profile.to_summary() if profile else {}
                 )
                 context.metadata["learner_profile"] = profile
-            except Exception as exc:
-                logger.warning(f"Profile load failed: {exc!r}")
-                await stream.observation(
-                    f"画像加载失败: {exc}", source="tutoring_capability"
+            except Exception:
+                await report_degraded(
+                    stream,
+                    code="TUTORING_PROFILE_LOAD_FAILED",
+                    summary="画像加载失败，将使用默认教学策略",
+                    source="tutoring_capability",
+                    stage="answer_generation",
                 )
 
             if understanding is not None:
@@ -269,10 +278,13 @@ class TutoringCapability(BaseCapability):
                         profile=profile_snapshot,
                     )
                     context.metadata["tutor_answer"] = answer
-                except Exception as exc:
-                    logger.exception(f"Answer generation failed: {exc!r}")
-                    await stream.observation(
-                        f"答案生成失败: {exc}", source="tutoring_capability"
+                except Exception:
+                    await report_degraded(
+                        stream,
+                        code="TUTORING_ANSWER_GENERATION_FAILED",
+                        summary="答案生成失败，请稍后重试",
+                        source="tutoring_capability",
+                        stage="answer_generation",
                     )
                     answer = TutoringAnswer(
                         tldr="（暂时无法生成完整解答，请稍后重试）",
@@ -291,10 +303,13 @@ class TutoringCapability(BaseCapability):
                         understanding=understanding,
                         answer=answer,
                     )
-                except Exception as exc:
-                    logger.exception(f"Enrichment failed: {exc!r}")
-                    await stream.observation(
-                        f"多模态补充失败: {exc}", source="tutoring_capability"
+                except Exception:
+                    await report_degraded(
+                        stream,
+                        code="TUTORING_ENRICHMENT_FAILED",
+                        summary="多模态补充生成失败",
+                        source="tutoring_capability",
+                        stage="multi_modal_enrichment",
                     )
 
         # ------------------------------------------------------------------
@@ -310,8 +325,12 @@ class TutoringCapability(BaseCapability):
                         answer=answer,
                         enrichments=[s.to_dict() for s in enrichments],
                     )
-            except Exception as exc:
-                logger.warning(f"Session recording failed: {exc!r}")
+            except Exception:
+                log_degraded(
+                    code="TUTORING_SESSION_RECORD_FAILED",
+                    source="tutoring_capability",
+                    stage="session_recording",
+                )
 
         # ------------------------------------------------------------------
         # Emit final result

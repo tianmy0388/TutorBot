@@ -163,6 +163,35 @@ def warm_capability(fresh_builder):
 
 
 @pytest.mark.asyncio
+async def test_caught_feature_error_redacts_secret_and_emits_stable_code(
+    profile_capability,
+    capsys,
+):
+    secret = "SECRET_TOKEN_PROFILE_123"
+
+    class FailingFeatureExtractor:
+        async def process(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError(secret)
+
+    profile_capability.feature_extractor = FailingFeatureExtractor()
+    bus = StreamBus()
+    queue = bus.subscribe()
+    await profile_capability.run(
+        UnifiedContext(user_id="secret-profile", user_message="更新画像"),
+        bus,
+    )
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event.to_dict())
+
+    captured = capsys.readouterr()
+    public_blob = json.dumps(events, ensure_ascii=False, default=str)
+    assert secret not in public_blob + captured.out + captured.err
+    assert "PROFILE_FEATURE_EXTRACTION_FAILED" in public_blob
+
+
+@pytest.mark.asyncio
 async def test_full_flow_cold_start(profile_capability, fresh_builder):
     """First turn with a fresh user → cold start → 2 probe questions."""
     user_id = "alice"

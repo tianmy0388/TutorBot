@@ -30,6 +30,7 @@ from sqlalchemy import (
     Integer,
     String,
     select,
+    text,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -261,6 +262,10 @@ class JobStore:
         self._ensure_engine()
         assert self._write_lock is not None
         async with self._write_lock, self._with_session() as session:
+            # Each JobStore owns only an in-process lock.  ``BEGIN IMMEDIATE``
+            # serializes writers across independent connections/process-local
+            # store instances before either can inspect terminal truth.
+            await session.execute(text("BEGIN IMMEDIATE"))
             row = (
                 await session.execute(
                     select(JobRow).where(JobRow.job_id == job_id)
@@ -268,10 +273,10 @@ class JobStore:
             ).scalar_one_or_none()
             if row is None:
                 return False
-            if row.terminal_event_id or (
-                row.status in {item.value for item in terminal_statuses}
-                and row.finished_at is not None
-            ):
+            if row.terminal_event_id or row.status not in {
+                JobStatus.PENDING.value,
+                JobStatus.RUNNING.value,
+            }:
                 return False
             events: list[dict[str, Any]] = list(row.events or [])
             next_seq = int(row.last_seq or 0) + 1
