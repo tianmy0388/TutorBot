@@ -68,6 +68,11 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.types import Integer as SqlInteger
 
+from tutor.services.artifacts import (
+    UnsafeArtifactKey,
+    resolve_artifact_key,
+    to_artifact_key,
+)
 from tutor.services.config.settings import get_settings
 from tutor.services.resource_package.schema import Resource, ResourcePackage
 
@@ -273,6 +278,9 @@ class ResourcePackageStore:
                 session.add(pkg_row)
 
                 for r in package.resources:
+                    format_specific = _portable_format_specific(
+                        r.format_specific, get_settings().data_dir
+                    )
                     session.add(
                         ResourceRow(
                             resource_id=r.resource_id,
@@ -281,7 +289,7 @@ class ResourcePackageStore:
                             type=r.type.value,
                             title=r.title,
                             content=r.content or "",
-                            format_specific=dict(r.format_specific or {}),
+                            format_specific=format_specific,
                             difficulty=r.difficulty,
                             estimated_minutes=r.estimated_minutes,
                             prerequisites=list(r.prerequisites or []),
@@ -441,6 +449,27 @@ class ResourcePackageStore:
                 for r in rows
             ]
 
+    async def list_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 20,
+    ) -> list[ResourcePackage]:
+        """Load full packages for an already-authorized conversation."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            stmt = (
+                select(PackageRow)
+                .where(
+                    PackageRow.package_metadata["session_id"].as_string()
+                    == session_id
+                )
+                .order_by(PackageRow.created_at.asc(), PackageRow.id.asc())
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._row_to_package(row) for row in rows]
+
     async def count(self, user_id: str) -> int:
         self._ensure_engine()
         async with self._with_session() as session:
@@ -591,6 +620,86 @@ def reset_resource_package_store() -> None:
     """Clear the cached singleton. Used by tests."""
     global _store
     _store = None
+
+
+def _portable_format_specific(
+    value: dict[str, Any] | None,
+    data_dir: Path,
+) -> dict[str, Any]:
+    """Normalize known local-file fields before a new database write."""
+    payload = dict(value or {})
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, list):
+        payload["artifacts"] = [
+            normalized
+            for entry in artifacts
+            if isinstance(entry, dict)
+            for normalized in [_portable_artifact_entry(entry, data_dir)]
+            if normalized is not None
+        ]
+
+    for legacy_name in ("mp4_path", "pptx_path"):
+        legacy_value = payload.pop(legacy_name, None)
+        if legacy_value and not payload.get("artifact_key"):
+            key = _path_value_to_key(str(legacy_value), data_dir)
+            if key is not None:
+                payload["artifact_key"] = key
+            else:
+                payload["artifact_unresolved"] = True
+
+    key = payload.get("artifact_key")
+    if key:
+        try:
+            resolve_artifact_key(str(key), data_dir)
+        except UnsafeArtifactKey:
+            payload.pop("artifact_key", None)
+            payload["artifact_unresolved"] = True
+    return payload
+
+
+def _portable_artifact_entry(
+    entry: dict[str, Any],
+    data_dir: Path,
+) -> dict[str, Any] | None:
+    result = {
+        key: entry[key]
+        for key in ("name", "kind")
+        if key in entry and entry[key] is not None
+    }
+    raw = entry.get("artifact_key") or entry.get("path")
+    if not raw:
+        return result or None
+    key = _path_value_to_key(str(raw), data_dir, already_key="artifact_key" in entry)
+    if key is None:
+        result["unresolved"] = True
+    else:
+        result["artifact_key"] = key
+    return result
+
+
+def _path_value_to_key(
+    value: str,
+    data_dir: Path,
+    *,
+    already_key: bool = False,
+) -> str | None:
+    if already_key:
+        try:
+            resolve_artifact_key(value, data_dir)
+            return value
+        except UnsafeArtifactKey:
+            return None
+    path = Path(value)
+    if path.is_absolute():
+        try:
+            return to_artifact_key(path, data_dir)
+        except UnsafeArtifactKey:
+            return None
+    try:
+        resolve_artifact_key(value, data_dir)
+    except UnsafeArtifactKey:
+        return None
+    return value.replace("\\", "/")
 
 
 __all__ = [

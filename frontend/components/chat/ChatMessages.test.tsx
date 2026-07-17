@@ -12,7 +12,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { ChatMessages } from "./ChatMessages";
 import type { ActiveTurn } from "@/lib/store";
@@ -46,6 +46,8 @@ const baseJobs: JobsState = {
 function mockStoreState(opts: {
   activeTurn?: Partial<ActiveTurn>;
   jobs?: { jobsById?: Record<string, ClientJob>; jobOrder?: string[] };
+  recoveryWarnings?: Array<{ code: string; message: string }>;
+  dismissRecoveryWarning?: (index: number) => void;
 } = {}) {
   const activeTurn: ActiveTurn = {
     ...baseActiveTurn,
@@ -60,6 +62,8 @@ function mockStoreState(opts: {
       jobsById,
       jobOrder,
       tracePanelOpen: false,
+      recoveryWarnings: opts.recoveryWarnings ?? [],
+      dismissRecoveryWarning: opts.dismissRecoveryWarning ?? vi.fn(),
     }),
   );
 }
@@ -105,6 +109,10 @@ describe("ChatMessages — terminal state", () => {
       ],
       result: null,
       error: null,
+      text_buffer: "",
+      thinking_buffer: "",
+      stage: "",
+      open_stages: [],
     };
     mockStoreState({
       activeTurn: {
@@ -157,6 +165,10 @@ describe("ChatMessages — terminal state", () => {
       events: [],
       result: null,
       error: null,
+      text_buffer: "",
+      thinking_buffer: "",
+      stage: "",
+      open_stages: [],
     };
     // While the job is non-terminal, ChatMessages renders the live
     // streaming view. textBuffer lives on activeTurn (the event
@@ -183,5 +195,21 @@ describe("ChatMessages — terminal state", () => {
     // easiest robust assertion is to check the container's
     // textContent.
     expect(container.textContent ?? "").toMatch(/self-attention.*QKV.*注意力/);
+  });
+
+  it("shows recovery warnings as non-blocking dismissible notices", () => {
+    const dismiss = vi.fn();
+    mockStoreState({
+      recoveryWarnings: [
+        { code: "missing_artifact", message: "资源文件缺失，可重新生成。" },
+      ],
+      dismissRecoveryWarning: dismiss,
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText("资源文件缺失，可重新生成。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭恢复提示" }));
+    expect(dismiss).toHaveBeenCalledWith(0);
   });
 });

@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from tutor.services.artifacts import UnsafeArtifactKey, to_artifact_key
 from tutor.services.config.settings import get_settings
 from tutor.services.manim_render.code_retry import CodeRetry, RetryResult
 from tutor.services.manim_render.executor import (
@@ -54,9 +55,19 @@ class RenderedVideo:
     public_url: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        artifact_key = None
+        if self.video_path:
+            try:
+                artifact_key = to_artifact_key(
+                    self.video_path, get_settings().data_dir
+                )
+            except UnsafeArtifactKey:
+                # Custom render destinations remain an internal Path; never
+                # leak an absolute host path into a persisted payload.
+                artifact_key = None
         return {
             "success": self.success,
-            "video_path": str(self.video_path) if self.video_path else None,
+            "artifact_key": artifact_key,
             "public_url": self.public_url,
             "duration_seconds": round(self.duration_seconds, 2),
             "attempts": self.attempts,

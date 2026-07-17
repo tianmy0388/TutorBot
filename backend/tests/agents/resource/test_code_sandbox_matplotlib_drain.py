@@ -72,10 +72,14 @@ async def test_code_sandbox_drains_matplotlib_figures_to_artifacts():
     # At least one PNG artifact must have been produced by the drain.
     pngs = [a for a in artifacts if a.get("kind") == "png"]
     assert pngs, f"expected drained PNG artifacts, got: {artifacts!r}"
-    # The file must actually exist on disk.
-    from pathlib import Path
+    # New writes expose a relocatable key, never an absolute host path.
+    from tutor.services.artifacts import resolve_artifact_key
+    from tutor.services.config.settings import get_settings
+
     for art in pngs:
-        p = Path(art["path"])
+        assert "path" not in art
+        assert not art["artifact_key"].startswith(("/", "\\"))
+        p = resolve_artifact_key(art["artifact_key"], get_settings().data_dir)
         assert p.exists(), f"artifact path missing: {p}"
         assert p.stat().st_size > 0, f"artifact is empty: {p}"
 

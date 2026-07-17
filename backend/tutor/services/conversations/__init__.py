@@ -3,10 +3,12 @@
 from .schema import (
     AppendMessageRequest,
     Conversation,
+    ConversationAggregate,
     ConversationDetail,
     ConversationListResponse,
     CreateConversationRequest,
     Message,
+    RecoveryWarning,
     UpdateConversationRequest,
 )
 from .store import (
@@ -18,11 +20,13 @@ from .store import (
 __all__ = [
     "AppendMessageRequest",
     "Conversation",
+    "ConversationAggregate",
     "ConversationDetail",
     "ConversationListResponse",
     "ConversationStore",
     "CreateConversationRequest",
     "Message",
+    "RecoveryWarning",
     "UpdateConversationRequest",
     "get_conversation_store",
     "reset_conversation_store",

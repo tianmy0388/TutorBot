@@ -23,9 +23,12 @@ import math
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from tutor.services.artifacts import UnsafeArtifactKey, resolve_artifact_key
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +54,35 @@ class ReviewVerdict(str, Enum):
     PASS = "pass"
     REVISE = "revise"
     REJECT = "reject"
+
+
+class ArtifactRef(BaseModel):
+    """Portable artifact manifest entry.
+
+    ``path`` is accepted only as a backward-compatible input alias. Relative
+    legacy values are promoted to ``artifact_key`` and are never emitted.
+    Absolute legacy values remain readable by the resource endpoint, which has
+    the data-directory context required to validate them safely.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    artifact_key: str | None = None
+    kind: str = ""
+    path: str | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _promote_legacy_relative_path(self) -> "ArtifactRef":
+        if self.artifact_key is None and self.path:
+            try:
+                candidate = resolve_artifact_key(self.path, Path("."))
+            except UnsafeArtifactKey:
+                return self
+            self.artifact_key = candidate.relative_to(Path(".").resolve()).as_posix()
+        if self.artifact_key is not None:
+            resolve_artifact_key(self.artifact_key, Path("."))
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +178,7 @@ class VideoResource(BaseModel):
     manim_code: str = ""
     scene_class: str = "GeneratedScene"
     video_url: str | None = None
+    artifact_key: str | None = None
     # Local filesystem path (2026-06-21 plan, for archival / download).
     mp4_path: str | None = None
     thumbnail_url: str | None = None
@@ -183,7 +216,7 @@ class CodeResource(BaseModel):
     execution_python: str = ""
     dependency_versions: dict[str, str] = Field(default_factory=dict)
     duration_seconds: float = 0.0
-    artifacts: list[dict[str, str]] = Field(default_factory=dict)  # type: ignore[type-arg]
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
 
 
 class PPTResource(BaseModel):
@@ -193,6 +226,7 @@ class PPTResource(BaseModel):
 
     slide_count: int = 0
     pptx_path: str | None = None
+    artifact_key: str | None = None
     slide_titles: list[str] = Field(default_factory=list)
 
 
@@ -435,6 +469,7 @@ def build_resource(
 
 
 __all__ = [
+    "ArtifactRef",
     "CodeResource",
     "DocumentResource",
     "ExerciseOption",

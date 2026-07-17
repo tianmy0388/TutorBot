@@ -24,6 +24,35 @@ from tutor.services.resource_package.schema import (
 )
 
 
+def test_artifact_ref_serializes_only_portable_key() -> None:
+    from tutor.services.resource_package.schema import ArtifactRef
+
+    ref = ArtifactRef.model_validate(
+        {
+            "name": "figure_1.png",
+            "artifact_key": "code_runs/run_1/figure_1.png",
+            "kind": "png",
+        }
+    )
+
+    assert ref.model_dump() == {
+        "name": "figure_1.png",
+        "artifact_key": "code_runs/run_1/figure_1.png",
+        "kind": "png",
+    }
+
+
+def test_artifact_ref_accepts_legacy_relative_path_without_reserializing_path() -> None:
+    from tutor.services.resource_package.schema import ArtifactRef
+
+    ref = ArtifactRef.model_validate(
+        {"name": "old.png", "path": "code_runs/old/old.png", "kind": "png"}
+    )
+
+    assert ref.artifact_key == "code_runs/old/old.png"
+    assert "path" not in ref.model_dump()
+
+
 # ---------------------------------------------------------------------------
 # Resource
 # ---------------------------------------------------------------------------

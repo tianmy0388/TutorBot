@@ -516,7 +516,22 @@ export const getConversation = (userId: string, sessionId: string) =>
 export interface ConversationAggregate {
   conversation: ConversationDetail;
   jobs: JobSummary[];
-  packages: ResourcePackageSummary[];
+  packages: ResourcePackage[];
+  profile_summary: Record<string, unknown>;
+  path_summary: Record<string, unknown>;
+  recovery_warnings: RecoveryWarning[];
+}
+
+export interface RecoveryWarning {
+  code:
+    | "migrated_ownership"
+    | "interrupted_job_repaired"
+    | "missing_artifact";
+  message: string;
+  job_id?: string | null;
+  package_id?: string | null;
+  resource_id?: string | null;
+  artifact_key?: string | null;
 }
 
 export const getConversationAggregate = (

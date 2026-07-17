@@ -23,9 +23,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from tutor.services.conversations import (
     AppendMessageRequest,
+    ConversationAggregate,
     ConversationListResponse,
     CreateConversationRequest,
     Message,
+    RecoveryWarning,
     UpdateConversationRequest,
     get_conversation_store,
 )
@@ -119,13 +121,146 @@ async def get_conversation_aggregate(
     job_store = get_job_store()
     pkg_store = get_resource_package_store()
 
-    jobs = await job_store.list(user_id, limit=jobs_limit, session_id=session_id)
-    packages = await pkg_store.list(user_id, limit=packages_limit, session_id=session_id)
-    return {
-        "conversation": detail.model_dump(mode="json"),
-        "jobs": jobs,
-        "packages": packages,
-    }
+    # The conversation is the authorization boundary. Rows imported from an
+    # older local browser identity are joined by session_id without applying a
+    # second owner filter that would make them disappear after migration.
+    jobs = await job_store.list_for_session(session_id, limit=jobs_limit)
+    packages = await pkg_store.list_for_session(session_id, limit=packages_limit)
+
+    warnings: list[RecoveryWarning] = []
+    mismatched_owner = any(job.get("user_id") != detail.user_id for job in jobs) or any(
+        (package.metadata or {}).get("user_id") != detail.user_id
+        for package in packages
+    )
+    if mismatched_owner:
+        warnings.append(
+            RecoveryWarning(
+                code="migrated_ownership",
+                message="Recovered session records created under an earlier local identity.",
+            )
+        )
+
+    for job in jobs:
+        error = str(job.get("error") or "")
+        if job.get("status") == "failed" and (
+            "process restarted" in error or "timed out" in error
+        ):
+            warnings.append(
+                RecoveryWarning(
+                    code="interrupted_job_repaired",
+                    message="An interrupted job was repaired to a terminal state.",
+                    job_id=str(job.get("job_id") or "") or None,
+                )
+            )
+
+    packages, missing_warnings = _mark_missing_artifacts(packages, jobs)
+    warnings.extend(missing_warnings)
+
+    from tutor.services.learner_profile import get_profile_store
+
+    profile = await get_profile_store().get_or_create(detail.user_id)
+    path_summary: dict[str, Any] = {}
+    for package in reversed(packages):
+        if package.learning_path_summary:
+            path_summary = dict(package.learning_path_summary)
+            break
+
+    aggregate = ConversationAggregate(
+        conversation=detail,
+        jobs=jobs,
+        packages=packages,
+        profile_summary=profile.to_summary(),
+        path_summary=path_summary,
+        recovery_warnings=warnings,
+    )
+    return aggregate.model_dump(mode="json")
+
+
+def _mark_missing_artifacts(packages, jobs):
+    """Annotate missing resources without failing the aggregate request."""
+    from pathlib import Path
+
+    from tutor.services.artifacts import (
+        UnsafeArtifactKey,
+        resolve_artifact_key,
+        to_artifact_key,
+    )
+    from tutor.services.config.settings import get_settings
+
+    data_dir = get_settings().data_dir
+    recovered = []
+    warnings: list[RecoveryWarning] = []
+    for package in packages:
+        resources = []
+        for resource in package.resources:
+            missing: list[str] = []
+            fs = resource.format_specific or {}
+            references: list[tuple[str, str]] = []
+            artifacts = fs.get("artifacts")
+            if isinstance(artifacts, list):
+                for entry in artifacts:
+                    if not isinstance(entry, dict):
+                        continue
+                    raw = entry.get("artifact_key") or entry.get("path")
+                    if raw:
+                        references.append((str(raw), "artifact_key" if entry.get("artifact_key") else "path"))
+            root_ref = fs.get("artifact_key")
+            if root_ref:
+                references.append((str(root_ref), "artifact_key"))
+            for legacy_name in ("mp4_path", "pptx_path"):
+                if fs.get(legacy_name):
+                    references.append((str(fs[legacy_name]), "path"))
+
+            for raw, shape in references:
+                try:
+                    if shape == "artifact_key":
+                        artifact_path = resolve_artifact_key(raw, data_dir)
+                        key = raw
+                    else:
+                        legacy_path = Path(raw)
+                        if legacy_path.is_absolute():
+                            key = to_artifact_key(legacy_path, data_dir)
+                        else:
+                            key = raw.replace("\\", "/")
+                        artifact_path = resolve_artifact_key(key, data_dir)
+                except UnsafeArtifactKey:
+                    key = raw if shape == "artifact_key" else ""
+                    artifact_path = None
+                if artifact_path is None or not artifact_path.is_file():
+                    missing.append(key)
+                    warnings.append(
+                        RecoveryWarning(
+                            code="missing_artifact",
+                            message="A generated resource file is missing and can be regenerated.",
+                            package_id=package.package_id,
+                            resource_id=resource.resource_id,
+                            artifact_key=key or None,
+                        )
+                    )
+
+            if missing:
+                metadata = dict(resource.metadata or {})
+                metadata["artifact_missing"] = True
+                metadata["missing_artifact_keys"] = missing
+                if not metadata.get("recovery_contract"):
+                    retry_parent = next(
+                        (
+                            job
+                            for job in reversed(jobs)
+                            if job.get("capability") == "resource_generation"
+                            and job.get("status") in {"failed", "partial"}
+                        ),
+                        None,
+                    )
+                    if retry_parent:
+                        metadata["recovery_contract"] = {
+                            "job_id": retry_parent.get("job_id"),
+                            "resource_types": [resource.type.value],
+                        }
+                resource = resource.model_copy(update={"metadata": metadata})
+            resources.append(resource)
+        recovered.append(package.model_copy(update={"resources": resources}))
+    return recovered, warnings
 
 
 @router.patch("/conversations/{session_id}")

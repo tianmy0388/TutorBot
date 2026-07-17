@@ -48,12 +48,14 @@ from loguru import logger
 from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
+from tutor.services.artifacts import to_artifact_key
 from tutor.services.config.settings import get_settings
 from tutor.agents.resource.manim_video import (
     _extract_first_python_block,
     _normalize_code_newlines,
 )
 from tutor.services.resource_package.schema import (
+    ArtifactRef,
     CodeResource,
     Resource,
     ResourceType,
@@ -258,7 +260,7 @@ class CodeSandboxAgent(BaseAgent):
         payload.execution_python = interpreter
         payload.duration_seconds = round(duration_seconds, 3)
         payload.dependency_versions = dependency_versions
-        payload.artifacts = artifacts
+        payload.artifacts = [ArtifactRef.model_validate(item) for item in artifacts]
 
         markdown = (
             f"# {title}\n\n"
@@ -446,7 +448,7 @@ def _safe_run_python(
                 artifacts.append(
                     {
                         "name": entry.name,
-                        "path": str(entry),
+                        "artifact_key": to_artifact_key(entry, settings.data_dir),
                         "kind": entry.suffix.lower().lstrip("."),
                     }
                 )

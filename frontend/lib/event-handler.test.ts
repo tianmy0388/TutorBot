@@ -128,6 +128,17 @@ function jobTerminalEvent(partialArtifacts: unknown[]): StreamEvent {
 
 describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOURCE content", () => {
   beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      ),
+    );
     cleanup();
     mockStoreState.latestPackage = null;
     mockStoreState.setLatestPackage.mockClear();

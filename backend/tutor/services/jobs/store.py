@@ -304,6 +304,24 @@ class JobStore:
             rows = (await session.execute(stmt)).scalars().all()
             return [self._row_to_job(r).to_summary() for r in rows if r is not None]
 
+    async def list_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List a conversation's jobs after ownership was checked upstream."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            stmt = (
+                select(JobRow)
+                .where(JobRow.session_id == session_id)
+                .order_by(JobRow.created_at.asc(), JobRow.id.asc())
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._row_to_job(row).to_summary() for row in rows]
+
     async def count(
         self,
         user_id: str,

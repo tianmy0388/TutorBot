@@ -128,6 +128,26 @@ async def test_render_happy_path(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_render_serializes_a_portable_artifact_key(tmp_path, monkeypatch):
+    from tutor.services.config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "data_dir", tmp_path, raising=False)
+    executor = _mock_executor_success(tmp_path)
+    svc = ManimRenderService(
+        static_guard=StaticGuard(),
+        executor=executor,
+        code_retry=CodeRetry(llm=_mock_llm_no_op(), max_attempts=1),
+        public_dir=tmp_path / "manim_videos",
+    )
+
+    result = await svc.render(code=VALID_CODE, scene_class="HelloScene")
+
+    serialized = result.to_dict()
+    assert serialized["artifact_key"] == "manim_videos/fake.mp4"
+    assert "video_path" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_render_static_guard_failure_short_circuits(tmp_path):
     """Bad code → never calls executor."""
     executor = _mock_executor_success(tmp_path)

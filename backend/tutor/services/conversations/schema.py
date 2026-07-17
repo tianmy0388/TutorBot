@@ -27,6 +27,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from tutor.services.resource_package.schema import ResourcePackage
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -34,6 +36,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 MessageRole = Literal["user", "assistant", "system"]
+RecoveryWarningCode = Literal[
+    "migrated_ownership",
+    "interrupted_job_repaired",
+    "missing_artifact",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +83,28 @@ class ConversationDetail(Conversation):
     messages: list[Message] = Field(default_factory=list)
 
 
+class RecoveryWarning(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: RecoveryWarningCode
+    message: str
+    job_id: str | None = None
+    package_id: str | None = None
+    resource_id: str | None = None
+    artifact_key: str | None = None
+
+
+class ConversationAggregate(BaseModel):
+    """One refresh-safe payload for restoring an entire conversation view."""
+
+    conversation: ConversationDetail
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
+    packages: list[ResourcePackage] = Field(default_factory=list)
+    profile_summary: dict[str, Any] = Field(default_factory=dict)
+    path_summary: dict[str, Any] = Field(default_factory=dict)
+    recovery_warnings: list[RecoveryWarning] = Field(default_factory=list)
+
+
 class ConversationListResponse(BaseModel):
     items: list[Conversation]
     total: int
@@ -112,8 +141,10 @@ __all__ = [
     "AppendMessageRequest",
     "Conversation",
     "ConversationDetail",
+    "ConversationAggregate",
     "ConversationListResponse",
     "CreateConversationRequest",
     "Message",
+    "RecoveryWarning",
     "UpdateConversationRequest",
 ]

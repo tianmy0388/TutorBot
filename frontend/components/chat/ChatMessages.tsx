@@ -45,6 +45,8 @@ export function ChatMessages() {
   const jobsById = useTutorStore((s) => s.jobsById);
   const jobOrder = useTutorStore((s) => s.jobOrder);
   const tracePanelOpen = useTutorStore((s) => s.tracePanelOpen);
+  const recoveryWarnings = useTutorStore((s) => s.recoveryWarnings);
+  const dismissRecoveryWarning = useTutorStore((s) => s.dismissRecoveryWarning);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // "In progress" is defined by the per-job state machine, NOT the
@@ -75,7 +77,7 @@ export function ChatMessages() {
   const textBuffer = liveJob?.text_buffer || activeTurn.text_buffer;
   const thinkingBuffer = liveJob?.thinking_buffer || activeTurn.thinking_buffer;
   const errorText = liveJob?.error || activeTurn.error;
-  const events = liveJob?.events.length > 0 ? liveJob.events : activeTurn.events;
+  const events = liveJob?.events?.length ? liveJob.events : activeTurn.events;
   const stage = liveJob?.stage || "";
 
   // Auto-scroll on new content
@@ -95,6 +97,24 @@ export function ChatMessages() {
       ref={scrollRef}
       className="flex-1 overflow-y-auto px-6 py-6 space-y-5"
     >
+      {recoveryWarnings.map((warning, index) => (
+        <div
+          key={`${warning.code}-${warning.resource_id ?? warning.job_id ?? index}`}
+          className="max-w-3xl mx-auto flex items-start gap-2 rounded-lg border border-amber-700/40 bg-amber-950/25 px-3 py-2 text-sm text-amber-100"
+          role="status"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+          <span className="flex-1">{warning.message}</span>
+          <button
+            type="button"
+            aria-label="关闭恢复提示"
+            className="rounded px-1 text-amber-200 hover:bg-amber-900/40"
+            onClick={() => dismissRecoveryWarning(index)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
       {messages.length === 0 && !showLive ? <EmptyState /> : null}
       {messages.map((m) => (
         <MessageBubble key={m.id} message={m} />

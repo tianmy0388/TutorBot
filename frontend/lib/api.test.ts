@@ -121,3 +121,99 @@ describe("ApiError surface", () => {
     );
   });
 });
+
+describe("conversation recovery hydration", () => {
+  it("hydrates all recovery state atomically from one aggregate request", async () => {
+    const aggregate = {
+      conversation: {
+        session_id: "session-recovery",
+        user_id: "local-user",
+        title: "Recovered",
+        message_count: 1,
+        last_message_preview: "hello",
+        created_at: "2026-07-17T00:00:00Z",
+        updated_at: "2026-07-17T00:00:00Z",
+        messages: [
+          {
+            id: "message-1",
+            role: "user",
+            content: "hello",
+            job_id: null,
+            capability: null,
+            created_at: "2026-07-17T00:00:00Z",
+            metadata: {},
+          },
+        ],
+      },
+      jobs: [],
+      packages: [
+        {
+          package_id: "package-1",
+          topic: "recovery",
+          resources: [
+            {
+              resource_id: "resource-1",
+              type: "code",
+              title: "missing",
+              content: "",
+              format_specific: {},
+              difficulty: 2,
+              estimated_minutes: 5,
+              prerequisites: [],
+              generated_by: [],
+              confidence_score: 0.7,
+              topic: "recovery",
+              tags: [],
+              created_at: "2026-07-17T00:00:00Z",
+              metadata: { artifact_missing: true },
+            },
+          ],
+          target_profile_snapshot: {},
+          learning_path_summary: {},
+          generated_by: [],
+          metadata: {},
+          created_at: "2026-07-17T00:00:00Z",
+        },
+      ],
+      profile_summary: { user_id: "local-user", version: 3 },
+      path_summary: { path_id: "path-1", current_index: 2 },
+      recovery_warnings: [
+        {
+          code: "missing_artifact",
+          message: "One generated file is missing",
+          resource_id: "resource-1",
+          artifact_key: "code_runs/missing.png",
+        },
+      ],
+    };
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(aggregate), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { useTutorStore } = await import("./store");
+    useTutorStore.setState({
+      sessionId: "old-session",
+      messages: [],
+      latestPackage: null,
+    });
+
+    await useTutorStore
+      .getState()
+      .loadConversationAggregate("stale-browser-id", "session-recovery");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      "/conversations/session-recovery/aggregate",
+    );
+    const state = useTutorStore.getState();
+    expect(state.sessionId).toBe("session-recovery");
+    expect(state.messages.map((message) => message.content)).toEqual(["hello"]);
+    expect(state.latestPackage?.package_id).toBe("package-1");
+    expect(state.profileSummary).toEqual({ user_id: "local-user", version: 3 });
+    expect(state.pathSummary).toEqual({ path_id: "path-1", current_index: 2 });
+    expect(state.recoveryWarnings).toEqual(aggregate.recovery_warnings);
+  });
+});

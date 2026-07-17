@@ -20,6 +20,129 @@ from tutor.services.config.settings import reset_settings_cache
 from tutor.services.conversations import reset_conversation_store
 
 
+@pytest.mark.asyncio
+async def test_aggregate_recovers_all_session_records_after_owner_migration(
+    tmp_path, monkeypatch
+) -> None:
+    """Ownership is checked once at the conversation boundary.
+
+    Jobs/packages imported from a legacy local identity still belong to the
+    conversation by ``session_id`` and must not disappear after a refresh.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from tutor.services.jobs import Job, JobStatus, get_job_store, reset_job_store
+    from tutor.services.learner_profile import get_profile_store
+    from tutor.services.resource_package import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+        get_resource_package_store,
+        reset_resource_package_store,
+    )
+
+    reset_job_store()
+    reset_resource_package_store()
+    now = datetime.now(timezone.utc)
+
+    async with _client(tmp_path, monkeypatch) as client:
+        created = await client.post(
+            "/api/v1/conversations",
+            json={"session_id": "session-recovery", "user_id": "owner"},
+        )
+        assert created.status_code == 201, created.text
+        for content in ("first", "second"):
+            response = await client.post(
+                "/api/v1/conversations/session-recovery/messages?user_id=owner",
+                json={"role": "user", "content": content},
+            )
+            assert response.status_code == 201, response.text
+
+        job_store = get_job_store()
+        await job_store.init()
+        await job_store.save(
+            Job(
+                job_id="job-repaired",
+                user_id="legacy-browser-owner",
+                session_id="session-recovery",
+                status=JobStatus.FAILED,
+                error="process restarted while job was running",
+                created_at=now,
+                finished_at=now,
+            )
+        )
+
+        package_store = get_resource_package_store()
+        await package_store.init()
+        first = ResourcePackage(
+            package_id="package-first",
+            topic="first",
+            created_at=now,
+            resources=[Resource(type=ResourceType.DOCUMENT, title="first resource")],
+            learning_path_summary={"path_id": "path-1", "current_index": 1},
+            metadata={"session_id": "session-recovery"},
+        )
+        second = ResourcePackage(
+            package_id="package-second",
+            topic="second",
+            created_at=now + timedelta(seconds=1),
+            resources=[
+                Resource(
+                    resource_id="missing-resource",
+                    type=ResourceType.CODE,
+                    title="missing resource",
+                    format_specific={
+                        "artifacts": [
+                            {
+                                "name": "figure.png",
+                                "artifact_key": "code_runs/missing/figure.png",
+                                "kind": "png",
+                            }
+                        ]
+                    },
+                    metadata={
+                        "recovery_contract": {
+                            "job_id": "job-repaired",
+                            "resource_types": ["code"],
+                        }
+                    },
+                )
+            ],
+            metadata={"session_id": "session-recovery"},
+        )
+        await package_store.save(first, user_id="legacy-owner-a")
+        await package_store.save(second, user_id="legacy-owner-b")
+        await get_profile_store().init()
+
+        response = await client.get(
+            "/api/v1/conversations/session-recovery/aggregate?user_id=owner"
+        )
+
+        assert response.status_code == 200, response.text
+        aggregate = response.json()
+        assert [m["content"] for m in aggregate["conversation"]["messages"]] == [
+            "first",
+            "second",
+        ]
+        assert [j["job_id"] for j in aggregate["jobs"]] == ["job-repaired"]
+        assert [p["package_id"] for p in aggregate["packages"]] == [
+            "package-first",
+            "package-second",
+        ]
+        assert aggregate["packages"][1]["resources"][0]["metadata"]["artifact_missing"] is True
+        assert aggregate["profile_summary"]["user_id"] == "owner"
+        assert aggregate["path_summary"] == {"path_id": "path-1", "current_index": 1}
+        warning_codes = {warning["code"] for warning in aggregate["recovery_warnings"]}
+        assert warning_codes == {
+            "migrated_ownership",
+            "interrupted_job_repaired",
+            "missing_artifact",
+        }
+
+    reset_job_store()
+    reset_resource_package_store()
+
+
 def _client(tmp_path, monkeypatch, *, multi_user_enabled: bool = True) -> httpx.AsyncClient:
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("TUTOR_MULTI_USER_ENABLED", str(multi_user_enabled).lower())

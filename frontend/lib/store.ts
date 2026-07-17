@@ -25,6 +25,7 @@ import type {
   TutoringAnswer,
   EnrichmentSuggestion,
 } from "./types";
+import type { RecoveryWarning } from "./api";
 import { createJobState, reduceJobEvent, type JobsState } from "./job-reducer";
 
 // Re-export so existing consumers can keep importing ChatMessage from store.
@@ -104,6 +105,9 @@ export interface TutorState {
   // Resources
   latestPackage: ResourcePackage | null;
   resourceSelection: ResourceSelection;
+  profileSummary: Record<string, unknown>;
+  pathSummary: Record<string, unknown>;
+  recoveryWarnings: RecoveryWarning[];
 
   // Knowledge graph
   currentCourse: string;
@@ -156,6 +160,7 @@ export interface TutorState {
   setProfile: (p: LearnerProfileDetail | null) => void;
   setLatestPackage: (pkg: ResourcePackage | null) => void;
   selectResource: (resourceId: string | null) => void;
+  dismissRecoveryWarning: (index: number) => void;
   setPlannedPath: (p: PlannedPath | null) => void;
   setActiveKnowledgeBaseId: (id: string) => void;
   // 2026-06-21 plan (D10): RAG scope setters.
@@ -211,7 +216,7 @@ export interface TutorState {
     events?: import("./types").StreamEvent[];
     event_count?: number;
     result?: unknown;
-    error?: { code: string; message: string } | null;
+    error?: string | null;
   }) => void;
 }
 
@@ -256,6 +261,9 @@ export const useTutorStore = create<TutorState>()(
 
     latestPackage: null,
     resourceSelection: { packageId: null, selectedResourceId: null },
+    profileSummary: {},
+    pathSummary: {},
+    recoveryWarnings: [],
 
     currentCourse: "ai_introduction",
     plannedPath: null,
@@ -347,6 +355,10 @@ export const useTutorStore = create<TutorState>()(
         latestTutorAnswer: answer,
         latestEnrichments: enrichments,
       }),
+    dismissRecoveryWarning: (index) =>
+      set((state) => ({
+        recoveryWarnings: state.recoveryWarnings.filter((_, i) => i !== index),
+      })),
 
     // --- chat actions ---
     addMessage: (msg) =>
@@ -465,6 +477,9 @@ export const useTutorStore = create<TutorState>()(
         jobOrder: [],
         latestPackage: null,
         resourceSelection: { packageId: null, selectedResourceId: null },
+        profileSummary: {},
+        pathSummary: {},
+        recoveryWarnings: [],
         plannedPath: null,
         latestAssessment: null,
         latestStrategy: null,
@@ -544,6 +559,9 @@ export const useTutorStore = create<TutorState>()(
         jobOrder: [],
         latestPackage: null,
         resourceSelection: { packageId: null, selectedResourceId: null },
+        profileSummary: {},
+        pathSummary: {},
+        recoveryWarnings: [],
         plannedPath: null,
         latestAssessment: null,
         latestStrategy: null,
@@ -562,7 +580,7 @@ export const useTutorStore = create<TutorState>()(
      * switch back.
      */
     loadConversationAggregate: async (userId, sessionId) => {
-      const { getConversationAggregate, getResourcePackageDetail } = await import("./api");
+      const { getConversationAggregate } = await import("./api");
       const agg = await getConversationAggregate(userId, sessionId);
       const conv = agg.conversation;
       const messages = (conv.messages || []).map((m) => ({
@@ -606,9 +624,7 @@ export const useTutorStore = create<TutorState>()(
           started_at: j.started_at ? Date.parse(j.started_at) : null,
           finished_at: j.finished_at ? Date.parse(j.finished_at) : null,
           event_count: j.event_count,
-          error: j.error
-            ? { code: "JOB_ERROR", message: j.error }
-            : null,
+          error: j.error ?? null,
         };
         jobsById[j.job_id] = seeded;
         jobOrder.push(j.job_id);
@@ -626,54 +642,15 @@ export const useTutorStore = create<TutorState>()(
       // Zustand store only and is rebuilt on every conversation
       // switch. That's the right shape: it's a UI hint, not a
       // historical fact.
-      const messagesWithInterrupt: ChatMessage[] = [...messages];
-      const reapedJobs = (agg.jobs || []).filter(
-        (j) =>
-          j.status === "failed" &&
-          typeof j.error === "string" &&
-          (j.error.includes("process restarted") ||
-            j.error.includes("timed out")),
-      );
-      if (reapedJobs.length > 0 && messagesWithInterrupt.length > 0) {
-        const lastReap = reapedJobs[0];
-        const isTimeout = lastReap.error.includes("timed out");
-        const interruptionMsg: ChatMessage = {
-          id: `interrupted-${lastReap.job_id}`,
-          role: "system",
-          content: isTimeout
-            ? "任务执行超过 600 秒被系统终止。已生成的部分资源仍保留在右侧面板。"
-            : "任务在后端重启时被中断。已生成的部分资源仍保留在右侧面板。",
-          timestamp: Date.now(),
-          metadata: {
-            job_id: lastReap.job_id,
-            interrupted: true,
-            reason: lastReap.error,
-          },
-        };
-        messagesWithInterrupt.push(interruptionMsg);
-      }
-
-      // The right pane shows the latest package summary; load the
-      // full payload so ResourceDetail can render. If multiple
-      // packages belong to the session, take the most recent.
-      let latestPackage: ResourcePackage | null = null;
-      if (agg.packages && agg.packages.length > 0) {
-        const latestSummary = agg.packages[0];
-        try {
-          latestPackage = await getResourcePackageDetail(userId, latestSummary.package_id);
-        } catch (e) {
-          // best-effort: if the full payload is gone, leave the
-          // right pane empty and let the user re-trigger.
-          console.warn(
-            `[store] loadConversationAggregate: failed to load package ${latestSummary.package_id}`,
-            e,
-          );
-        }
-      }
+      // Full packages are part of the same aggregate response. Packages are
+      // in creation order, so the final item is the active right-pane view.
+      const latestPackage: ResourcePackage | null = agg.packages?.length
+        ? agg.packages[agg.packages.length - 1]
+        : null;
 
       set({
         sessionId,
-        messages: messagesWithInterrupt,
+        messages,
         activeTurn: newActiveTurn(),
         jobsById,
         jobOrder,
@@ -684,6 +661,9 @@ export const useTutorStore = create<TutorState>()(
               selectedResourceId: latestPackage.resources[0]?.resource_id || null,
             }
           : { packageId: null, selectedResourceId: null },
+        profileSummary: agg.profile_summary ?? {},
+        pathSummary: agg.path_summary ?? {},
+        recoveryWarnings: agg.recovery_warnings ?? [],
         plannedPath: null,
         latestAssessment: null,
         latestStrategy: null,

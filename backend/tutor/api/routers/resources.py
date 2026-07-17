@@ -27,6 +27,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from tutor.services.artifacts import (
+    UnsafeArtifactKey,
+    resolve_artifact_key,
+    to_artifact_key,
+)
+from tutor.services.config.settings import get_settings
 from tutor.services.identity import identity_policy_for
 from tutor.services.resource_package.schema import Resource, ResourceType
 from tutor.services.resource_package.store import get_resource_package_store
@@ -217,12 +223,15 @@ async def download_resource_file(
 
     # Currently only PPT resources have on-disk artifacts; route by type.
     if res.type == ResourceType.PPT:
-        pptx_path = (res.format_specific or {}).get("pptx_path")
-        if not pptx_path:
-            raise HTTPException(status_code=404, detail="pptx_path not set on this resource")
-        p = Path(pptx_path)
-        if not p.exists():
-            raise HTTPException(status_code=410, detail="pptx file is gone")
+        fs = res.format_specific or {}
+        raw = fs.get("artifact_key") or fs.get("pptx_path")
+        if not raw:
+            raise HTTPException(status_code=404, detail="artifact_key not set on this resource")
+        p = _resolve_stored_artifact(
+            str(raw), is_key=bool(fs.get("artifact_key"))
+        )
+        if not p.is_file():
+            raise HTTPException(status_code=404, detail="pptx file is missing")
         # Filename uses the resource title for nicer downloads
         safe_title = _safe_filename(res.title) + ".pptx"
         return FileResponse(
@@ -366,28 +375,45 @@ async def _serve_resource_artifact(
             break
     if match is None:
         raise HTTPException(status_code=404, detail=f"artifact '{artifact_name}' not declared")
-
-    path_str = match.get("path")
-    if not path_str:
-        raise HTTPException(status_code=404, detail="artifact has no path")
-
-    p = Path(str(path_str)).resolve()
-    # Security: keep the resolved path inside data_dir.
-    try:
-        data_root = get_settings().data_dir.resolve()
-        p.relative_to(data_root)
-    except ValueError:
+    if match.get("unresolved"):
         raise HTTPException(
             status_code=403,
             detail="artifact path is outside the data directory",
-        ) from None
+        )
 
-    if not p.exists():
-        raise HTTPException(status_code=410, detail="artifact file is gone")
+    artifact_key = match.get("artifact_key")
+    path_str = match.get("path")
+    raw = artifact_key or path_str
+    if not raw:
+        raise HTTPException(status_code=404, detail="artifact has no artifact_key")
+
+    p = _resolve_stored_artifact(str(raw), is_key=bool(artifact_key))
+
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="artifact file is missing")
 
     kind = str(match.get("kind") or p.suffix.lstrip(".")).lower()
     media_type = _ARTIFACT_MEDIA_TYPES.get(kind, "application/octet-stream")
     return FileResponse(path=str(p), media_type=media_type, filename=p.name)
+
+
+def _resolve_stored_artifact(raw: str, *, is_key: bool) -> Path:
+    """Resolve canonical keys plus safely-contained legacy path values."""
+    data_dir = get_settings().data_dir
+    try:
+        if is_key:
+            return resolve_artifact_key(raw, data_dir)
+        legacy = Path(raw)
+        if legacy.is_absolute():
+            key = to_artifact_key(legacy, data_dir)
+        else:
+            key = raw.replace("\\", "/")
+        return resolve_artifact_key(key, data_dir)
+    except UnsafeArtifactKey:
+        raise HTTPException(
+            status_code=403,
+            detail="artifact path is outside the data directory",
+        ) from None
 
 
 def _safe_filename(name: str) -> str:
