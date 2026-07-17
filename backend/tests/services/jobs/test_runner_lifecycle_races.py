@@ -14,6 +14,7 @@ from tutor.services.jobs.contracts import JobResultContract
 from tutor.services.jobs.runner import JobRunner
 from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
 from tutor.services.jobs.store import JobStore
+from tutor.services.resource_package.schema import ArtifactRef
 
 
 class _Capabilities:
@@ -407,10 +408,17 @@ async def test_runner_terminal_public_projection_redacts_internal_payloads(
         "refresh_token": "follow-up-refresh-secret",
         "source_code": generated_code,
     }
+    artifact_key_secret = "SECRET_TOKEN_ARTIFACT_KEY_123"
+    dedupe_key_secret = "SECRET_TOKEN_DEDUPE_KEY_123"
+    artifact = ArtifactRef(
+        name=provider_key,
+        kind=jwt,
+        artifact_key=f"artifacts/{artifact_key_secret}",
+    )
     spec = FollowUpTaskSpec(
         kind="video_render",
         payload=follow_up_payload,
-        dedupe_key="video:pkg-1:video-1",
+        dedupe_key=dedupe_key_secret,
     )
     internal_result = CapabilityResult(
         assistant_message="queued",
@@ -421,6 +429,7 @@ async def test_runner_terminal_public_projection_redacts_internal_payloads(
             "provider_note": f"JWT={jwt}; key={provider_key}\n{pem}",
             "source_code": generated_code,
         },
+        artifacts=(artifact,),
         follow_up_tasks=(spec,),
     )
 
@@ -444,6 +453,8 @@ async def test_runner_terminal_public_projection_redacts_internal_payloads(
         jwt,
         provider_key,
         pem_body,
+        artifact_key_secret,
+        dedupe_key_secret,
     ):
         assert secret not in public_blob
     assert "token = tokenizer.next_token()" in public_blob
@@ -455,14 +466,33 @@ async def test_runner_terminal_public_projection_redacts_internal_payloads(
     assert result_event["metadata"]["follow_up_tasks"][0]["payload"][
         "resource_id"
     ] == "video-1"
+    public_event_artifact = result_event["metadata"]["artifacts"][0]
+    assert public_event_artifact["name"] == "[REDACTED]"
+    assert public_event_artifact["kind"] == "[REDACTED]"
+    assert "[REDACTED]" in public_event_artifact["artifact_key"]
+    assert result_event["metadata"]["follow_up_tasks"][0]["dedupe_key"] == (
+        "[REDACTED]"
+    )
     contract = JobResultContract.model_validate(stored.result)
     assert contract.follow_up_tasks[0].payload["resource_id"] == "video-1"
+    assert contract.follow_up_tasks[0].dedupe_key == "[REDACTED]"
+    assert contract.artifacts[0].resource_type == "[REDACTED]"
+    assert contract.artifacts[0].title == "[REDACTED]"
+    assert "[REDACTED]" in contract.artifacts[0].metadata["artifact_key"]
+    terminal_event = next(
+        event for event in stored.events if event["type"] == "job_terminal"
+    )
+    assert terminal_event["metadata"]["contract"] == stored.result
 
     # Public projections must never mutate the internal hand-off that a
     # durable follow-up scheduler consumes.
     assert internal_result.payload["refresh_token"] == "result-refresh-secret"
     assert spec.payload["refresh_token"] == "follow-up-refresh-secret"
+    assert spec.dedupe_key == dedupe_key_secret
     assert provider_key in spec.payload["source_code"]
+    assert artifact.name == provider_key
+    assert artifact.kind == jwt
+    assert artifact.artifact_key == f"artifacts/{artifact_key_secret}"
 
 
 @pytest.mark.asyncio

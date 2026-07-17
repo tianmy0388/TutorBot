@@ -42,7 +42,7 @@ from typing import Any
 from loguru import logger
 from pydantic import ValidationError
 
-from tutor.core.capability_result import CapabilityResult
+from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
 from tutor.core.context import UnifiedContext
 from tutor.core.redaction import redact_sensitive, redact_text
 from tutor.core.stream_bus import StreamBus
@@ -60,6 +60,36 @@ from tutor.services.jobs.contracts import (
 from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
 from tutor.services.jobs.store import JobStore, get_job_store
 from tutor.services.resource_package.schema import ArtifactRef
+
+
+def _public_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    """Return a detached recursive public projection of an internal mapping."""
+    projected = redact_sensitive(value)
+    return projected if isinstance(projected, dict) else {}
+
+
+def _public_follow_up(spec: FollowUpTaskSpec) -> FollowUpTaskContract:
+    return FollowUpTaskContract.model_validate(
+        _public_mapping(
+            {
+                "kind": spec.kind,
+                "payload": spec.payload,
+                "dedupe_key": spec.dedupe_key,
+            }
+        )
+    )
+
+
+def _public_artifact(artifact: ArtifactRef) -> ArtifactResult:
+    return ArtifactResult.model_validate(
+        _public_mapping(
+            {
+                "resource_type": artifact.kind or "artifact",
+                "title": artifact.name,
+                "metadata": {"artifact_key": artifact.artifact_key},
+            }
+        )
+    )
 
 
 class JobRunner:
@@ -591,7 +621,7 @@ class JobRunner:
         payload = capability_result.payload
         if isinstance(payload.get("result_contract"), dict):
             try:
-                public_result_contract = redact_sensitive(payload["result_contract"])
+                public_result_contract = _public_mapping(payload["result_contract"])
                 base = JobResultContract.model_validate(
                     {
                         **public_result_contract,
@@ -603,11 +633,7 @@ class JobRunner:
                 return base.model_copy(
                     update={
                         "follow_up_tasks": [
-                            FollowUpTaskContract(
-                                kind=spec.kind,
-                                payload=redact_sensitive(spec.payload),
-                                dedupe_key=spec.dedupe_key,
-                            )
+                            _public_follow_up(spec)
                             for spec in capability_result.follow_up_tasks
                         ]
                     }
@@ -651,11 +677,7 @@ class JobRunner:
                     ArtifactResult.model_validate(redact_sensitive(artifact))
                 )
         public_artifacts.extend(
-            ArtifactResult(
-                resource_type=artifact.kind or "artifact",
-                title=artifact.name,
-                metadata={"artifact_key": artifact.artifact_key},
-            )
+            _public_artifact(artifact)
             for artifact in capability_result.artifacts
         )
 
@@ -666,11 +688,7 @@ class JobRunner:
             assistant_message=assistant_message,
             artifacts=public_artifacts,
             follow_up_tasks=[
-                FollowUpTaskContract(
-                    kind=spec.kind,
-                    payload=redact_sensitive(spec.payload),
-                    dedupe_key=spec.dedupe_key,
-                )
+                _public_follow_up(spec)
                 for spec in capability_result.follow_up_tasks
             ],
             finished_at=finished_at,
@@ -702,22 +720,28 @@ class JobRunner:
                 event_type="result",
                 content=json.dumps(result_payload, ensure_ascii=False, default=str),
                 seq=next_seq,
-                metadata={
-                    "artifacts": [
-                        redact_sensitive(artifact.model_dump(mode="json"))
-                        for artifact in (capability_result.artifacts if capability_result else ())
-                    ],
-                    "follow_up_tasks": [
-                        {
-                            "kind": spec.kind,
-                            "payload": redact_sensitive(spec.payload),
-                            "dedupe_key": spec.dedupe_key,
-                        }
-                        for spec in (
-                            capability_result.follow_up_tasks if capability_result else ()
-                        )
-                    ],
-                },
+                metadata=_public_mapping(
+                    {
+                        "artifacts": [
+                            artifact.model_dump(mode="json")
+                            for artifact in (
+                                capability_result.artifacts if capability_result else ()
+                            )
+                        ],
+                        "follow_up_tasks": [
+                            {
+                                "kind": spec.kind,
+                                "payload": spec.payload,
+                                "dedupe_key": spec.dedupe_key,
+                            }
+                            for spec in (
+                                capability_result.follow_up_tasks
+                                if capability_result
+                                else ()
+                            )
+                        ],
+                    }
+                ),
             )
             compatibility_events.append(result_event)
             next_seq += 1
