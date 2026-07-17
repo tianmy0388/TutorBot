@@ -186,6 +186,8 @@ class LearnerProfileCapability(BaseCapability):
                 "user_id": user_id,
                 "mode": mode,
                 "profile": updated_profile.to_summary(),
+                "knowledge_scores": dict(updated_profile.knowledge_map.scores),
+                "event_watermark": updated_profile.event_watermark,
                 "probe_questions": probe_questions,
                 "next_step": (
                     "answer_probe_questions"

@@ -9,10 +9,9 @@ from __future__ import annotations
 import math
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -31,6 +30,11 @@ class EventType(str, Enum):
     PATH_ADVANCED = "path_advanced"            # moved to next path node
     RESOURCE_RATED = "resource_rated"          # 1-5 star rating
     PROFILE_UPDATED = "profile_updated"        # learner profile changed
+    EXERCISE_SCORED = "exercise_scored"        # scored evidence (0-1)
+    ASSESSMENT_COMPLETED = "assessment_completed"  # immediate profile trigger
+
+
+LearningEventType = EventType
 
 
 class AssessmentDimension(str, Enum):
@@ -65,7 +69,9 @@ class LearningEvent:
     model_config = {} if not hasattr(dataclass, "model_config") else None
 
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    sequence: int = 0
     user_id: str = ""
+    session_id: str = ""
     event_type: EventType = EventType.RESOURCE_VIEWED
     target_id: str = ""  # resource_id, exercise_id, package_id, etc.
     concept_id: str = ""  # optional concept this event relates to
@@ -73,12 +79,23 @@ class LearningEvent:
     score: float | None = None  # for exercises: 0-1
     correct: bool | None = None  # for exercise_attempted
     metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        if self.score is not None:
+            value = float(self.score)
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError("score must be finite and in [0, 1]")
+            self.score = value
+        if self.event_type == EventType.EXERCISE_SCORED and not self.concept_id.strip():
+            raise ValueError("concept_id is required for a scored event")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
+            "sequence": self.sequence,
             "user_id": self.user_id,
+            "session_id": self.session_id,
             "event_type": self.event_type.value,
             "target_id": self.target_id,
             "concept_id": self.concept_id,
@@ -90,10 +107,12 @@ class LearningEvent:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "LearningEvent":
+    def from_dict(cls, data: dict[str, Any]) -> LearningEvent:
         return cls(
             event_id=data.get("event_id", uuid.uuid4().hex),
+            sequence=int(data.get("sequence", 0)),
             user_id=data.get("user_id", ""),
+            session_id=data.get("session_id", ""),
             event_type=EventType(data["event_type"]) if "event_type" in data else EventType.RESOURCE_VIEWED,
             target_id=data.get("target_id", ""),
             concept_id=data.get("concept_id", ""),
@@ -104,7 +123,7 @@ class LearningEvent:
             created_at=(
                 datetime.fromisoformat(data["created_at"])
                 if "created_at" in data
-                else datetime.now(timezone.utc)
+                else datetime.now(UTC)
             ),
         )
 
@@ -151,7 +170,7 @@ class AssessmentReport:
     notes: str = ""
     event_window_hours: int = 168  # default 1 week
     events_analyzed: int = 0
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -218,7 +237,7 @@ class StrategyDecision:
     actions: list[RecommendedAction] = field(default_factory=list)
     overall_directive: str = ""
     notes: str = ""
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -237,6 +256,7 @@ __all__ = [
     "DimensionScore",
     "EventType",
     "LearningEvent",
+    "LearningEventType",
     "RecommendedAction",
     "StrategyDecision",
     "TrajectoryTrend",

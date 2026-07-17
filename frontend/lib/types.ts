@@ -219,6 +219,9 @@ export interface PlannedPath {
   available_count: number;
   locked_count: number;
   generated_at: string;
+  profile_version?: number;
+  edges?: Array<{ from: string; to: string; type: string }>;
+  rationale?: string;
 }
 
 export interface KGNode {

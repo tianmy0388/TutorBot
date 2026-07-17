@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from tutor.services.learner_profile.builder import (
     DialogueSignal,
     ExerciseResult,
@@ -12,7 +11,6 @@ from tutor.services.learner_profile.builder import (
 from tutor.services.learner_profile.schema import (
     CognitiveStyle,
     GoalType,
-    KnowledgeMap,
     LearnerProfile,
     ProfileDiff,
     Urgency,
@@ -165,3 +163,38 @@ async def test_mastery_breakdown(builder: ProfileBuilder):
     assert breakdown["weak"] == ["a"]
     assert "c" in breakdown["strong"]
     assert 0 < breakdown["average"] < 1
+
+
+def test_aggregate_scored_events_is_deterministic_and_tracks_evidence() -> None:
+    import math
+
+    from tutor.services.learning_events.schema import EventType, LearningEvent
+
+    builder = ProfileBuilder(store=None)
+    profile = LearnerProfile(user_id="u")
+    events = [
+        LearningEvent(
+            sequence=index,
+            user_id="u",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="attention",
+            score=score,
+            metadata={"resource_format": resource_format},
+        )
+        for index, score, resource_format in (
+            (1, 0.2, "video"),
+            (2, 0.6, "video"),
+            (3, 1.0, "exercise"),
+        )
+    ]
+
+    first = builder.aggregate_events(profile, events, through_sequence=3)
+    second = builder.aggregate_events(profile, list(reversed(events)), through_sequence=3)
+
+    assert first.knowledge_map.scores == second.knowledge_map.scores
+    assert first.knowledge_map.get("attention") == pytest.approx(0.616)
+    assert first.metadata["concept_confidence"]["attention"] == pytest.approx(
+        1 - math.exp(-1)
+    )
+    assert first.metadata["preferred_resource_formats"] == ["video", "exercise"]
+    assert first.event_watermark == 3

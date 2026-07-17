@@ -1,7 +1,4 @@
-"""PathPlanningCapability — learning path planning & resource push.
-
-Placeholder for Phase 3.
-"""
+"""PathPlanningCapability — persisted mastery-aware learning paths."""
 
 from __future__ import annotations
 
@@ -23,7 +20,27 @@ class PathPlanningCapability(BaseCapability):
         tags=["path", "planning"],
     )
 
+    def __init__(self, *, profile_store=None, kg_service=None) -> None:
+        super().__init__()
+        self._profile_store = profile_store
+        self._kg_service = kg_service
+
     async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
+        from tutor.services.jobs.follow_up import PathRebuildFollowUpCapability
+        from tutor.services.learner_profile.store import get_profile_store
+
+        store = self._profile_store or get_profile_store()
+        profile = await store.get(context.user_id)
+        if profile is None:
+            return CapabilityResult(
+                assistant_message="尚无画像，暂不能规划学习路径",
+                payload={
+                    "status": "empty",
+                    "code": "LEARNING_PROFILE_NOT_FOUND",
+                    "nodes": [],
+                    "edges": [],
+                },
+            )
         async with stream.stage("locate", source="path_capability"):
             await stream.observation(
                 "在知识图谱中定位学生当前位置...",
@@ -49,14 +66,17 @@ class PathPlanningCapability(BaseCapability):
                 "按顺序 + 学习节奏推送资源...",
                 source="path_capability",
             )
-        await stream.observation(
-            "(占位) PathPlanningCapability 完整实现将在 Phase 3",
-            source="path_capability",
+        context.metadata.update(
+            {
+                "profile_version": profile.version,
+                "profile": profile.model_dump(mode="json"),
+                "course": str(context.metadata.get("course") or ""),
+            }
         )
-        return CapabilityResult(
-            assistant_message="学习路径规划已完成",
-            payload={"status": "placeholder", "next_step": "path_planning_phase_3"},
-        )
+        return await PathRebuildFollowUpCapability(
+            profile_store=store,
+            kg_service=self._kg_service,
+        ).run(context, stream)
 
 
 __all__ = ["PathPlanningCapability"]

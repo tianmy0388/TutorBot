@@ -54,8 +54,31 @@ const STATUS_META: Record<
   },
 };
 
-export function PathVisualizer({ path }: { path: PlannedPath }) {
+export function PathVisualizer({
+  path,
+  loading = false,
+  error = null,
+}: {
+  path: PlannedPath | null;
+  loading?: boolean;
+  error?: string | null;
+}) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  if (loading) {
+    return <div className="p-6 text-center text-xs text-fg-muted">学习路径加载中…</div>;
+  }
+  if (error) {
+    return (
+      <div className="p-6 text-center text-xs text-red-400">
+        <p>学习路径加载失败</p>
+        <p className="mt-1 text-fg-muted">{error}</p>
+      </div>
+    );
+  }
+  if (!path || path.nodes.length === 0) {
+    return <div className="p-6 text-center text-xs text-fg-muted">暂无学习路径</div>;
+  }
 
   const completed = path.completed_count;
   const total = path.nodes.length;

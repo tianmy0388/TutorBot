@@ -21,6 +21,7 @@ import { ProfilePanel } from "@/components/profile/ProfilePanel";
 import { ResourceTray } from "@/components/resources/ResourceTray";
 import { ResourceDetail, ResourceEmptyDetail } from "@/components/resources/ResourceCard";
 import { PathVisualizer } from "@/components/kg/PathVisualizer";
+import { useLearningPath } from "@/hooks/useLearningPath";
 import { TutorPanel } from "@/components/tutor/TutorPanel";
 import { AssessmentPanel } from "@/components/assessment/AssessmentPanel";
 import { Sidebar } from "@/components/layout/Sidebar";
@@ -373,22 +374,16 @@ function TabButton({
 // ---------------------------------------------------------------------------
 
 function PathPane() {
-  const plannedPath = useTutorStore((s) => s.plannedPath);
+  const { path: plannedPath, status, error } = useLearningPath();
   const latestPackage = useTutorStore((s) => s.latestPackage);
 
   return (
     <div className="h-full overflow-y-auto">
-      {plannedPath ? (
-        <PathVisualizer path={plannedPath} />
-      ) : (
-        <div className="p-6 text-center text-fg-muted text-xs space-y-2">
-          <Layers className="w-10 h-10 mx-auto opacity-30" />
-          <p>暂无学习路径</p>
-          <p className="text-fg-subtle leading-relaxed">
-            完成一次资源生成后，系统会基于知识图谱为你规划路径
-          </p>
-        </div>
-      )}
+      <PathVisualizer
+        path={plannedPath}
+        loading={status === "loading"}
+        error={status === "failed" ? error : null}
+      />
       {latestPackage && latestPackage.resources.length > 0 && (
         <div
           className="border-t"

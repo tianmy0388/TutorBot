@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from tutor.services.jobs.schema import JobStatus
+from tutor.services.jobs.store import JobStore
+from tutor.services.learner_profile.store import ProfileStore
+from tutor.services.learning_events.schema import EventType, LearningEvent
+from tutor.services.learning_events.store import LearningEventStore
+from tutor.services.learning_events.workflow import LearningWorkflow
+
+
+@pytest.fixture
+async def workflow(tmp_path):
+    events = LearningEventStore(tmp_path / "events.db")
+    profiles = ProfileStore(tmp_path / "profiles.db")
+    jobs = JobStore(tmp_path / "jobs.db")
+    await events.init()
+    await profiles.init()
+    await jobs.init()
+    service = LearningWorkflow(
+        event_store=events,
+        profile_store=profiles,
+        job_store=jobs,
+    )
+    yield service, events, profiles, jobs
+    await events.close()
+    await profiles.close()
+    await jobs.close()
+
+
+@pytest.mark.asyncio
+async def test_five_scored_events_create_one_watermark_deduped_profile_child(workflow):
+    service, events, _, jobs = workflow
+    for index in range(1, 7):
+        appended = await events.append(
+            LearningEvent(
+                event_id=f"evt-{index}",
+                user_id="local-user",
+                session_id="sess-loop",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=index / 10,
+            )
+        )
+        children = await service.reconcile_user(
+            "local-user", session_id="sess-loop", through_sequence=appended.event.sequence
+        )
+        if index < 5:
+            assert children == []
+
+    root = await jobs.get(service.root_job_id("local-user"))
+    assert root is not None and root.status == JobStatus.SUCCEEDED
+    children = await jobs.get_children(root.job_id)
+    assert len(children) == 1
+    assert children[0].task_kind == "profile_update"
+    assert children[0].dedupe_key == "profile_update:0"
+    assert children[0].metadata["through_sequence"] == 5
+
+
+@pytest.mark.asyncio
+async def test_assessment_completion_triggers_immediately_and_survives_restart(workflow):
+    service, events, _, jobs = workflow
+    appended = await events.append(
+        LearningEvent(
+            event_id="assessment-1",
+            user_id="local-user",
+            session_id="sess-assessment",
+            event_type=EventType.ASSESSMENT_COMPLETED,
+            concept_id="attention",
+            score=0.8,
+        )
+    )
+
+    await service.reconcile_user("local-user", session_id="sess-assessment")
+    fresh = LearningWorkflow(event_store=events, profile_store=service.profile_store, job_store=jobs)
+    await fresh.reconcile_user("local-user", session_id="sess-assessment")
+
+    root = await jobs.get(service.root_job_id("local-user"))
+    children = await jobs.get_children(root.job_id)
+    assert len(children) == 1
+    assert children[0].metadata["through_sequence"] == appended.event.sequence
+
+
+@pytest.mark.asyncio
+async def test_learning_root_creation_is_idempotent_across_store_instances(tmp_path):
+    db_path = tmp_path / "jobs.db"
+    first = JobStore(db_path)
+    second = JobStore(db_path)
+    await first.init()
+    await second.init()
+    root = __import__("tutor.services.jobs.schema", fromlist=["Job"]).Job(
+        job_id="learning-loop-stable",
+        user_id="local-user",
+        capability="learning_loop",
+        status=JobStatus.SUCCEEDED,
+    )
+
+    a, b = await asyncio.gather(first.ensure_parent(root), second.ensure_parent(root))
+
+    assert a.job_id == b.job_id
+    assert await first.count("local-user") == 1
+    await first.close()
+    await second.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_all_repairs_event_to_job_crash_window(workflow):
+    service, events, _, jobs = workflow
+    for index in range(5):
+        await events.append(
+            LearningEvent(
+                event_id=f"crash-{index}",
+                user_id="local-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.5,
+            )
+        )
+    assert await jobs.get(service.root_job_id("local-user")) is None
+
+    repaired = await service.reconcile_all()
+
+    assert repaired == 1
+    root = await jobs.get(service.root_job_id("local-user"))
+    assert len(await jobs.get_children(root.job_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_path_child_is_globally_deduped_by_user_and_profile_version(workflow):
+    from tutor.core.capability_result import FollowUpTaskSpec
+    from tutor.services.jobs.follow_up import FollowUpScheduler
+    from tutor.services.jobs.schema import Job
+
+    _, _, _, jobs = workflow
+    parents = [
+        await jobs.ensure_parent(
+            Job(
+                job_id=f"profile-parent-{index}",
+                user_id="local-user",
+                capability="profile_update",
+                status=JobStatus.SUCCEEDED,
+            )
+        )
+        for index in (1, 2)
+    ]
+    spec = FollowUpTaskSpec(
+        kind="path_rebuild",
+        dedupe_key="path_rebuild:2",
+        payload={
+            "user_id": "local-user",
+            "profile_version": 2,
+            "profile": {"user_id": "local-user", "version": 2},
+        },
+    )
+
+    first = (await FollowUpScheduler(jobs).enqueue(parents[0].job_id, (spec,)))[0]
+    second = (await FollowUpScheduler(jobs).enqueue(parents[1].job_id, (spec,)))[0]
+
+    assert first.job_id == second.job_id

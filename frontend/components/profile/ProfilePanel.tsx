@@ -50,7 +50,7 @@ type Tab = "overview" | "knowledge" | "errors";
 // ---------------------------------------------------------------------------
 
 export function ProfilePanel() {
-  const { profile, loading, error, refresh } = useProfile();
+  const { profile, loading, error, status, refresh } = useProfile();
   const [tab, setTab] = useState<Tab>("overview");
   const latestAssessment = useTutorStore((s) => s.latestAssessment);
 
@@ -72,7 +72,7 @@ export function ProfilePanel() {
       </div>
 
       {!profile ? (
-        <EmptyProfile loading={loading} error={error} onRefresh={refresh} />
+        <EmptyProfile loading={loading || status === "loading"} error={error} onRefresh={refresh} />
       ) : (
         <>
           <div className="flex gap-1 mb-3 text-xs shrink-0">

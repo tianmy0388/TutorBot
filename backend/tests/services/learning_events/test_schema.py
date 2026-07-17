@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-from pydantic import ValidationError
-
 from tutor.services.learning_events.schema import (
     ActionType,
     AssessmentDimension,
@@ -18,6 +16,21 @@ from tutor.services.learning_events.schema import (
     StrategyDecision,
     TrajectoryTrend,
 )
+
+
+@pytest.mark.parametrize("score", [-0.01, 1.01, float("nan"), float("inf")])
+def test_scored_event_rejects_invalid_score(score) -> None:
+    with pytest.raises(ValueError, match="score"):
+        LearningEvent(
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="attention",
+            score=score,
+        )
+
+
+def test_scored_event_requires_concept() -> None:
+    with pytest.raises(ValueError, match="concept"):
+        LearningEvent(event_type=EventType.EXERCISE_SCORED, score=0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +66,7 @@ def test_event_default_id_is_uuid():
 
 def test_event_default_timestamp_is_now():
     e = LearningEvent()
-    delta = (datetime.now(timezone.utc) - e.created_at).total_seconds()
+    delta = (datetime.now(UTC) - e.created_at).total_seconds()
     assert delta < 1.0
 
 

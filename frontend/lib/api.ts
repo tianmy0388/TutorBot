@@ -148,8 +148,14 @@ export const getProfileSummary = (userId: string) =>
 
 export const getProfile = (userId: string) =>
   request<LearnerProfileDetail>(
-    `/profile/${encodeURIComponent(userId)}`,
+    `/learning/profile/${encodeURIComponent(userId)}`,
   ).catch((e) => {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  });
+
+export const getLearningPath = (userId: string) =>
+  request<PlannedPath>(`/learning/path/${encodeURIComponent(userId)}`).catch((e) => {
     if (e instanceof ApiError && e.status === 404) return null;
     throw e;
   });

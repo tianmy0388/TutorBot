@@ -176,6 +176,11 @@ class JobStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_parent_dedupe "
                 "ON jobs (parent_job_id, dedupe_key)"
             )
+            await conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_learning_follow_up_dedupe "
+                "ON jobs (user_id, task_kind, dedupe_key) "
+                "WHERE task_kind IN ('profile_update', 'path_rebuild')"
+            )
         logger.info(f"JobStore ready at {self.db_path}")
 
     async def close(self) -> None:
@@ -242,6 +247,30 @@ class JobStore:
             session.add(self._to_row(job))
         return job
 
+    async def ensure_parent(self, job: Job) -> Job:
+        """Atomically create a deterministic root job without replacing it."""
+        if job.parent_job_id is not None:
+            raise ValueError("ensure_parent requires a root job")
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = self._to_row(job)
+            values = {
+                column.name: getattr(row, column.name)
+                for column in JobRow.__table__.columns
+                if column.name != "id"
+            }
+            await session.execute(
+                sqlite_insert(JobRow)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["job_id"])
+            )
+            persisted = (
+                await session.execute(select(JobRow).where(JobRow.job_id == job.job_id))
+            ).scalar_one()
+            return self._row_to_job(persisted)
+
     async def create_child_if_absent(
         self,
         *,
@@ -283,18 +312,20 @@ class JobStore:
             await session.execute(
                 sqlite_insert(JobRow)
                 .values(**values)
-                .on_conflict_do_nothing(
-                    index_elements=["parent_job_id", "dedupe_key"]
-                )
+                .on_conflict_do_nothing()
             )
-            row = (
-                await session.execute(
-                    select(JobRow).where(
-                        JobRow.parent_job_id == parent_job_id,
-                        JobRow.dedupe_key == dedupe_key,
-                    )
+            if task_kind in {"profile_update", "path_rebuild"}:
+                predicate = (
+                    JobRow.user_id == parent.user_id,
+                    JobRow.task_kind == task_kind,
+                    JobRow.dedupe_key == dedupe_key,
                 )
-            ).scalar_one()
+            else:
+                predicate = (
+                    JobRow.parent_job_id == parent_job_id,
+                    JobRow.dedupe_key == dedupe_key,
+                )
+            row = (await session.execute(select(JobRow).where(*predicate))).scalar_one()
             return self._row_to_job(row)
 
     async def update_status(

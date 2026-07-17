@@ -15,7 +15,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTutorStore } from "@/lib/store";
 import { ApiError, getProfile } from "@/lib/api";
 import type { LearnerProfileDetail } from "@/lib/types";
@@ -25,6 +25,7 @@ export function useProfile(userId?: string): {
   loaded: boolean;
   loading: boolean;
   error: string | null;
+  status: "loading" | "empty" | "success" | "failed";
   refresh: () => Promise<void>;
 } {
   const profile = useTutorStore((s) => s.profile);
@@ -35,15 +36,19 @@ export function useProfile(userId?: string): {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestGeneration = useRef(0);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (!target) return;
+    const generation = ++requestGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const p = await getProfile(target);
+      if (generation !== requestGeneration.current) return;
       setProfile(p);
     } catch (e: any) {
+      if (generation !== requestGeneration.current) return;
       // 404 = the user simply has no profile yet. That's a normal
       // first-load state, not a failure; surface it as no profile
       // instead of an error.
@@ -53,16 +58,28 @@ export function useProfile(userId?: string): {
       }
       setError(e?.message || String(e));
     } finally {
-      setLoading(false);
+      if (generation === requestGeneration.current) setLoading(false);
     }
-  };
+  }, [setProfile, target]);
+
+  useEffect(() => {
+    return () => {
+      requestGeneration.current += 1;
+    };
+  }, [target]);
 
   useEffect(() => {
     if (!loaded && target) {
       void refresh();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target]);
+  }, [loaded, refresh, target]);
 
-  return { profile, loaded, loading, error, refresh };
+  const status = error
+    ? "failed"
+    : profile
+      ? "success"
+      : loaded
+        ? "empty"
+        : "loading";
+  return { profile, loaded, loading, error, status, refresh };
 }

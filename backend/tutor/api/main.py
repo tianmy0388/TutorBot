@@ -75,6 +75,14 @@ async def lifespan(app: FastAPI):
         logger.exception(f"ProfileStore init failed: {exc!r}")
 
     try:
+        from tutor.services.learning_events import get_learning_event_store
+
+        await get_learning_event_store().init()
+        logger.info("LearningEventStore initialised")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"LearningEventStore init failed: {exc!r}")
+
+    try:
         from tutor.services.resource_package.store import get_resource_package_store
 
         await get_resource_package_store().init()
@@ -87,6 +95,10 @@ async def lifespan(app: FastAPI):
 
         await get_job_store().init()
         logger.info("JobStore initialised")
+
+        from tutor.services.learning_events.workflow import get_learning_workflow
+
+        await get_learning_workflow().reconcile_all()
 
         # On restart, mark any in-flight jobs as failed so they don't
         # block the UI (the asyncio tasks are gone).
@@ -136,6 +148,14 @@ async def lifespan(app: FastAPI):
             await get_mcp_registry().stop_all()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"MCP shutdown failed (non-fatal): {exc!r}")
+        try:
+            from tutor.services.learner_profile import get_profile_store
+            from tutor.services.learning_events import get_learning_event_store
+
+            await get_learning_event_store().close()
+            await get_profile_store().close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Learning stores shutdown failed (non-fatal): {exc!r}")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -197,6 +217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from tutor.api.routers.jobs import router as jobs_router
     from tutor.api.routers.knowledge_bases import router as kb_router
     from tutor.api.routers.knowledge_graph import router as kg_router
+    from tutor.api.routers.learning import router as learning_router
     from tutor.api.routers.plans import router as plans_router
     from tutor.api.routers.resources import router as resources_router
     from tutor.api.routers.unified_ws import router as ws_router
@@ -210,6 +231,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(plans_router, prefix="/api/v1", tags=["plans"])
     app.include_router(config_router, prefix="/api/v1", tags=["config"])
     app.include_router(conversations_router, prefix="/api/v1", tags=["conversations"])
+    app.include_router(learning_router, prefix="/api/v1", tags=["learning"])
+    # Compatibility alias for the documented non-versioned learning API.
+    app.include_router(
+        learning_router,
+        prefix="/api",
+        tags=["learning"],
+        include_in_schema=False,
+    )
     app.include_router(ws_router, prefix="/api/v1", tags=["websocket"])
 
     # Root info

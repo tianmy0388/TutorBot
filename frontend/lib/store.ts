@@ -327,7 +327,7 @@ export const useTutorStore = create<TutorState>()(
       set({ theme });
     },
     setSettingsOpen: (open) => set({ settingsOpen: open }),
-    setProfile: (p) => set({ profile: p, profileLoaded: p !== null }),
+    setProfile: (p) => set({ profile: p, profileLoaded: true }),
     setLatestPackage: (pkg) =>
       set((state) => ({
         latestPackage: pkg,

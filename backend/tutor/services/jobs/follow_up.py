@@ -11,6 +11,12 @@ from tutor.services.jobs.store import JobStore
 from tutor.services.resource_package.schema import ArtifactRef
 
 
+async def _require_current_claim(context: UnifiedContext) -> None:
+    validator = context.metadata.get("_claim_validator")
+    if callable(validator) and not await validator():
+        raise PermissionError("follow-up claim is no longer current")
+
+
 class FollowUpScheduler:
     """Persist follow-up specs as child jobs before parent terminalization."""
 
@@ -135,8 +141,209 @@ class VideoRenderFollowUpCapability(BaseCapability):
         )
 
 
+class ProfileUpdateFollowUpCapability(BaseCapability):
+    """Aggregate a stable learning-event window without invoking an LLM."""
+
+    manifest = CapabilityManifest(
+        name="profile_update",
+        description="内部确定性学习画像更新子任务",
+        stages=["profile_update"],
+        tags=["internal", "follow_up", "profile"],
+    )
+
+    def __init__(self, *, event_store=None, profile_store=None, builder=None) -> None:
+        super().__init__()
+        self._event_store = event_store
+        self._profile_store = profile_store
+        self._builder = builder
+
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
+        from tutor.services.learner_profile.builder import ProfileBuilder
+        from tutor.services.learner_profile.schema import empty_profile
+        from tutor.services.learner_profile.store import get_profile_store
+        from tutor.services.learning_events.store import get_learning_event_store
+
+        event_store = self._event_store or get_learning_event_store()
+        profile_store = self._profile_store or get_profile_store()
+        builder = self._builder or ProfileBuilder(store=profile_store)
+        start = int(context.metadata["from_watermark"])
+        through = int(context.metadata["through_sequence"])
+        if through <= start:
+            raise ValueError("profile event window must advance")
+        await _require_current_claim(context)
+        current = await profile_store.get(context.user_id)
+        current = current or empty_profile(context.user_id)
+        if current.event_watermark < through:
+            if current.event_watermark != start:
+                raise RuntimeError("profile watermark is stale")
+            events = await event_store.list_since(
+                context.user_id, start, through_sequence=through
+            )
+            candidate = builder.aggregate_events(
+                current, events, through_sequence=through
+            )
+            outcome = None
+
+            async def persist_profile() -> None:
+                nonlocal outcome
+                outcome = await profile_store.save_event_profile(
+                    candidate, expected_watermark=start
+                )
+
+            guard = context.metadata.get("_claim_guard")
+            if callable(guard):
+                if not await guard(persist_profile):
+                    raise PermissionError("follow-up claim is no longer current")
+            else:
+                await persist_profile()
+            if outcome is None:
+                raise RuntimeError("profile persistence failed")
+            current = outcome.profile
+            if current.event_watermark < through:
+                raise RuntimeError("profile watermark did not advance")
+
+        follow_ups: tuple[FollowUpTaskSpec, ...] = ()
+        if await profile_store.get_path(context.user_id, current.version) is None:
+            follow_ups = (
+                FollowUpTaskSpec(
+                    kind="path_rebuild",
+                    dedupe_key=f"path_rebuild:{current.version}",
+                    payload={
+                        "user_id": context.user_id,
+                        "profile_version": current.version,
+                        "profile": current.model_dump(mode="json"),
+                        "course": str(context.metadata.get("course") or ""),
+                    },
+                ),
+            )
+        return CapabilityResult(
+            assistant_message="学习者画像已更新",
+            payload={
+                "profile_version": current.version,
+                "event_watermark": current.event_watermark,
+                "knowledge_scores": dict(current.knowledge_map.scores),
+            },
+            follow_up_tasks=follow_ups,
+        )
+
+
+class PathRebuildFollowUpCapability(BaseCapability):
+    """Plan and persist a path for the exact profile snapshot in the child."""
+
+    manifest = CapabilityManifest(
+        name="path_rebuild",
+        description="内部画像版本绑定学习路径子任务",
+        stages=["path_rebuild"],
+        tags=["internal", "follow_up", "path"],
+    )
+
+    def __init__(self, *, profile_store=None, kg_service=None) -> None:
+        super().__init__()
+        self._profile_store = profile_store
+        self._kg_service = kg_service
+
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
+        from tutor.services.knowledge_graph import get_knowledge_graph_service
+        from tutor.services.learner_profile.schema import (
+            LearnerProfile,
+            PersistedLearningPath,
+        )
+        from tutor.services.learner_profile.store import get_profile_store
+
+        store = self._profile_store or get_profile_store()
+        version = int(context.metadata["profile_version"])
+        profile = LearnerProfile.model_validate(context.metadata["profile"])
+        if profile.user_id != context.user_id or profile.version != version:
+            raise ValueError("path profile snapshot does not match child identity")
+        existing = await store.get_path(context.user_id, version)
+        if existing is not None:
+            return CapabilityResult(
+                assistant_message="学习路径已恢复",
+                payload=existing.model_dump(mode="json"),
+            )
+
+        service = self._kg_service or get_knowledge_graph_service()
+        course = str(context.metadata.get("course") or service.default_course())
+        nodes: list[dict] = []
+        edges: list[dict] = []
+        rationale = "knowledge graph has no learnable nodes"
+        path_id = f"profile-{version}"
+        name = ""
+        description = ""
+        total_hours = 0.0
+        completed_count = 0
+        available_count = 0
+        locked_count = 0
+        if course and service.has_course(course):
+            model, _ = service.get_graph(course)
+            planned = service.plan_for_learner(course, profile)
+            selected = {node.node_id for node in planned.nodes}
+            nodes = [
+                {
+                    "id": node.node_id,
+                    "name": node.name,
+                    "category": node.category,
+                    "difficulty": node.difficulty,
+                    "estimated_hours": node.estimated_hours,
+                    "prerequisites": model.prerequisites_of(node.node_id),
+                    "status": node.status.value,
+                }
+                for node in planned.nodes
+                if node.node_id in model.node_ids()
+            ]
+            edges = [
+                {"from": edge.from_, "to": edge.to, "type": edge.type.value}
+                for edge in model.edges
+                if edge.from_ in selected and edge.to in selected
+            ]
+            rationale = "mastery-aware prerequisite topological order"
+            path_id = planned.path_id or path_id
+            name = planned.name
+            description = planned.description
+            total_hours = planned.total_estimated_hours
+            completed_count = planned.completed_count
+            available_count = planned.available_count
+            locked_count = planned.locked_count
+        path = PersistedLearningPath(
+            user_id=context.user_id,
+            profile_version=version,
+            course=course,
+            path_id=path_id,
+            name=name,
+            description=description,
+            nodes=nodes,
+            edges=edges,
+            rationale=rationale,
+            total_estimated_hours=total_hours,
+            completed_count=completed_count,
+            available_count=available_count,
+            locked_count=locked_count,
+        )
+        persisted = None
+
+        async def persist_path() -> None:
+            nonlocal persisted
+            persisted = await store.save_path(path)
+
+        await _require_current_claim(context)
+        guard = context.metadata.get("_claim_guard")
+        if callable(guard):
+            if not await guard(persist_path):
+                raise PermissionError("follow-up claim is no longer current")
+        else:
+            await persist_path()
+        if persisted is None:
+            raise RuntimeError("path persistence failed")
+        return CapabilityResult(
+            assistant_message=("学习路径已生成" if persisted.nodes else "暂无可规划知识节点"),
+            payload=persisted.model_dump(mode="json"),
+        )
+
+
 _FOLLOW_UP_BUILDERS = {
     "video_render": VideoRenderFollowUpCapability,
+    "profile_update": ProfileUpdateFollowUpCapability,
+    "path_rebuild": PathRebuildFollowUpCapability,
 }
 
 
@@ -155,6 +362,14 @@ def validate_follow_up_spec(spec: FollowUpTaskSpec) -> None:
             value = spec.payload.get(field)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"video_render follow-up requires {field}")
+    elif spec.kind == "profile_update":
+        for field in ("user_id", "from_watermark", "through_sequence"):
+            if field not in spec.payload:
+                raise ValueError(f"profile_update follow-up requires {field}")
+    elif spec.kind == "path_rebuild":
+        for field in ("user_id", "profile_version", "profile"):
+            if field not in spec.payload:
+                raise ValueError(f"path_rebuild follow-up requires {field}")
 
 
 def build_follow_up_capability(task_kind: str) -> BaseCapability | None:
@@ -165,6 +380,8 @@ def build_follow_up_capability(task_kind: str) -> BaseCapability | None:
 __all__ = [
     "FollowUpScheduler",
     "VideoRenderFollowUpCapability",
+    "ProfileUpdateFollowUpCapability",
+    "PathRebuildFollowUpCapability",
     "build_follow_up_capability",
     "validate_follow_up_spec",
 ]

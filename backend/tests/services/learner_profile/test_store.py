@@ -6,7 +6,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from tutor.services.learner_profile.schema import (
     CognitiveStyle,
     LearnerProfile,
@@ -143,3 +142,45 @@ async def test_concurrent_apply_diff_safe(store: ProfileStore):
     assert final.version == versions[-1]
     for i in range(10):
         assert final.knowledge_map.get(f"k{i}") == pytest.approx(0.1)
+
+
+@pytest.mark.asyncio
+async def test_get_does_not_fabricate_an_empty_profile(store: ProfileStore):
+    assert await store.get("missing") is None
+    assert await store.list_users() == []
+
+
+@pytest.mark.asyncio
+async def test_event_profile_cas_advances_watermark_once(store: ProfileStore):
+    candidate = LearnerProfile(user_id="u", event_watermark=5)
+    candidate.knowledge_map.set("attention", 0.7)
+
+    saved = await store.save_event_profile(candidate, expected_watermark=0)
+    stale = await store.save_event_profile(candidate, expected_watermark=0)
+
+    assert saved.applied is True
+    assert saved.profile.version == 2
+    assert saved.profile.event_watermark == 5
+    assert stale.applied is False
+    assert stale.profile.version == 2
+
+
+@pytest.mark.asyncio
+async def test_path_is_unique_per_profile_version_and_latest_is_durable(
+    store: ProfileStore,
+):
+    from tutor.services.learner_profile.schema import PersistedLearningPath
+
+    first = PersistedLearningPath(
+        user_id="u",
+        profile_version=2,
+        nodes=[{"id": "attention", "status": "available"}],
+        edges=[],
+        rationale="mastery-aware topological order",
+    )
+    duplicate = first.model_copy(update={"rationale": "retry must not overwrite"})
+
+    assert (await store.save_path(first)).rationale == first.rationale
+    assert (await store.save_path(duplicate)).rationale == first.rationale
+    assert (await store.get_path("u", 2)).profile_version == 2
+    assert (await store.get_latest_path("u")).nodes[0]["id"] == "attention"

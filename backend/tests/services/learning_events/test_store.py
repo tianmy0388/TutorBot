@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
-import tempfile
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from tutor.services.learning_events.schema import (
     EventType,
     LearningEvent,
 )
 from tutor.services.learning_events.store import (
+    EventConflictError,
     LearningEventStore,
 )
 
@@ -84,11 +81,18 @@ async def test_query_filters_by_concept(store):
 
 @pytest.mark.asyncio
 async def test_query_filters_by_time(store):
-    now = datetime.now(timezone.utc)
-    await store.record_many([
-        LearningEvent(user_id="u", event_type=EventType.RESOURCE_VIEWED, target_id="old", created_at=now - timedelta(days=10)),
-        LearningEvent(user_id="u", event_type=EventType.RESOURCE_VIEWED, target_id="new"),
-    ])
+    now = datetime.now(UTC)
+    await store.record_many(
+        [
+            LearningEvent(
+                user_id="u",
+                event_type=EventType.RESOURCE_VIEWED,
+                target_id="old",
+                created_at=now - timedelta(days=10),
+            ),
+            LearningEvent(user_id="u", event_type=EventType.RESOURCE_VIEWED, target_id="new"),
+        ]
+    )
     recent = await store.query("u", since=now - timedelta(hours=1))
     assert len(recent) == 1
     assert recent[0].target_id == "new"
@@ -104,14 +108,34 @@ async def test_stats_empty(store):
 
 @pytest.mark.asyncio
 async def test_stats_with_events(store):
-    await store.record_many([
-        LearningEvent(user_id="u", event_type=EventType.RESOURCE_VIEWED, target_id="r1"),
-        LearningEvent(user_id="u", event_type=EventType.RESOURCE_VIEWED, target_id="r2"),
-        LearningEvent(user_id="u", event_type=EventType.RESOURCE_COMPLETED, target_id="r1"),
-        LearningEvent(user_id="u", event_type=EventType.EXERCISE_COMPLETED, target_id="e1", score=0.8, concept_id="LSTM"),
-        LearningEvent(user_id="u", event_type=EventType.EXERCISE_COMPLETED, target_id="e2", score=0.6, concept_id="LSTM"),
-        LearningEvent(user_id="u", event_type=EventType.EXERCISE_COMPLETED, target_id="e3", score=0.9, concept_id="RNN"),
-    ])
+    await store.record_many(
+        [
+            LearningEvent(user_id="u", event_type=EventType.RESOURCE_VIEWED, target_id="r1"),
+            LearningEvent(user_id="u", event_type=EventType.RESOURCE_VIEWED, target_id="r2"),
+            LearningEvent(user_id="u", event_type=EventType.RESOURCE_COMPLETED, target_id="r1"),
+            LearningEvent(
+                user_id="u",
+                event_type=EventType.EXERCISE_COMPLETED,
+                target_id="e1",
+                score=0.8,
+                concept_id="LSTM",
+            ),
+            LearningEvent(
+                user_id="u",
+                event_type=EventType.EXERCISE_COMPLETED,
+                target_id="e2",
+                score=0.6,
+                concept_id="LSTM",
+            ),
+            LearningEvent(
+                user_id="u",
+                event_type=EventType.EXERCISE_COMPLETED,
+                target_id="e3",
+                score=0.9,
+                concept_id="RNN",
+            ),
+        ]
+    )
     stats = await store.stats("u")
     assert stats["event_count"] == 6
     assert stats["by_type"]["resource_viewed"] == 2
@@ -177,3 +201,57 @@ async def test_concurrent_record_safety(store):
     await asyncio.gather(*tasks)
     events = await store.query("u")
     assert len(events) == 20
+
+
+@pytest.mark.asyncio
+async def test_append_is_idempotent_and_rejects_conflicting_event_id(store):
+    event = LearningEvent(
+        event_id="evt-stable",
+        user_id="local-user",
+        event_type=EventType.EXERCISE_SCORED,
+        concept_id="attention",
+        score=0.7,
+    )
+    first = await store.append(event)
+    duplicate = await store.append(LearningEvent.from_dict(event.to_dict()))
+
+    assert first.inserted is True
+    assert duplicate.inserted is False
+    assert duplicate.event.sequence == first.event.sequence
+    with pytest.raises(EventConflictError) as exc:
+        await store.append(
+            LearningEvent(
+                event_id="evt-stable",
+                user_id="other-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.9,
+            )
+        )
+    assert exc.value.code == "LEARNING_EVENT_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_scored_event_count_uses_monotonic_sequence_watermark(store):
+    events = [
+        LearningEvent(
+            event_id=f"evt-{index}",
+            user_id="u",
+            event_type=(
+                EventType.EXERCISE_SCORED
+                if index != 3
+                else EventType.RESOURCE_VIEWED
+            ),
+            concept_id="attention" if index != 3 else "",
+            score=(index / 10 if index != 3 else None),
+        )
+        for index in range(1, 7)
+    ]
+    appended = [await store.append(event) for event in events]
+    watermark = appended[1].event.sequence
+
+    assert await store.count_scored_since("u", watermark) == 3
+    window = await store.list_since(
+        "u", watermark, through_sequence=appended[4].event.sequence
+    )
+    assert [event.event_id for event in window] == ["evt-3", "evt-4", "evt-5"]
