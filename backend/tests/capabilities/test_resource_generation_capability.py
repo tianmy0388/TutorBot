@@ -864,6 +864,40 @@ async def test_prefilter_no_op_when_nothing_failed():
 
 
 @pytest.mark.asyncio
+async def test_prefilter_failure_log_omits_credential_shaped_title(caplog):
+    """Operator logs must not repeat user-derived failed-resource titles."""
+    from loguru import logger
+    from tutor.services.resource_package.schema import Resource, ResourceType
+
+    credential = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    resource = Resource(
+        resource_id="ppt-failed",
+        type=ResourceType.PPT,
+        title=f"Lesson {credential}",
+        content="PPT rendering failed",
+        format_specific={
+            "failure": {
+                "code": "PPT_RENDER_FAILED",
+                "message": "PPT rendering failed",
+                "retryable": True,
+            }
+        },
+    )
+    cap = ResourceGenerationCapability()
+    bus = StreamBus()
+    sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        kept, summary = await cap._prefilter_failed_resources([resource], bus)
+    finally:
+        logger.remove(sink_id)
+
+    assert kept == []
+    assert len(summary) == 1
+    assert credential not in caplog.text
+    assert "failed-generation resources" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_kg_summary_in_result(capability, fresh_builder):
     context = UnifiedContext(
         user_id="alice",

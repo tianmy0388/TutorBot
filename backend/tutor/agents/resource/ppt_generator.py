@@ -134,7 +134,6 @@ class PPTGeneratorAgent(BaseAgent):
                 f"PPT 已生成 ({slide_count} 张): {pptx_path.name}",
                 source=self.agent_name,
                 metadata={
-                    "pptx_path": str(pptx_path),
                     "slide_count": slide_count,
                     "package_id": pkg_id,
                 },

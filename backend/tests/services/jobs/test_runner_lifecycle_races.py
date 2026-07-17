@@ -121,6 +121,7 @@ async def test_saturated_capability_stream_drains_and_terminalizes(
 @pytest.mark.asyncio
 async def test_allowed_resource_events_are_recursively_redacted(store: JobStore) -> None:
     secret = "SECRET_TOKEN_RUNNER_RESOURCE_d43a"
+    code_secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
 
     class EmitsSensitiveResource:
         async def run(self, context: UnifiedContext, bus: StreamBus) -> CapabilityResult:
@@ -142,6 +143,7 @@ async def test_allowed_resource_events_are_recursively_redacted(store: JobStore)
                         "nested": {
                             "authorization": "Bearer bearer-runner-secret",
                             "private_reasoning": "hidden chain",
+                            "hidden_tests": "private grader",
                             "note": f"provider returned token={secret}",
                         },
                     },
@@ -149,7 +151,11 @@ async def test_allowed_resource_events_are_recursively_redacted(store: JobStore)
                 source="sensitive-capability",
                 metadata={
                     "password": "runner-password",
-                    "source_code": "print('private')",
+                    "source_code": (
+                        "token = tokenizer.next_token()\n"
+                        f"api_key = \"{code_secret}\"\n"
+                        "print(token)"
+                    ),
                 },
             )
             return CapabilityResult(assistant_message="ok")
@@ -166,7 +172,10 @@ async def test_allowed_resource_events_are_recursively_redacted(store: JobStore)
     assert "bearer-runner-secret" not in public
     assert "runner-password" not in public
     assert "hidden chain" not in public
-    assert "print('private')" not in public
+    assert "private grader" not in public
+    assert code_secret not in public
+    assert "token = tokenizer.next_token()" in public
+    assert "print(token)" in public
     assert "[REDACTED]" in public
     assert "DOCUMENT_GENERATION_FAILED" in public
     assert "A normal educational token is a unit of text." in public

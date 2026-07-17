@@ -1271,8 +1271,7 @@ class ResourceGenerationCapability(BaseCapability):
             logger.warning(
                 f"resource_capability: pre-filtered {len(filtered)} "
                 f"failed-generation resources before review "
-                f"({before} -> {len(kept)}): "
-                f"{[f['title'] for f in filtered]}"
+                f"({before} -> {len(kept)})"
             )
         return kept, filtered
 
