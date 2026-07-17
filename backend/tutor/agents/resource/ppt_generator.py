@@ -6,8 +6,8 @@ Pipeline contract:
     source_content: str  (markdown; typically the ContentExpert output)
     profile: dict (optional)
 
-    → Resource(type=PPT, format_specific={slide_count, slide_titles,
-      pptx_path}, confidence=~0.8)
+    → Resource(type=PPT, format_specific={slide_count, slide_titles},
+      confidence=~0.8)
 
 The agent is intentionally **deterministic** when no LLM is available:
 it slices the Markdown into slides via

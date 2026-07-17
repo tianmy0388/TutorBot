@@ -8,6 +8,8 @@ events before persistence.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -71,9 +73,6 @@ _KNOWN_KEY_RE = re.compile(
     r"AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9]{20,})\b",
     re.IGNORECASE,
 )
-_OPAQUE_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z0-9_~+/=-]{32,}(?![A-Za-z0-9_])")
-
-
 def _normalise_key(key: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(key).lower())
 
@@ -106,6 +105,21 @@ def _entropy(value: str) -> float:
     return -sum((count / length) * log2(count / length) for count in counts.values())
 
 
+def _is_valid_basic_credential(value: str) -> bool:
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    username, separator, password = decoded.partition(b":")
+    return bool(separator and username and password)
+
+
+def _auth_match_is_credential(match: re.Match[str]) -> bool:
+    if match.group("scheme").lower() == "bearer":
+        return True
+    return _is_valid_basic_credential(match.group("credential"))
+
+
 def is_credential_shaped(value: Any) -> bool:
     """Detect high-confidence credential values without relying on field names."""
     if not isinstance(value, str):
@@ -117,7 +131,10 @@ def is_credential_shaped(value: Any) -> bool:
         return True
     if _PEM_RE.search(candidate) or _JWT_RE.fullmatch(candidate):
         return True
-    if _AUTH_RE.fullmatch(candidate) or _KNOWN_KEY_RE.fullmatch(candidate):
+    auth_match = _AUTH_RE.fullmatch(candidate)
+    if (auth_match is not None and _auth_match_is_credential(auth_match)) or (
+        _KNOWN_KEY_RE.fullmatch(candidate)
+    ):
         return True
     if not re.fullmatch(r"[A-Za-z0-9_~+/=-]{32,}", candidate):
         return False
@@ -141,6 +158,12 @@ def _redact_assignment(match: re.Match[str]) -> str:
     return f"{match.group('prefix')}{quote}{REDACTED}{quote}"
 
 
+def _redact_auth(match: re.Match[str]) -> str:
+    if not _auth_match_is_credential(match):
+        return match.group(0)
+    return f"{match.group('scheme')} {REDACTED}"
+
+
 def redact_text(value: str, *, max_length: int = 32_000) -> str:
     """Scrub credentials while preserving prose and executable source code."""
     text = value[:max_length]
@@ -148,15 +171,11 @@ def redact_text(value: str, *, max_length: int = 32_000) -> str:
         text += TRUNCATED
     text = _PEM_RE.sub(REDACTED, text)
     text = _SECRET_TOKEN_RE.sub(REDACTED, text)
-    text = _AUTH_RE.sub(lambda match: f"{match.group('scheme')} {REDACTED}", text)
+    text = _AUTH_RE.sub(_redact_auth, text)
     text = _URL_CREDENTIAL_RE.sub(r"\g<scheme>[REDACTED]@", text)
     text = _JWT_RE.sub(REDACTED, text)
     text = _KNOWN_KEY_RE.sub(REDACTED, text)
-    text = _ASSIGNMENT_RE.sub(_redact_assignment, text)
-    return _OPAQUE_CANDIDATE_RE.sub(
-        lambda match: REDACTED if is_credential_shaped(match.group(0)) else match.group(0),
-        text,
-    )
+    return _ASSIGNMENT_RE.sub(_redact_assignment, text)
 
 
 def redact_sensitive(
@@ -187,11 +206,10 @@ def redact_sensitive(
             normalised_key = _normalise_key(key)
             if is_sensitive_key(key):
                 result[key] = REDACTED
-            elif (
-                normalised_key in _CONTENT_KEYS
-                or normalised_key in _AMBIGUOUS_CREDENTIAL_KEYS
-            ) and isinstance(item, str):
+            elif normalised_key in _CONTENT_KEYS and isinstance(item, str):
                 result[key] = redact_text(item)
+            elif normalised_key in _AMBIGUOUS_CREDENTIAL_KEYS and isinstance(item, str):
+                result[key] = REDACTED if is_credential_shaped(item) else redact_text(item)
             else:
                 result[key] = redact_sensitive(
                     item,

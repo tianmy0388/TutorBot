@@ -385,6 +385,87 @@ async def test_follow_up_specs_survive_result_reload(store: JobStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runner_terminal_public_projection_redacts_internal_payloads(
+    store: JobStore,
+) -> None:
+    jwt = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkYSJ9."
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    )
+    provider_key = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    pem_body = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="
+    pem = f"-----BEGIN PRIVATE KEY-----\n{pem_body}\n-----END PRIVATE KEY-----"
+    lesson_code = "token = tokenizer.next_token()\nprint(token)\n"
+    generated_code = (
+        lesson_code
+        + f'api_key = "{provider_key}"\n'
+        + f'session = "{jwt}"\n'
+    )
+    follow_up_payload = {
+        "resource_id": "video-1",
+        "refresh_token": "follow-up-refresh-secret",
+        "source_code": generated_code,
+    }
+    spec = FollowUpTaskSpec(
+        kind="video_render",
+        payload=follow_up_payload,
+        dedupe_key="video:pkg-1:video-1",
+    )
+    internal_result = CapabilityResult(
+        assistant_message="queued",
+        payload={
+            "hidden_tests": "hidden-test-secret",
+            "private_reasoning": "private-reasoning-secret",
+            "refresh_token": "result-refresh-secret",
+            "provider_note": f"JWT={jwt}; key={provider_key}\n{pem}",
+            "source_code": generated_code,
+        },
+        follow_up_tasks=(spec,),
+    )
+
+    class WithPrivateTerminalPayload:
+        async def run(self, context: UnifiedContext, bus: StreamBus) -> CapabilityResult:
+            return internal_result
+
+    runner = JobRunner(
+        job_store=store,
+        capability_registry=_Capabilities(WithPrivateTerminalPayload()),  # type: ignore[arg-type]
+    )
+    job = await runner.submit(JobSubmit(capability="tutoring"))
+    stored = await _wait_status(store, job.job_id, {JobStatus.SUCCEEDED})
+
+    public_blob = json.dumps(stored.to_full_dict(), ensure_ascii=False, default=str)
+    for secret in (
+        "hidden-test-secret",
+        "private-reasoning-secret",
+        "result-refresh-secret",
+        "follow-up-refresh-secret",
+        jwt,
+        provider_key,
+        pem_body,
+    ):
+        assert secret not in public_blob
+    assert "token = tokenizer.next_token()" in public_blob
+    assert "print(token)" in public_blob
+
+    result_event = next(event for event in stored.events if event["type"] == "result")
+    result_payload = json.loads(result_event["content"])
+    assert lesson_code in result_payload["source_code"]
+    assert result_event["metadata"]["follow_up_tasks"][0]["payload"][
+        "resource_id"
+    ] == "video-1"
+    contract = JobResultContract.model_validate(stored.result)
+    assert contract.follow_up_tasks[0].payload["resource_id"] == "video-1"
+
+    # Public projections must never mutate the internal hand-off that a
+    # durable follow-up scheduler consumes.
+    assert internal_result.payload["refresh_token"] == "result-refresh-secret"
+    assert spec.payload["refresh_token"] == "follow-up-refresh-secret"
+    assert provider_key in spec.payload["source_code"]
+
+
+@pytest.mark.asyncio
 async def test_capability_events_are_normalized_to_allowed_types(store: JobStore) -> None:
     class Noisy:
         async def run(self, context: UnifiedContext, bus: StreamBus) -> CapabilityResult:

@@ -44,6 +44,7 @@ from pydantic import ValidationError
 
 from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
+from tutor.core.redaction import redact_sensitive, redact_text
 from tutor.core.stream_bus import StreamBus
 from tutor.runtime.registry.capability_registry import (
     CapabilityRegistry,
@@ -590,9 +591,10 @@ class JobRunner:
         payload = capability_result.payload
         if isinstance(payload.get("result_contract"), dict):
             try:
+                public_result_contract = redact_sensitive(payload["result_contract"])
                 base = JobResultContract.model_validate(
                     {
-                        **payload["result_contract"],
+                        **public_result_contract,
                         "job_id": job.job_id,
                         "capability": job.capability,
                         "finished_at": finished_at,
@@ -603,7 +605,7 @@ class JobRunner:
                         "follow_up_tasks": [
                             FollowUpTaskContract(
                                 kind=spec.kind,
-                                payload=spec.payload,
+                                payload=redact_sensitive(spec.payload),
                                 dedupe_key=spec.dedupe_key,
                             )
                             for spec in capability_result.follow_up_tasks
@@ -637,14 +639,17 @@ class JobRunner:
         else:
             status = JobTerminalStatus.SUCCEEDED
             payload_message = payload.get("assistant_message") or payload.get("summary")
-            assistant_message = capability_result.assistant_message or (
+            internal_assistant_message = capability_result.assistant_message or (
                 payload_message if isinstance(payload_message, str) else "任务完成"
             )
+            assistant_message = redact_text(internal_assistant_message)
 
         public_artifacts: list[ArtifactResult] = []
         for artifact in artifacts:
             with suppress(ValidationError):
-                public_artifacts.append(ArtifactResult.model_validate(artifact))
+                public_artifacts.append(
+                    ArtifactResult.model_validate(redact_sensitive(artifact))
+                )
         public_artifacts.extend(
             ArtifactResult(
                 resource_type=artifact.kind or "artifact",
@@ -663,7 +668,7 @@ class JobRunner:
             follow_up_tasks=[
                 FollowUpTaskContract(
                     kind=spec.kind,
-                    payload=spec.payload,
+                    payload=redact_sensitive(spec.payload),
                     dedupe_key=spec.dedupe_key,
                 )
                 for spec in capability_result.follow_up_tasks
@@ -689,7 +694,9 @@ class JobRunner:
         next_seq = (current.last_seq or 0) + 1
         compatibility_events: list[dict[str, Any]] = []
         if contract.status in {JobTerminalStatus.SUCCEEDED, JobTerminalStatus.PARTIAL}:
-            result_payload = capability_result.payload if capability_result else {}
+            result_payload = (
+                redact_sensitive(capability_result.payload) if capability_result else {}
+            )
             result_event = self._runner_event(
                 job,
                 event_type="result",
@@ -697,13 +704,13 @@ class JobRunner:
                 seq=next_seq,
                 metadata={
                     "artifacts": [
-                        artifact.model_dump(mode="json")
+                        redact_sensitive(artifact.model_dump(mode="json"))
                         for artifact in (capability_result.artifacts if capability_result else ())
                     ],
                     "follow_up_tasks": [
                         {
                             "kind": spec.kind,
-                            "payload": spec.payload,
+                            "payload": redact_sensitive(spec.payload),
                             "dedupe_key": spec.dedupe_key,
                         }
                         for spec in (

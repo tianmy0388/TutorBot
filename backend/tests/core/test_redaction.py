@@ -14,6 +14,11 @@ JWT = (
 PEM = "-----BEGIN PRIVATE KEY-----\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n-----END PRIVATE KEY-----"
 OPAQUE = "Z8q1Wm4Nv7Rx2Kp9Bd6Hy3Lc5Tg0Fs8Ua1Je4Ci7"
 OPAQUE_HEX = "9f4c2a7d8e1b6c3f0a5d9e2b7c4f1a8d6e3b0c5f9a2d7e4b1c8f6a3d0e5b9c2f"
+SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+UUID = "550e8400-e29b-41d4-a716-446655440000"
+HARMLESS_BASE64 = (
+    "VGhpcyBpcyBhIGhhcm1sZXNzIGVkdWNhdGlvbmFsIEJhc2U2NCBleGFtcGxlLg=="
+)
 
 
 def test_recursive_redaction_is_bounded_and_preserves_educational_text() -> None:
@@ -139,3 +144,37 @@ def test_pem_jwt_and_auth_values_are_redacted_inside_free_text() -> None:
     assert "dXNlcjpwYXNz" not in encoded
     assert JWT not in encoded
     assert "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo" not in encoded
+
+
+def test_free_text_preserves_noncredential_opaque_examples_and_basic_prose() -> None:
+    text = (
+        "Basic algebra introduces variables. "
+        f"SHA-256 example: {SHA256}. UUID example: {UUID}. "
+        f"Harmless Base64 example: {HARMLESS_BASE64}. "
+        "token = identifier; token = tokenizer.next_token()"
+    )
+
+    assert redact_sensitive({"content": text}) == {"content": text}
+
+
+def test_valid_basic_auth_and_strong_credentials_remain_redacted() -> None:
+    public = redact_sensitive(
+        {
+            "notes": (
+                "Authorization: Basic dXNlcjpwYXNz "
+                f"Authorization: Bearer {JWT} "
+                "provider key sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456\n"
+                f"{PEM}"
+            ),
+            "refresh_token": "short-but-structured",
+        }
+    )
+    encoded = json.dumps(public)
+    for secret in (
+        "dXNlcjpwYXNz",
+        JWT,
+        "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+        "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo",
+        "short-but-structured",
+    ):
+        assert secret not in encoded
