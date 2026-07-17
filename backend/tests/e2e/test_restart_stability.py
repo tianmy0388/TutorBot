@@ -73,7 +73,7 @@ async def test_jobs_kb_and_conversations_survive_restart(
     )
     job = Job(
         job_id=job_id,
-        user_id="u1",
+        user_id="local-user",
         session_id="sess_restart",
         capability="tutoring",
         status=JobStatus.SUCCEEDED,

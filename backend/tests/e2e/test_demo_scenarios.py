@@ -163,7 +163,7 @@ async def test_partial_generation_then_retry(tmp_path, monkeypatch) -> None:
             now = datetime.now(timezone.utc)
             job = Job(
                 job_id=job_id,
-                user_id="u1",
+                user_id="local-user",
                 session_id="ses_x",
                 capability="resource_generation",
                 status=JobStatus.PARTIAL,
@@ -228,7 +228,7 @@ async def test_job_snapshot_recovery(tmp_path, monkeypatch) -> None:
             now = datetime.now(timezone.utc)
             job = Job(
                 job_id=job_id,
-                user_id="u1",
+                user_id="local-user",
                 session_id="ses_y",
                 capability="tutoring",
                 status=JobStatus.SUCCEEDED,
