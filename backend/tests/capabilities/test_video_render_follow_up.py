@@ -1,33 +1,14 @@
-"""Regression test: video rendering must NOT block ``cap.run()``.
-
-fdb26152 trace analysis (Phase 5): the previous ``_render_pending_videos``
-was awaited inline, so a slow Manim encode pushed the entire job past
-the 600s timeout — even though every resource was already streamable.
-We split it into ``_start_pending_video_renders`` (returns immediately)
-+ ``_render_one_video`` (background task that emits a fresh ``RESOURCE``
-event when done).
-
-These tests pin:
-  * ``_start_pending_video_renders`` returns synchronously
-    (cap.run() can emit ``done`` without waiting for manim).
-  * Each pending video gets exactly one background task.
-  * A successful render emits a ``RESOURCE`` event with the updated
-    ``render_status == "ready"`` + ``video_url`` so the right-pane
-    card swaps the placeholder for a real video player.
-  * A render exception emits ``RESOURCE`` with ``render_status ==
-    "failed"`` (so the UI never shows a forever-pending card).
-  * The reference list ``self._bg_render_tasks`` retains the tasks
-    so asyncio doesn't GC them mid-render.
-"""
+"""Video rendering is durable follow-up work, never fire-and-forget work."""
 
 from __future__ import annotations
 
 import asyncio
-import sys
+import contextlib
 from pathlib import Path
 from typing import Any
 
 import pytest
+from tutor.capabilities.resource_generation import ResourceGenerationCapability
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.resource_package.schema import (
@@ -36,6 +17,10 @@ from tutor.services.resource_package.schema import (
     ResourceType,
     VideoResource,
 )
+
+
+def test_resource_capability_has_no_background_render_entrypoint() -> None:
+    assert not hasattr(ResourceGenerationCapability, "_start_pending_video_renders")
 
 
 class _FakeRenderService:
@@ -112,37 +97,22 @@ def _cap() -> Any:
     return cap
 
 
-@pytest.mark.asyncio
-async def test_start_returns_immediately_without_awaiting_render() -> None:
-    """Even with a slow render, ``_start_pending_video_renders``
-    returns within a few ms — not after the render completes."""
-    cap = _cap()
-    fake = _FakeRenderService(success=True, delay=2.0)
-    # Monkey-patch the service lookup the inner method uses.
-    from tutor.services import manim_render as mr_module
-    monkey = monkeypatch_for_module(mr_module, fake)
+def test_pending_video_follow_ups_are_deterministic() -> None:
+    pending = _video_resource()
+    ready = _video_resource(render_status="ready")
+    package = ResourcePackage(topic="t", resources=[pending, ready])
 
-    bus = StreamBus()
-    pkg = ResourcePackage(topic="t", resources=[_video_resource()])
-    ctx = UnifiedContext(language="zh")
+    first = ResourceGenerationCapability._video_follow_up_specs(package, "u1")
+    second = ResourceGenerationCapability._video_follow_up_specs(package, "u1")
 
-    t0 = asyncio.get_event_loop().time()
-    tasks = await cap._start_pending_video_renders(pkg, ctx, bus)
-    elapsed = asyncio.get_event_loop().time() - t0
-
-    assert len(tasks) == 1
-    assert elapsed < 0.2, (
-        f"_start_pending_video_renders blocked {elapsed:.2f}s "
-        f"(should return in <0.2s, render runs in background)"
-    )
-    # The task is still pending — render hasn't finished yet.
-    assert not tasks[0].done()
-
-    # Now await it; render completes (must do this BEFORE undo so
-    # the background task still sees the monkeypatched service).
-    await asyncio.gather(*tasks, return_exceptions=True)
-    monkey.undo()
-    assert fake.calls == [("class M(Scene): pass", "M")]
+    assert first == second
+    assert len(first) == 1
+    assert first[0].payload == {
+        "package_id": package.package_id,
+        "resource_id": pending.resource_id,
+        "user_id": "u1",
+    }
+    assert first[0].dedupe_key == f"video:{package.package_id}:{pending.resource_id}"
 
 
 @pytest.mark.asyncio
@@ -259,41 +229,6 @@ async def test_render_failure_emits_resource_event_with_failed_status() -> None:
     assert "manim exit 1" in payload["format_specific"].get("render_error", "")
 
 
-@pytest.mark.asyncio
-async def test_no_pending_videos_returns_empty_task_list() -> None:
-    """Edge case: no VIDEO resources at all → no background tasks.
-    Must not block, must not error."""
-    cap = _cap()
-    bus = StreamBus()
-    pkg = ResourcePackage(topic="t", resources=[])  # no videos
-    ctx = UnifiedContext(language="zh")
-
-    tasks = await cap._start_pending_video_renders(pkg, ctx, bus)
-    assert tasks == []
-
-
-@pytest.mark.asyncio
-async def test_already_ready_videos_are_skipped() -> None:
-    """Only ``render_status == "pending"`` videos are rendered;
-    already-``ready`` ones (e.g. retry) are not re-rendered."""
-    cap = _cap()
-    fake = _FakeRenderService(success=True)
-    from tutor.services import manim_render as mr_module
-    monkey = monkeypatch_for_module(mr_module, fake)
-
-    bus = StreamBus()
-    pkg = ResourcePackage(
-        topic="t",
-        resources=[_video_resource(render_status="ready")],
-    )
-    ctx = UnifiedContext(language="zh")
-
-    tasks = await cap._start_pending_video_renders(pkg, ctx, bus)
-    monkey.undo()
-    assert tasks == []
-    assert fake.calls == []
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -318,10 +253,8 @@ class _MonkeyPatch:
         while self._undo_stack:
             target, name, old = self._undo_stack.pop()
             if old is self._MISSING:
-                try:
+                with contextlib.suppress(AttributeError):
                     delattr(target, name)
-                except AttributeError:
-                    pass
             else:
                 setattr(target, name, old)
 
@@ -341,7 +274,3 @@ def monkeypatch_for_module(mod: Any, fake: Any) -> _MonkeyPatch:
     m.setattr(service_mod, "get_manim_render_service", lambda: fake)
     m.setattr(mod, "get_manim_render_service", lambda: fake)
     return m
-
-
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-xvs"]))

@@ -56,8 +56,7 @@ class _CapabilitiesStub:
 async def test_runner_surfaces_capability_exception_as_capability_error(
     tmp_path, monkeypatch
 ) -> None:
-    """An unhandled exception from cap.run() must show up as CAPABILITY_FAILED
-    with the exception type + message — NOT as a generic MISSING_RESULT."""
+    """Unhandled capability errors are stable publicly and detailed privately."""
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
     from tutor.services.config.settings import reset_settings_cache
     reset_settings_cache()
@@ -101,12 +100,14 @@ async def test_runner_surfaces_capability_exception_as_capability_error(
         f"expected CAPABILITY_FAILED, got {contract.error.code!r} "
         f"(message={contract.error.message!r})"
     )
-    # The exception details should be in the diagnostic so the operator
-    # can see what blew up.
-    assert contract.error.diagnostic is not None
-    assert "quality_review" in contract.error.diagnostic
-    assert "RuntimeError" in contract.error.diagnostic
+    # Public diagnostics point to the protected artifact; raw provider
+    # messages and tracebacks never enter the persisted public contract.
     assert stored.error_log_ref is not None
+    assert contract.error.diagnostic == stored.error_log_ref.artifact_key
+    error_log = tmp_path / "data" / stored.error_log_ref.artifact_key
+    log_text = error_log.read_text(encoding="utf-8")
+    assert "quality_review" in log_text
+    assert "RuntimeError" in log_text
     assert stored.error_log_ref.artifact_key
 
     await store.close()

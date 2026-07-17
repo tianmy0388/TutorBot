@@ -20,12 +20,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class JobTerminalStatus(str, Enum):
+class JobTerminalStatus(str, Enum):  # noqa: UP042 - wire enum compatibility
     """Terminal outcome of a job.
 
     Distinct from :class:`~tutor.services.jobs.schema.JobStatus`:
@@ -56,7 +56,7 @@ class JobError(BaseModel):
 
     ``code`` is a short, machine-stable identifier (used for i18n and
     analytics). ``message`` is the user-facing string. ``diagnostic``
-    is the verbose detail for logs — never surface it in the UI.
+    is an opaque protected-artifact key; raw details never enter this contract.
     ``retryable`` tells the UI whether to expose a retry affordance.
     """
 
@@ -100,6 +100,16 @@ class JobWarning(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class FollowUpTaskContract(BaseModel):
+    """Durable public projection of an internal ``FollowUpTaskSpec``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["video_render", "profile_update", "path_rebuild"]
+    payload: dict[str, Any] = Field(default_factory=dict)
+    dedupe_key: str = Field(min_length=1)
+
+
 class JobResultContract(BaseModel):
     """The single, typed terminal result of a job.
 
@@ -131,6 +141,7 @@ class JobResultContract(BaseModel):
     # UI rendering when ``artifacts`` is empty.
     partial_artifacts: list[ArtifactResult] = Field(default_factory=list)
     warnings: list[JobWarning] = Field(default_factory=list)
+    follow_up_tasks: list[FollowUpTaskContract] = Field(default_factory=list)
     error: JobError | None = None
     event_cursor: int = 0
     finished_at: datetime | None = None
@@ -138,6 +149,7 @@ class JobResultContract(BaseModel):
 
 __all__ = [
     "ArtifactResult",
+    "FollowUpTaskContract",
     "JobError",
     "JobProgress",
     "JobResultContract",

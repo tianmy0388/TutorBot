@@ -220,3 +220,103 @@ async def test_store_migrates_error_log_ref_for_existing_database(tmp_path) -> N
     assert stored is not None
     assert stored.error_log_ref is None
     await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_marker_survives_replay_buffer_eviction(tmp_path) -> None:
+    store = JobStore(db_path=tmp_path / "jobs.db")
+    await store.init()
+    job = Job(user_id="u1", status=JobStatus.RUNNING)
+    await store.save(job)
+    first_contract = JobResultContract(
+        job_id=job.job_id,
+        capability=job.capability,
+        status="succeeded",
+        assistant_message="first",
+    )
+    first_event = {
+        "type": "job_terminal",
+        "source": "job_runner",
+        "content": "first",
+        "metadata": {"contract": first_contract.model_dump(mode="json")},
+    }
+    assert await store.set_terminal(
+        job.job_id,
+        status=JobStatus.SUCCEEDED,
+        finished_at=first_contract.finished_at,
+        result=first_contract.model_dump(mode="json"),
+        terminal_event=first_event,
+    )
+
+    for seq in range(store.MAX_EVENTS_PER_JOB + 5):
+        await store.append_event(
+            job.job_id,
+            {"type": "progress", "seq": seq, "event_id": f"late-{seq}"},
+            seq,
+        )
+
+    replacement = JobResultContract(
+        job_id=job.job_id,
+        capability=job.capability,
+        status="failed",
+        assistant_message="replacement",
+    )
+    changed = await store.set_terminal(
+        job.job_id,
+        status=JobStatus.FAILED,
+        finished_at=replacement.finished_at,
+        result=replacement.model_dump(mode="json"),
+        terminal_event={
+            "type": "job_terminal",
+            "source": "job_runner",
+            "content": "replacement",
+            "metadata": {"contract": replacement.model_dump(mode="json")},
+        },
+    )
+
+    stored = await store.get(job.job_id)
+    assert changed is False
+    assert stored is not None
+    assert stored.status == JobStatus.SUCCEEDED
+    assert stored.result == first_contract.model_dump(mode="json")
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_terminal_calls_preserve_first_outcome(tmp_path) -> None:
+    store = JobStore(db_path=tmp_path / "jobs.db")
+    await store.init()
+    job = Job(user_id="u1", status=JobStatus.RUNNING)
+    await store.save(job)
+
+    async def finish(label: str, status: JobStatus) -> bool:
+        contract = JobResultContract(
+            job_id=job.job_id,
+            capability=job.capability,
+            status=status.value,
+            assistant_message=label,
+        )
+        return await store.set_terminal(
+            job.job_id,
+            status=status,
+            finished_at=contract.finished_at,
+            result=contract.model_dump(mode="json"),
+            terminal_event={
+                "type": "job_terminal",
+                "source": "job_runner",
+                "content": label,
+                "metadata": {"contract": contract.model_dump(mode="json")},
+            },
+        )
+
+    applied = await asyncio.gather(
+        finish("success", JobStatus.SUCCEEDED),
+        finish("failure", JobStatus.FAILED),
+    )
+    stored = await store.get(job.job_id)
+    assert sum(bool(item) for item in applied) == 1
+    assert stored is not None
+    terminals = [e for e in stored.events if e.get("type") == "job_terminal"]
+    assert len(terminals) == 1
+    assert stored.result["assistant_message"] == terminals[0]["content"]
+    await store.close()

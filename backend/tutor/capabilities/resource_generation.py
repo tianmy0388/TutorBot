@@ -572,20 +572,7 @@ class ResourceGenerationCapability(BaseCapability):
                     source="resource_capability",
                 )
 
-        follow_up_tasks = tuple(
-            FollowUpTaskSpec(
-                kind="video_render",
-                payload={
-                    "package_id": package.package_id,
-                    "resource_id": resource.resource_id,
-                    "user_id": context.user_id,
-                },
-                dedupe_key=f"video:{package.package_id}:{resource.resource_id}",
-            )
-            for resource in package.resources
-            if resource.type == ResourceType.VIDEO
-            and (resource.format_specific or {}).get("render_status") == "pending"
-        )
+        follow_up_tasks = self._video_follow_up_specs(package, context.user_id)
         artifact_refs: list[ArtifactRef] = []
         for resource in package.resources:
             fs = resource.format_specific or {}
@@ -697,46 +684,26 @@ class ResourceGenerationCapability(BaseCapability):
     # Video rendering (2026-06-21 plan, C2)
     # ------------------------------------------------------------------
 
-    async def _start_pending_video_renders(
-        self,
+    @staticmethod
+    def _video_follow_up_specs(
         package: ResourcePackage,
-        context: UnifiedContext,
-        stream: StreamBus,
-    ) -> list[asyncio.Task]:
-        """Start one background asyncio task per pending video and
-        return immediately.
-
-        **2026-07-08 fix (fdb26152):** the previous ``_render_pending_videos``
-        awaited every render inline, so a slow Manim encode (one
-        video can take 30-90s to compile) pushed the entire job past
-        the 600s timeout — even though the resource was already
-        streamable. We now start the render tasks fire-and-forget and
-        return without awaiting them, so ``cap.run()`` can emit the
-        final ``result`` + ``done`` immediately. The render tasks
-        each emit ``RESOURCE`` events (with the updated
-        ``render_status`` / ``video_url``) when they finish, so the
-        right pane updates live as the video comes online.
-
-        Returns the list of started tasks so the caller can keep a
-        strong reference (otherwise asyncio GC's them mid-render).
-        """
-        pending = [
-            r
-            for r in package.resources
-            if r.type == ResourceType.VIDEO
-            and (r.format_specific or {}).get("render_status") == "pending"
-        ]
-        if not pending:
-            return []
-
-        # Emit the stage markers + observation INSIDE the now-fire-and-
-        # forget tasks' wrapper, so the trace still shows a
-        # ``video_rendering`` window even though the parent has moved on.
-        tasks: list[asyncio.Task] = []
-        for r in pending:
-            task = asyncio.create_task(self._render_one_video(r, package, context, stream))
-            tasks.append(task)
-        return tasks
+        user_id: str,
+    ) -> tuple[FollowUpTaskSpec, ...]:
+        """Build durable, deterministic work specs for pending video renders."""
+        return tuple(
+            FollowUpTaskSpec(
+                kind="video_render",
+                payload={
+                    "package_id": package.package_id,
+                    "resource_id": resource.resource_id,
+                    "user_id": user_id,
+                },
+                dedupe_key=f"video:{package.package_id}:{resource.resource_id}",
+            )
+            for resource in package.resources
+            if resource.type == ResourceType.VIDEO
+            and (resource.format_specific or {}).get("render_status") == "pending"
+        )
 
     async def _render_one_video(
         self,

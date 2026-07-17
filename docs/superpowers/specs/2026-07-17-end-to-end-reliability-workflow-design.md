@@ -172,10 +172,12 @@ JobRunner 执行顺序：
 2. 切换 `running` 并记录 `started_at`。
 3. 注册事件消费者后启动 Capability，避免启动期事件丢失。
 4. 接收结构化结果或异常。
-5. 在一个受保护的终态事务中写入结果、`job_terminal`、最终状态和 `finished_at`。
+5. 在同一个受保护的终态事务中写入兼容事件、`job_terminal`、结果、最终状态、`finished_at`、错误日志引用和持久化 `terminal_event_id`。
 6. 事务成功后向订阅者广播终态并关闭订阅。
 
-每个 Job 恰好一个 `job_terminal`。`done` 作为旧协议输入只允许在兼容层转换，不再关闭核心事件流或决定成功。
+每个 Job 恰好一个 `job_terminal`。幂等性由独立的 `terminal_event_id` 判定，不依赖会被截断的重放缓冲区。取消与正常完成共用该终态事务；取消 API 只能在终态已持久化后返回成功。`done` 作为旧协议输入只允许在兼容层转换，不再关闭核心事件流或决定成功。
+
+订阅者先注册实时队列，再重读持久化事件并按 `event_id` 去重，避免在“回放完成”与“开始实时监听”之间丢失终态。Capability 对外事件只保留 `progress | stage_start | stage_end | resource | sources`，其他内部追踪类型由 JobRunner 投影为 `progress`。
 
 ### 6.2 状态与错误
 
@@ -194,6 +196,8 @@ JobRunner 执行顺序：
 - `CODE_DEPENDENCY_MISSING`
 - `ARTIFACT_GONE`
 - `WEB_SEARCH_UNAVAILABLE`
+
+公开 Job 记录、事件、API 和应用日志只保存稳定 code、通用摘要和受保护的错误产物引用；原始异常消息、provider 响应和 traceback 只写入 UTF-8 `error.log` 产物。
 
 后端启动时将不能恢复的运行中任务标记为 `interrupted`，写入唯一终态；具备安全重试契约的视频子任务可重新排队。
 

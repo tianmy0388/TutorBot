@@ -160,7 +160,11 @@ async def test_runner_marks_error_event_as_failed(tmp_path, monkeypatch) -> None
     contract = JobResultContract.model_validate(stored.result or {})
     assert contract.error is not None
     assert contract.error.code == "CAPABILITY_FAILED"
-    assert "boom" in contract.error.message
+    assert contract.error.message == "Capability execution failed"
+    assert stored.error_log_ref is not None
+    assert contract.error.diagnostic == stored.error_log_ref.artifact_key
+    error_log = tmp_path / "data" / stored.error_log_ref.artifact_key
+    assert "boom" in error_log.read_text(encoding="utf-8")
     assert stored.error_log_ref is not None
     assert stored.error_log_ref.artifact_key
     log_path = Path(tmp_path / "data") / stored.error_log_ref.artifact_key

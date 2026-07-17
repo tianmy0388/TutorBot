@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,7 @@ class JobRow(_Base):
     # Lifecycle
     error = Column(String, nullable=True)
     error_log_ref = Column(JSON, nullable=True)
+    terminal_event_id = Column(String(64), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, index=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
@@ -120,6 +122,10 @@ class JobStore:
             if "error_log_ref" not in columns:
                 await conn.exec_driver_sql(
                     "ALTER TABLE jobs ADD COLUMN error_log_ref JSON"
+                )
+            if "terminal_event_id" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN terminal_event_id VARCHAR(64)"
                 )
         logger.info(f"JobStore ready at {self.db_path}")
 
@@ -225,16 +231,17 @@ class JobStore:
         status: JobStatus,
         finished_at: datetime | None,
         result: dict[str, Any],
-        terminal_event: dict[str, Any],
+        terminal_event: dict[str, Any] | None = None,
+        terminal_events: list[dict[str, Any]] | None = None,
         error: str | None = None,
         error_log_ref: ArtifactRef | None = None,
     ) -> bool:
         """Atomically persist a job's one terminal transition.
 
-        The replay buffer is the durable idempotency guard.  Status, public
-        result, diagnostic reference and ``job_terminal`` are committed under
-        the same write lock and database transaction, so a retry cannot append
-        a second terminal event or replace the first outcome.
+        Status, public result, diagnostic reference and the complete canonical
+        terminal event bundle are committed under one write lock/database
+        transaction.  ``terminal_event_id`` (or an already-finished legacy
+        row) is the durable idempotency guard; the capped replay buffer is not.
         """
         terminal_statuses = {
             JobStatus.SUCCEEDED,
@@ -244,6 +251,12 @@ class JobStore:
         }
         if status not in terminal_statuses:
             raise ValueError(f"set_terminal requires terminal status, got {status}")
+        bundle = list(terminal_events or ())
+        if terminal_event is not None:
+            bundle.append(terminal_event)
+        terminal_items = [event for event in bundle if event.get("type") == "job_terminal"]
+        if len(terminal_items) != 1:
+            raise ValueError("terminal bundle requires exactly one job_terminal event")
 
         self._ensure_engine()
         assert self._write_lock is not None
@@ -255,20 +268,30 @@ class JobStore:
             ).scalar_one_or_none()
             if row is None:
                 return False
-            events: list[dict[str, Any]] = list(row.events or [])
-            if any(event.get("type") == "job_terminal" for event in events):
+            if row.terminal_event_id or (
+                row.status in {item.value for item in terminal_statuses}
+                and row.finished_at is not None
+            ):
                 return False
-
-            events.append(terminal_event)
+            events: list[dict[str, Any]] = list(row.events or [])
+            next_seq = int(row.last_seq or 0) + 1
+            now = datetime.now(UTC).timestamp()
+            for event in bundle:
+                event["seq"] = next_seq
+                event.setdefault("timestamp", now)
+                event.setdefault("event_id", uuid.uuid4().hex)
+                events.append(event)
+                next_seq += 1
             if len(events) > self.MAX_EVENTS_PER_JOB:
                 events = events[-self.MAX_EVENTS_PER_JOB :]
             row.events = events
-            row.event_count = (row.event_count or 0) + 1
-            row.last_seq = int(terminal_event.get("seq") or row.last_seq or 0)
+            row.event_count = (row.event_count or 0) + len(bundle)
+            row.last_seq = next_seq - 1
             row.status = status.value
             row.finished_at = finished_at
             row.result = result
             row.error = error
+            row.terminal_event_id = str(terminal_items[0]["event_id"])
             row.error_log_ref = (
                 error_log_ref.model_dump(mode="json")
                 if error_log_ref is not None
@@ -468,6 +491,7 @@ class JobStore:
                 if job.error_log_ref is not None
                 else None
             ),
+            terminal_event_id=job.terminal_event_id,
             created_at=job.created_at,
             started_at=job.started_at,
             finished_at=job.finished_at,
@@ -503,6 +527,7 @@ class JobStore:
                 if row.error_log_ref
                 else None
             ),
+            terminal_event_id=row.terminal_event_id,
             created_at=row.created_at or datetime.now(UTC),
             started_at=row.started_at,
             finished_at=row.finished_at,

@@ -69,7 +69,14 @@ class StreamBus:
         bus is closed, at which point it receives a single ``None`` sentinel.
         """
         q: asyncio.Queue[StreamEvent | None] = asyncio.Queue(maxsize=self._max_queue_size)
-        self._subscribers.append(q)
+        # ``subscribe`` is intentionally synchronous.  On one event loop it
+        # cannot interleave with the lock-protected body of ``close``; a late
+        # subscriber therefore either joins before the close snapshot or gets
+        # its own sentinel immediately after closure.
+        if self._closed:
+            q.put_nowait(None)
+        else:
+            self._subscribers.append(q)
         return q
 
     async def subscribe_iter(self) -> AsyncIterator[StreamEvent]:
@@ -96,26 +103,26 @@ class StreamBus:
         If a subscriber's queue is full, the event is dropped for that
         subscriber (with a warning). We never block producers.
         """
-        if self._closed:
-            logger.warning("StreamBus.emit called after close(); dropping event")
-            return
-
-        # Stamp session/turn ids and sequence number
-        if not event.session_id:
-            event.session_id = self._session_id
-        if not event.turn_id:
-            event.turn_id = self._turn_id
         async with self._lock:
+            if self._closed:
+                logger.warning("StreamBus.emit called after close(); dropping event")
+                return
+
+            # Stamp and enqueue while holding the same lock used by close.
+            # This makes enqueue-before-sentinel the only possible ordering.
+            if not event.session_id:
+                event.session_id = self._session_id
+            if not event.turn_id:
+                event.turn_id = self._turn_id
             self._seq += 1
             event.seq = self._seq
-
-        for q in list(self._subscribers):
-            try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
-                logger.warning(
-                    f"Subscriber queue full (size={q.maxsize}); dropping event {event.type}"
-                )
+            for q in tuple(self._subscribers):
+                try:
+                    q.put_nowait(event)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        f"Subscriber queue full (size={q.maxsize}); dropping event {event.type}"
+                    )
 
     async def close(self) -> None:
         """Close the bus. All subscribers will receive a ``None`` sentinel."""
@@ -123,9 +130,14 @@ class StreamBus:
             if self._closed:
                 return
             self._closed = True
-        for q in list(self._subscribers):
-            with contextlib.suppress(asyncio.QueueFull):
-                q.put_nowait(None)
+            subscribers = tuple(self._subscribers)
+        if subscribers:
+            # A full queue must drain before its sentinel is delivered.  The
+            # gather remains alive if the caller is cancelled so closure
+            # cannot become permanently half-delivered.
+            await asyncio.shield(
+                asyncio.gather(*(q.put(None) for q in subscribers))
+            )
 
     # ------------------------------------------------------------------
     # Convenience emit helpers

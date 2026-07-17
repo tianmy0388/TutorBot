@@ -15,8 +15,8 @@ Per-job lifecycle (driven from :class:`MainOrchestrator`):
     create asyncio.Task → _execute(job)
         ↓
     _execute: create UnifiedContext + new StreamBus + cap.run()
-              ├─ subscribe_iter → append_event + broadcast
-              └─ final result → update_status(COMPLETED, result=…)
+              ├─ normalize progress/resource events → persist + broadcast
+              └─ final result → atomically persist terminal bundle
         ↓
     subscribers (WS clients) receive events live
 
@@ -51,6 +51,7 @@ from tutor.runtime.registry.capability_registry import (
 )
 from tutor.services.jobs.contracts import (
     ArtifactResult,
+    FollowUpTaskContract,
     JobError,
     JobResultContract,
     JobTerminalStatus,
@@ -85,6 +86,9 @@ class JobRunner:
         self._lock = threading.Lock()
         # Capabilities currently executing a job (for /capabilities introspection)
         self._running_user: dict[str, str] = {}
+        # Cancellation intent is in-memory only; the durable transition is
+        # committed by the same terminal writer used by every other outcome.
+        self._cancel_requested: set[str] = set()
 
     # ------------------------------------------------------------------
     # Submit / cancel
@@ -134,33 +138,26 @@ class JobRunner:
         ):
             return False
 
-        # Mark cancelling so we don't re-mark it after the task exits.
-        await self.store.update_status(
-            job_id,
-            status=JobStatus.CANCELLED,
-            finished_at=datetime.now(UTC),
-            error="cancelled by user",
-        )
-        # Broadcast a cancellation event
-        await self._broadcast(
-            job_id,
-            {
-                "type": "cancelled",
-                "source": "job_runner",
-                "stage": "",
-                "content": "Job cancelled by user",
-                "metadata": {"job_id": job_id},
-                "session_id": job.session_id,
-                "turn_id": "",
-                "seq": 0,
-                "timestamp": datetime.now(UTC).timestamp(),
-                "event_id": uuid.uuid4().hex,
-            },
-        )
-        # Cancel the asyncio task
+        self._cancel_requested.add(job_id)
         task = self._tasks.get(job_id)
         if task is not None and not task.done():
             task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        # A task cancelled before its coroutine started cannot run its cleanup.
+        # The idempotent writer makes this fallback safe if cleanup already won.
+        current = await self.store.get(job_id)
+        if current is not None and current.terminal_event_id is None:
+            await self._finish_job(
+                job,
+                result=None,
+                failure=asyncio.CancelledError(),
+                failure_traceback="Job cancelled by user",
+                partial_resources=[],
+                force_cancelled=True,
+            )
+        self._cancel_requested.discard(job_id)
         return True
 
     def _on_task_done(self, job_id: str, task: asyncio.Task) -> None:
@@ -173,7 +170,9 @@ class JobRunner:
         elif task.exception() is not None:
             # If the task crashed before we could mark FAILED, do it now.
             logger.warning(
-                f"JobRunner task crashed job={job_id[:12]}… exc={task.exception()!r}"
+                "JobRunner task crashed job={job_id} kind={kind}",
+                job_id=job_id[:12],
+                kind=type(task.exception()).__name__,
             )
         else:
             logger.info(f"JobRunner task done job={job_id[:12]}…")
@@ -192,29 +191,37 @@ class JobRunner:
         if job is None:
             raise KeyError(f"job not found: {job_id}")
 
-        # Replay buffer first (events the caller missed).
-        # Snapshot the list to avoid surprises if the store mutates.
-        replay = list(job.events or [])
-        for evt in replay:
-            yield evt
-
-        # If the job already terminated, stop here.
-        if job.status in (
-            JobStatus.SUCCEEDED,
-            JobStatus.PARTIAL,
-            JobStatus.FAILED,
-            JobStatus.CANCELLED,
-        ):
-            return
-
-        # Live: register a queue and yield events until termination.
-        q: asyncio.Queue[Any] = asyncio.Queue(maxsize=1024)
+        # Register before the authoritative second read. Any event published
+        # after the first snapshot is either in that read or queued live; IDs
+        # deduplicate the intentional overlap.
+        q: asyncio.Queue[Any] = asyncio.Queue()
         self._subscribers[job_id].append(q)
+        seen_event_ids: set[str] = set()
         try:
+            latest = await self.store.get(job_id)
+            if latest is None:
+                raise KeyError(f"job not found: {job_id}")
+            for evt in list(latest.events or []):
+                event_id = str(evt.get("event_id") or "")
+                if event_id:
+                    seen_event_ids.add(event_id)
+                yield evt
+            if latest.status in (
+                JobStatus.SUCCEEDED,
+                JobStatus.PARTIAL,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+            ):
+                return
             while True:
                 evt = await q.get()
                 if evt is None:
                     return
+                event_id = str(evt.get("event_id") or "")
+                if event_id and event_id in seen_event_ids:
+                    continue
+                if event_id:
+                    seen_event_ids.add(event_id)
                 yield evt
         finally:
             with self._subs_lock():
@@ -236,19 +243,12 @@ class JobRunner:
     async def _broadcast(self, job_id: str, event_dict: dict[str, Any]) -> None:
         queues = list(self._subscribers.get(job_id, []))
         for q in queues:
-            try:
-                q.put_nowait(event_dict)
-            except asyncio.QueueFull:
-                logger.warning(
-                    f"JobRunner subscriber queue full job={job_id[:12]}… "
-                    f"size={q.maxsize}; dropping event"
-                )
+            q.put_nowait(event_dict)
         # Only the canonical terminal closes live queues.  ``error`` and
         # ``done`` are runner-authored compatibility events that precede it.
         if event_dict.get("type") == "job_terminal":
             for q in queues:
-                with __import__("contextlib").suppress(asyncio.QueueFull):
-                    q.put_nowait(None)
+                q.put_nowait(None)
 
     # ------------------------------------------------------------------
     # Execute
@@ -339,10 +339,9 @@ class JobRunner:
                     traceback.format_exception(type(exc), exc, exc.__traceback__)
                 )
                 logger.error(
-                    "JobRunner capability failed job={job_id}: {kind}: {message}",
+                    "JobRunner capability failed job={job_id} kind={kind}",
                     job_id=job.job_id[:12],
                     kind=type(exc).__name__,
-                    message=exc,
                 )
             finally:
                 await bus.close()
@@ -367,7 +366,7 @@ class JobRunner:
                 if event_type in {"done", "cancelled", "job_terminal"}:
                     continue
 
-                evt_dict = evt.to_dict()
+                evt_dict = self._normalize_capability_event(evt, event_type)
                 await self.store.append_event(job.job_id, evt_dict, evt.seq)
                 await self._broadcast(job.job_id, evt_dict)
                 if event_type == "resource":
@@ -387,6 +386,13 @@ class JobRunner:
             run_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await run_task
+            # ``StreamBus.close`` waits to enqueue its sentinel when the
+            # bounded capability queue is full. Keep draining during cancel
+            # so the waiter can finish and terminal persistence cannot hang.
+            while True:
+                pending_event = await event_queue.get()
+                if pending_event is None:
+                    break
         finally:
             with suppress(asyncio.CancelledError):
                 await waiter
@@ -419,6 +425,24 @@ class JobRunner:
             )
         )
 
+    @staticmethod
+    def _normalize_capability_event(evt: Any, event_type: str) -> dict[str, Any]:
+        """Project capability output onto the stable public event vocabulary."""
+        event = evt.to_dict()
+        allowed = {"progress", "stage_start", "stage_end", "resource", "sources"}
+        if event_type in allowed:
+            return event
+        metadata = dict(event.get("metadata") or {})
+        metadata.update(
+            {
+                "original_event_type": event_type,
+                "message": str(event.get("content") or ""),
+            }
+        )
+        event["type"] = "progress"
+        event["metadata"] = metadata
+        return event
+
     async def _finish_job(
         self,
         job: Job,
@@ -427,29 +451,39 @@ class JobRunner:
         failure: BaseException | None,
         failure_traceback: str | None,
         partial_resources: list[dict[str, Any]],
+        force_cancelled: bool = False,
     ) -> None:
         finished_at = datetime.now(UTC)
-        current = await self.store.get(job.job_id)
-        cancelled = current is not None and current.status == JobStatus.CANCELLED
+        cancelled = force_cancelled or job.job_id in self._cancel_requested
+        error_log_ref = None
+        if failure is not None and not cancelled:
+            error_log_ref = self._write_error_log(
+                job.job_id,
+                failure_traceback or f"{type(failure).__name__}: {failure}",
+            )
+        error_code: str | None = None
+        error_message: str | None = None
+        if failure is not None and not cancelled:
+            if isinstance(failure, TimeoutError):
+                error_code, error_message = "JOB_TIMEOUT", "Job timed out"
+            elif isinstance(failure, LookupError):
+                error_code, error_message = "UNKNOWN_CAPABILITY", "Unknown capability"
+            else:
+                error_code, error_message = "CAPABILITY_FAILED", "Capability execution failed"
         contract = self._build_contract(
             job,
             capability_result=result,
-            error_msg=(
-                f"{type(failure).__name__}: {failure}" if failure is not None else None
+            error_code=error_code,
+            error_message=error_message,
+            error_diagnostic=(
+                error_log_ref.artifact_key if error_log_ref is not None else None
             ),
-            error_diagnostic=failure_traceback,
             terminal_status=(
                 JobTerminalStatus.CANCELLED if cancelled else None
             ),
             finished_at=finished_at,
             partial_artifacts=partial_resources,
         )
-        error_log_ref = None
-        if failure is not None:
-            error_log_ref = self._write_error_log(
-                job.job_id,
-                failure_traceback or f"{type(failure).__name__}: {failure}",
-            )
         await self._write_terminal(
             job,
             contract=contract,
@@ -457,6 +491,8 @@ class JobRunner:
             finished_at=finished_at,
             error_log_ref=error_log_ref,
         )
+        if cancelled:
+            self._cancel_requested.discard(job.job_id)
 
     @staticmethod
     def _write_error_log(job_id: str, text: str) -> ArtifactRef:
@@ -482,7 +518,8 @@ class JobRunner:
         job: Job,
         *,
         capability_result: CapabilityResult | None,
-        error_msg: str | None,
+        error_code: str | None,
+        error_message: str | None,
         error_diagnostic: str | None,
         terminal_status: JobTerminalStatus | None,
         finished_at: datetime,
@@ -499,20 +536,18 @@ class JobRunner:
                 partial_artifacts=_materialize_partial_artifacts(partial_artifacts),
             )
 
-        if error_msg is not None:
-            code = "JOB_TIMEOUT" if error_msg.startswith("TimeoutError:") else "CAPABILITY_FAILED"
-            if error_msg.startswith("LookupError: unknown capability"):
-                code = "UNKNOWN_CAPABILITY"
+        if error_code is not None:
+            message = error_message or "Capability execution failed"
             return JobResultContract(
                 job_id=job.job_id,
                 capability=job.capability,
                 status=JobTerminalStatus.FAILED,
-                assistant_message=f"任务失败：{error_msg}"[:200],
+                assistant_message=f"任务失败：{message}"[:200],
                 error=JobError(
-                    code=code,
-                    message=error_msg[:200],
-                    diagnostic=error_diagnostic or error_msg,
-                    retryable=code != "UNKNOWN_CAPABILITY",
+                    code=error_code,
+                    message=message[:200],
+                    diagnostic=error_diagnostic or "",
+                    retryable=error_code != "UNKNOWN_CAPABILITY",
                 ),
                 finished_at=finished_at,
                 partial_artifacts=_materialize_partial_artifacts(partial_artifacts),
@@ -544,7 +579,18 @@ class JobRunner:
                         "finished_at": finished_at,
                     }
                 )
-                return base
+                return base.model_copy(
+                    update={
+                        "follow_up_tasks": [
+                            FollowUpTaskContract(
+                                kind=spec.kind,
+                                payload=spec.payload,
+                                dedupe_key=spec.dedupe_key,
+                            )
+                            for spec in capability_result.follow_up_tasks
+                        ]
+                    }
+                )
             except ValidationError:
                 # fall through to default
                 pass
@@ -595,6 +641,14 @@ class JobRunner:
             status=status,
             assistant_message=assistant_message,
             artifacts=public_artifacts,
+            follow_up_tasks=[
+                FollowUpTaskContract(
+                    kind=spec.kind,
+                    payload=spec.payload,
+                    dedupe_key=spec.dedupe_key,
+                )
+                for spec in capability_result.follow_up_tasks
+            ],
             finished_at=finished_at,
             partial_artifacts=_materialize_partial_artifacts(partial_artifacts),
         )
@@ -610,9 +664,7 @@ class JobRunner:
     ) -> None:
         """Persist and publish only runner-authored terminal lifecycle events."""
         current = await self.store.get(job.job_id)
-        if current is None or any(
-            event.get("type") == "job_terminal" for event in (current.events or [])
-        ):
+        if current is None or current.terminal_event_id is not None:
             return
 
         next_seq = (current.last_seq or 0) + 1
@@ -665,14 +717,22 @@ class JobRunner:
                 )
             )
             next_seq += 1
-
-        for event in compatibility_events:
-            await self.store.append_event(job.job_id, event, event["seq"])
+        elif contract.status == JobTerminalStatus.CANCELLED:
+            compatibility_events.append(
+                self._runner_event(
+                    job,
+                    event_type="cancelled",
+                    content="Job cancelled by user",
+                    seq=next_seq,
+                )
+            )
+            next_seq += 1
 
         terminal_evt = self._terminal_event(job, contract, seq=next_seq)
+        terminal_bundle = [*compatibility_events, terminal_evt]
         job_status = _contract_to_job_status(contract.status)
         err_text = (
-            contract.error.diagnostic or contract.error.message
+            f"{contract.error.code}: {contract.error.message}"
             if contract.error is not None
             else None
         )
@@ -683,7 +743,7 @@ class JobRunner:
             result=contract.model_dump(mode="json"),
             error=err_text,
             error_log_ref=error_log_ref,
-            terminal_event=terminal_evt,
+            terminal_events=terminal_bundle,
         )
         if not persisted:
             logger.debug(
@@ -692,9 +752,8 @@ class JobRunner:
             )
 
             return
-        for event in compatibility_events:
+        for event in terminal_bundle:
             await self._broadcast(job.job_id, event)
-        await self._broadcast(job.job_id, terminal_evt)
 
     @staticmethod
     def _runner_event(

@@ -90,6 +90,7 @@ class Job(BaseModel):
     status: JobStatus = JobStatus.PENDING
     error: str | None = None
     error_log_ref: ArtifactRef | None = None
+    terminal_event_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -131,6 +132,7 @@ class Job(BaseModel):
                 if self.error_log_ref is not None
                 else None
             ),
+            "terminal_event_id": self.terminal_event_id,
         }
 
     def to_full_dict(self) -> dict[str, Any]:
