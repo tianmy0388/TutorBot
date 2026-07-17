@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from typing import Any
 
 from loguru import logger
@@ -56,7 +57,12 @@ class StreamBus:
         self._closed = False
         self._seq = 0
         self._lock = asyncio.Lock()
-        self._stage_stack: list[tuple[str, str, dict[str, Any]]] = []
+        self._stage_stack: ContextVar[
+            tuple[tuple[str, str, dict[str, Any]], ...]
+        ] = ContextVar(
+            f"stream_bus_stage_stack_{id(self)}",
+            default=(),
+        )
 
     # ------------------------------------------------------------------
     # Subscription
@@ -440,7 +446,8 @@ class StreamBus:
             stage=name,
             metadata=metadata,
         )
-        self._stage_stack.append((name, source, metadata or {}))
+        entry = (name, source, dict(metadata or {}))
+        token = self._stage_stack.set((*self._stage_stack.get(), entry))
         try:
             yield
             status = "completed"
@@ -451,14 +458,15 @@ class StreamBus:
             status = "failed"
             raise
         finally:
-            popped_name, popped_source, popped_md = self._stage_stack.pop()
-            end_md = dict(popped_md)
+            self._stage_stack.reset(token)
+            end_name, end_source, stage_md = entry
+            end_md = dict(stage_md)
             end_md["status"] = locals().get("status", "completed")
             await self._make(
                 StreamEventType.STAGE_END,
-                content=popped_name,
-                source=popped_source,
-                stage=popped_name,
+                content=end_name,
+                source=end_source,
+                stage=end_name,
                 metadata=end_md,
             )
 

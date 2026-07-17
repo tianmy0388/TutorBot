@@ -56,12 +56,20 @@ from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.runtime.workflow_graph import WorkflowGraph, WorkflowNode
 from tutor.services.jobs.contracts import (
+    ResourceArtifactNodeInput,
     ResourceArtifactNodeOutput,
+    ResourceIntentNodeInput,
     ResourceIntentNodeOutput,
+    ResourcePackageNodeInput,
+    ResourcePedagogyNodeInput,
     ResourcePedagogyNodeOutput,
+    ResourceProfileNodeInput,
     ResourceProfileNodeOutput,
+    ResourceQualityNodeInput,
     ResourceQualityNodeOutput,
+    ResourceSafetyNodeInput,
     ResourceSafetyNodeOutput,
+    ResourceSourceNodeInput,
     ResourceSourceNodeOutput,
 )
 from tutor.services.knowledge_graph.service import (
@@ -163,7 +171,8 @@ class ResourceGenerationCapability(BaseCapability):
     ) -> CapabilityResult:
         """Execute the explicit resource DAG and hand its result to JobRunner."""
 
-        execution = await self.build_resource_graph(context, stream).execute({})
+        graph = self.build_resource_graph(context, stream)
+        execution = await graph.execute({})
         for node_name, outcome in execution.outcomes.items():
             if outcome.status not in {"failed", "skipped"}:
                 continue
@@ -176,9 +185,12 @@ class ResourceGenerationCapability(BaseCapability):
             )
 
         package_outcome = execution.outcomes["package"]
-        if not isinstance(package_outcome.output, CapabilityResult):
+        if package_outcome.status not in {"succeeded", "degraded"}:
             raise RuntimeError("RESOURCE_WORKFLOW_FAILED")
-        return package_outcome.output
+        result = graph.typed_output(execution, "package")
+        if not isinstance(result, CapabilityResult):
+            raise RuntimeError("RESOURCE_WORKFLOW_FAILED")
+        return result
 
     def build_resource_graph(
         self,
@@ -187,7 +199,9 @@ class ResourceGenerationCapability(BaseCapability):
     ) -> WorkflowGraph:
         """Build the validated, fixed resource-generation dependency graph."""
 
-        async def intent_node(_inputs: Any) -> ResourceIntentNodeOutput:
+        async def intent_node(
+            _inputs: ResourceIntentNodeInput,
+        ) -> ResourceIntentNodeOutput:
             async with stream.stage(
                 "intent_understanding",
                 source="resource_capability",
@@ -200,7 +214,7 @@ class ResourceGenerationCapability(BaseCapability):
             return self._intent_contract(intent)
 
         async def intent_degrade(
-            _inputs: Any,
+            _inputs: ResourceIntentNodeInput,
             _error_code: str,
         ) -> ResourceIntentNodeOutput:
             await report_degraded(
@@ -212,8 +226,10 @@ class ResourceGenerationCapability(BaseCapability):
             )
             return self._intent_contract(parse_intent_keyword(context.user_message))
 
-        async def profile_node(inputs: Any) -> ResourceProfileNodeOutput:
-            intent = inputs["intent"]
+        async def profile_node(
+            inputs: ResourceProfileNodeInput,
+        ) -> ResourceProfileNodeOutput:
+            intent = inputs.intent
             async with stream.stage("profile_loading", source="resource_capability"):
                 await stream.thinking("加载学习者画像...", source="resource_capability")
                 profile = await self._builder.get(context.user_id)
@@ -225,7 +241,7 @@ class ResourceGenerationCapability(BaseCapability):
             )
 
         async def profile_degrade(
-            inputs: Any,
+            inputs: ResourceProfileNodeInput,
             _error_code: str,
         ) -> ResourceProfileNodeOutput:
             await report_degraded(
@@ -236,12 +252,14 @@ class ResourceGenerationCapability(BaseCapability):
                 stage="profile_loading",
             )
             return ResourceProfileNodeOutput(
-                intent=inputs["intent"],
+                intent=inputs.intent,
                 profile_snapshot={},
             )
 
-        async def source_node(inputs: Any) -> ResourceSourceNodeOutput:
-            profile_output = inputs["profile_snapshot"]
+        async def source_node(
+            inputs: ResourceSourceNodeInput,
+        ) -> ResourceSourceNodeOutput:
+            profile_output = inputs.profile_snapshot
             intent = self._intent_from_contract(profile_output.intent)
             kg_summary = await self._load_kg_summary(context, stream)
             planned_types = self._plan_resources(
@@ -284,10 +302,10 @@ class ResourceGenerationCapability(BaseCapability):
             )
 
         async def source_degrade(
-            inputs: Any,
+            inputs: ResourceSourceNodeInput,
             _error_code: str,
         ) -> ResourceSourceNodeOutput:
-            profile_output = inputs["profile_snapshot"]
+            profile_output = inputs.profile_snapshot
             intent = self._intent_from_contract(profile_output.intent)
             planned_types = self._plan_resources(
                 intent=intent,
@@ -309,8 +327,10 @@ class ResourceGenerationCapability(BaseCapability):
                 source_resource=None,
             )
 
-        async def pedagogy_node(inputs: Any) -> ResourcePedagogyNodeOutput:
-            source_output = inputs["source"]
+        async def pedagogy_node(
+            inputs: ResourcePedagogyNodeInput,
+        ) -> ResourcePedagogyNodeOutput:
+            source_output = inputs.source
             source_resource = source_output.source_resource
             if source_resource is None:
                 return ResourcePedagogyNodeOutput(source=source_output)
@@ -335,10 +355,10 @@ class ResourceGenerationCapability(BaseCapability):
             )
 
         async def pedagogy_degrade(
-            inputs: Any,
+            inputs: ResourcePedagogyNodeInput,
             _error_code: str,
         ) -> ResourcePedagogyNodeOutput:
-            source_output = inputs["source"]
+            source_output = inputs.source
             await report_degraded(
                 stream,
                 code="RESOURCE_PEDAGOGY_FAILED",
@@ -352,48 +372,62 @@ class ResourceGenerationCapability(BaseCapability):
             )
 
         async def branch_node(
-            inputs: Any,
+            inputs: ResourceArtifactNodeInput,
             branch_name: str,
         ) -> ResourceArtifactNodeOutput:
             return await self._run_resource_branch(
                 branch_name,
-                inputs["pedagogy"],
+                inputs.pedagogy,
                 context,
                 stream,
             )
 
-        async def quality_node(inputs: Any) -> ResourceQualityNodeOutput:
+        async def quality_node(
+            inputs: ResourceQualityNodeInput,
+        ) -> ResourceQualityNodeOutput:
             return await self._run_quality_node(inputs, context, stream)
 
         async def quality_degrade(
-            inputs: Any,
+            inputs: ResourceQualityNodeInput,
             _error_code: str,
         ) -> ResourceQualityNodeOutput:
             return await self._run_quality_node(inputs, context, stream)
 
-        async def safety_node(inputs: Any) -> ResourceSafetyNodeOutput:
+        async def safety_node(
+            inputs: ResourceSafetyNodeInput,
+        ) -> ResourceSafetyNodeOutput:
             return await self._run_safety_node(
-                inputs["quality"],
+                inputs.quality,
                 context,
                 stream,
             )
 
-        async def package_node(inputs: Any) -> CapabilityResult:
+        async def package_node(inputs: ResourcePackageNodeInput) -> CapabilityResult:
             return await self._run_package_node(
-                inputs["safety"],
+                inputs.safety,
                 context,
                 stream,
             )
 
         return WorkflowGraph(
             [
-                WorkflowNode("intent", (), 120.0, intent_node, intent_degrade),
+                WorkflowNode(
+                    "intent",
+                    (),
+                    120.0,
+                    intent_node,
+                    intent_degrade,
+                    input_model=ResourceIntentNodeInput,
+                    output_model=ResourceIntentNodeOutput,
+                ),
                 WorkflowNode(
                     "profile_snapshot",
                     ("intent",),
                     60.0,
                     profile_node,
                     profile_degrade,
+                    input_model=ResourceProfileNodeInput,
+                    output_model=ResourceProfileNodeOutput,
                 ),
                 WorkflowNode(
                     "source",
@@ -401,6 +435,8 @@ class ResourceGenerationCapability(BaseCapability):
                     300.0,
                     source_node,
                     source_degrade,
+                    input_model=ResourceSourceNodeInput,
+                    output_model=ResourceSourceNodeOutput,
                 ),
                 WorkflowNode(
                     "pedagogy",
@@ -408,6 +444,8 @@ class ResourceGenerationCapability(BaseCapability):
                     300.0,
                     pedagogy_node,
                     pedagogy_degrade,
+                    input_model=ResourcePedagogyNodeInput,
+                    output_model=ResourcePedagogyNodeOutput,
                 ),
                 *[
                     WorkflowNode(
@@ -415,6 +453,8 @@ class ResourceGenerationCapability(BaseCapability):
                         ("pedagogy",),
                         300.0,
                         lambda inputs, branch=name: branch_node(inputs, branch),
+                        input_model=ResourceArtifactNodeInput,
+                        output_model=ResourceArtifactNodeOutput,
                     )
                     for name in (
                         "mindmap",
@@ -430,9 +470,25 @@ class ResourceGenerationCapability(BaseCapability):
                     300.0,
                     quality_node,
                     quality_degrade,
+                    input_model=ResourceQualityNodeInput,
+                    output_model=ResourceQualityNodeOutput,
                 ),
-                WorkflowNode("safety", ("quality",), 300.0, safety_node),
-                WorkflowNode("package", ("safety",), 120.0, package_node),
+                WorkflowNode(
+                    "safety",
+                    ("quality",),
+                    300.0,
+                    safety_node,
+                    input_model=ResourceSafetyNodeInput,
+                    output_model=ResourceSafetyNodeOutput,
+                ),
+                WorkflowNode(
+                    "package",
+                    ("safety",),
+                    120.0,
+                    package_node,
+                    input_model=ResourcePackageNodeInput,
+                    output_model=CapabilityResult,
+                ),
             ]
         )
 
@@ -519,26 +575,53 @@ class ResourceGenerationCapability(BaseCapability):
                 "parallel_resource_generation",
                 source="resource_capability",
             ):
+                artifact_calls: list[tuple[ResourceType, Any]] = []
                 if ResourceType.MINDMAP.value in planned:
-                    resources.append(
-                        await self.multimedia.process(
-                            context,
-                            stream=stream,
-                            topic=intent.topic,
-                            source_content=source_content,
-                            profile=profile_snapshot,
+                    artifact_calls.append(
+                        (
+                            ResourceType.MINDMAP,
+                            self.multimedia.process(
+                                context,
+                                stream=stream,
+                                topic=intent.topic,
+                                source_content=source_content,
+                                profile=profile_snapshot,
+                            ),
                         )
                     )
                 if ResourceType.PPT.value in planned:
-                    resources.append(
-                        await self.ppt_generator.process(
-                            topic=intent.topic,
-                            source_content=source_content,
-                            profile=profile_snapshot,
-                            package_id=None,
-                            stream=stream,
+                    artifact_calls.append(
+                        (
+                            ResourceType.PPT,
+                            self.ppt_generator.process(
+                                topic=intent.topic,
+                                source_content=source_content,
+                                profile=profile_snapshot,
+                                package_id=None,
+                                stream=stream,
+                            ),
                         )
                     )
+                results = await asyncio.gather(
+                    *(call for _, call in artifact_calls),
+                    return_exceptions=True,
+                )
+                for (resource_type, _), result in zip(
+                    artifact_calls,
+                    results,
+                    strict=True,
+                ):
+                    if isinstance(result, Exception):
+                        log_degraded(
+                            code=(
+                                f"RESOURCE_{resource_type.value.upper()}_"
+                                "GENERATION_FAILED"
+                            ),
+                            source="resource_capability",
+                            stage="parallel_resource_generation",
+                        )
+                        continue
+                    resources.append(result)
         elif branch_name == "exercise" and ResourceType.EXERCISE.value in planned:
             resources.append(
                 await self.exercise_generator.process(
@@ -613,11 +696,11 @@ class ResourceGenerationCapability(BaseCapability):
 
     async def _run_quality_node(
         self,
-        inputs: Any,
+        inputs: ResourceQualityNodeInput,
         context: UnifiedContext,
         stream: StreamBus,
     ) -> ResourceQualityNodeOutput:
-        branch_outputs = [value for value in inputs.values() if isinstance(value, ResourceArtifactNodeOutput)]
+        branch_outputs = list(inputs.available_outputs())
         if not branch_outputs:
             raise RuntimeError("RESOURCE_QUALITY_INPUT_MISSING")
         pedagogy_output = branch_outputs[0].pedagogy

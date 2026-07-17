@@ -10,18 +10,22 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
+from enum import Enum
+from pathlib import Path
 from time import perf_counter
 from types import MappingProxyType
 from typing import Any, Generic, Literal, TypeVar
+
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 TIn = TypeVar("TIn")
 TOut = TypeVar("TOut")
 
 NodeStatus = Literal["succeeded", "failed", "degraded", "skipped"]
-NodeRun = Callable[[Mapping[str, Any]], Awaitable[TOut] | TOut]
+NodeRun = Callable[[TIn], Awaitable[TOut] | TOut]
 NodeDegrade = Callable[
-    [Mapping[str, Any], str],
+    [TIn, str],
     Awaitable[TOut] | TOut,
 ]
 
@@ -33,8 +37,10 @@ class WorkflowNode(Generic[TIn, TOut]):
     name: str
     dependencies: tuple[str, ...]
     timeout_seconds: float
-    run: NodeRun[TOut]
-    degrade: NodeDegrade[TOut] | None = None
+    run: NodeRun[TIn, TOut]
+    degrade: NodeDegrade[TIn, TOut] | None = None
+    input_model: Any | None = None
+    output_model: Any | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dependencies", tuple(self.dependencies))
@@ -85,6 +91,24 @@ class WorkflowGraph:
 
         self._validate_acyclic(declared)
         self.nodes = declared
+
+    def typed_output(
+        self,
+        execution: WorkflowExecution,
+        node_name: str,
+    ) -> Any:
+        """Reconstruct a private typed clone from an immutable outcome."""
+
+        node = next((item for item in self.nodes if item.name == node_name), None)
+        if node is None:
+            raise KeyError(node_name)
+        outcome = execution.outcomes[node_name]
+        if outcome.status not in {"succeeded", "degraded"}:
+            raise ValueError(f"workflow node {node_name!r} has no usable output")
+        raw = _clone(outcome.output)
+        if node.output_model is None:
+            return raw
+        return _adapter(node.output_model).validate_python(raw)
 
     @staticmethod
     def _validate_acyclic(nodes: tuple[WorkflowNode[Any, Any], ...]) -> None:
@@ -173,6 +197,18 @@ class WorkflowGraph:
             raise TypeError("workflow node inputs must be a mapping")
         input_snapshots[node.name] = inputs
 
+        try:
+            typed_inputs = (
+                _adapter(node.input_model).validate_python(_clone(inputs))
+                if node.input_model is not None
+                else inputs
+            )
+        except ValidationError:
+            return NodeOutcome(
+                status="failed",
+                error_code="WORKFLOW_INPUT_VALIDATION_FAILED",
+            )
+
         blocked = any(
             completed[dependency].status in {"failed", "skipped"} for dependency in node.dependencies
         )
@@ -184,34 +220,41 @@ class WorkflowGraph:
                 )
             return await self._degrade(
                 node,
-                inputs,
+                typed_inputs,
                 "WORKFLOW_DEPENDENCY_FAILED",
             )
 
         try:
             async with asyncio.timeout(node.timeout_seconds):
-                output = await _resolve(node.run(inputs))
+                output = await _resolve(node.run(typed_inputs))
         except TimeoutError:
             if node.degrade is None:
                 return NodeOutcome(
                     status="failed",
                     error_code="WORKFLOW_NODE_TIMEOUT",
                 )
-            return await self._degrade(node, inputs, "WORKFLOW_NODE_TIMEOUT")
+            return await self._degrade(node, typed_inputs, "WORKFLOW_NODE_TIMEOUT")
         except Exception:  # noqa: BLE001 - exceptions stay private to the graph
             if node.degrade is None:
                 return NodeOutcome(
                     status="failed",
                     error_code="WORKFLOW_NODE_FAILED",
                 )
-            return await self._degrade(node, inputs, "WORKFLOW_NODE_FAILED")
+            return await self._degrade(node, typed_inputs, "WORKFLOW_NODE_FAILED")
 
-        return NodeOutcome(status="succeeded", output=_freeze(deepcopy(output)))
+        try:
+            snapshot = _validated_snapshot(output, node.output_model)
+        except ValidationError:
+            return NodeOutcome(
+                status="failed",
+                error_code="WORKFLOW_OUTPUT_VALIDATION_FAILED",
+            )
+        return NodeOutcome(status="succeeded", output=snapshot)
 
     @staticmethod
     async def _degrade(
         node: WorkflowNode[Any, Any],
-        inputs: Mapping[str, Any],
+        inputs: Any,
         cause_code: str,
     ) -> NodeOutcome[Any]:
         if node.degrade is None:  # pragma: no cover - guarded by caller
@@ -229,11 +272,14 @@ class WorkflowGraph:
                 status="failed",
                 error_code="WORKFLOW_DEGRADATION_FAILED",
             )
-        return NodeOutcome(
-            status="degraded",
-            output=_freeze(deepcopy(output)),
-            error_code=cause_code,
-        )
+        try:
+            snapshot = _validated_snapshot(output, node.output_model)
+        except ValidationError:
+            return NodeOutcome(
+                status="failed",
+                error_code="WORKFLOW_OUTPUT_VALIDATION_FAILED",
+            )
+        return NodeOutcome(status="degraded", output=snapshot, error_code=cause_code)
 
 
 async def _resolve(value: Awaitable[TOut] | TOut) -> TOut:
@@ -243,8 +289,16 @@ async def _resolve(value: Awaitable[TOut] | TOut) -> TOut:
 
 
 def _freeze(value: Any) -> Any:
-    """Recursively freeze common mutable containers at graph boundaries."""
+    """Create a deeply immutable JSON-like graph-boundary snapshot."""
 
+    if isinstance(value, BaseModel):
+        return _freeze(value.model_dump(mode="json", by_alias=True))
+    if is_dataclass(value) and not isinstance(value, type):
+        return _freeze(TypeAdapter(type(value)).dump_python(value, mode="json"))
+    if isinstance(value, Enum):
+        return _freeze(value.value)
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
@@ -252,6 +306,18 @@ def _freeze(value: Any) -> Any:
     if isinstance(value, (set, frozenset)):
         return frozenset(_freeze(item) for item in value)
     return value
+
+
+def _adapter(schema: Any) -> TypeAdapter[Any]:
+    return schema if isinstance(schema, TypeAdapter) else TypeAdapter(schema)
+
+
+def _validated_snapshot(value: Any, schema: Any | None) -> Any:
+    if schema is None:
+        return _freeze(deepcopy(value))
+    adapter = _adapter(schema)
+    validated = adapter.validate_python(value)
+    return _freeze(adapter.dump_python(validated, mode="json", by_alias=True))
 
 
 def _clone(value: Any) -> Any:

@@ -7,11 +7,47 @@ from time import perf_counter
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 from tutor.runtime.workflow_graph import (
     NodeOutcome,
     WorkflowGraph,
     WorkflowNode,
 )
+from tutor.services.resource_package.schema import Resource, ResourceType
+
+
+class _EmptyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _IntegerOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    value: int
+
+
+class _IntegerInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: _IntegerOutput
+
+
+class _ResourceOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    resource: Resource
+
+
+class _ResourceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: _ResourceOutput
+
+
+class _SeenOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    marker: str
 
 
 async def _value(value: Any) -> Any:
@@ -252,3 +288,166 @@ async def test_cancelling_execution_cleans_up_all_running_siblings() -> None:
         await execution_task
 
     assert all(event.is_set() for event in cleaned.values())
+
+
+@pytest.mark.asyncio
+async def test_wrong_input_schema_fails_with_stable_code() -> None:
+    secret = "SECRET_INPUT_VALIDATION_DETAIL"
+
+    async def source(_inputs: _EmptyInput) -> dict[str, str]:
+        return {"value": secret}
+
+    async def consumer(_inputs: _IntegerInput) -> _SeenOutput:
+        return _SeenOutput(marker="unreachable")
+
+    execution = await WorkflowGraph(
+        [
+            WorkflowNode(
+                "source",
+                (),
+                1.0,
+                source,
+                input_model=_EmptyInput,
+            ),
+            WorkflowNode(
+                "consumer",
+                ("source",),
+                1.0,
+                consumer,
+                input_model=_IntegerInput,
+                output_model=_SeenOutput,
+            ),
+        ]
+    ).execute({})
+
+    assert execution.outcomes["consumer"].status == "failed"
+    assert (
+        execution.outcomes["consumer"].error_code
+        == "WORKFLOW_INPUT_VALIDATION_FAILED"
+    )
+    assert secret not in repr(execution.outcomes["consumer"])
+
+
+@pytest.mark.asyncio
+async def test_wrong_output_schema_fails_with_stable_code() -> None:
+    secret = "SECRET_OUTPUT_VALIDATION_DETAIL"
+
+    async def invalid(_inputs: _EmptyInput) -> dict[str, str]:
+        return {"value": secret}
+
+    execution = await WorkflowGraph(
+        [
+            WorkflowNode(
+                "invalid",
+                (),
+                1.0,
+                invalid,
+                input_model=_EmptyInput,
+                output_model=_IntegerOutput,
+            )
+        ]
+    ).execute({})
+
+    assert execution.outcomes["invalid"].status == "failed"
+    assert (
+        execution.outcomes["invalid"].error_code
+        == "WORKFLOW_OUTPUT_VALIDATION_FAILED"
+    )
+    assert secret not in repr(execution.outcomes["invalid"])
+
+
+@pytest.mark.asyncio
+async def test_outcome_contains_deeply_immutable_resource_snapshot() -> None:
+    resource = Resource(
+        resource_id="resource-immutable",
+        type=ResourceType.DOCUMENT,
+        title="Immutable",
+        content="content",
+        metadata={"nested": {"items": ["original"]}},
+    )
+
+    async def source(_inputs: _EmptyInput) -> _ResourceOutput:
+        return _ResourceOutput(resource=resource)
+
+    execution = await WorkflowGraph(
+        [
+            WorkflowNode(
+                "source",
+                (),
+                1.0,
+                source,
+                input_model=_EmptyInput,
+                output_model=_ResourceOutput,
+            )
+        ]
+    ).execute({})
+    resource.metadata["nested"]["items"].append("producer mutation")
+    snapshot = execution.outcomes["source"].output
+
+    assert snapshot["resource"]["metadata"]["nested"]["items"] == ("original",)
+    with pytest.raises(TypeError):
+        snapshot["resource"]["metadata"]["new"] = "mutation"
+    with pytest.raises(AttributeError):
+        snapshot["resource"]["metadata"]["nested"]["items"].append("mutation")
+
+
+@pytest.mark.asyncio
+async def test_siblings_receive_independent_typed_resource_clones() -> None:
+    mutated = asyncio.Event()
+
+    async def source(_inputs: _EmptyInput) -> _ResourceOutput:
+        return _ResourceOutput(
+            resource=Resource(
+                resource_id="resource-clone",
+                type=ResourceType.DOCUMENT,
+                title="Clone",
+                content="content",
+                metadata={"marker": "original"},
+            )
+        )
+
+    async def mutator(inputs: _ResourceInput) -> _SeenOutput:
+        inputs.source.resource.metadata["marker"] = "mutated"
+        mutated.set()
+        return _SeenOutput(marker=inputs.source.resource.metadata["marker"])
+
+    async def observer(inputs: _ResourceInput) -> _SeenOutput:
+        await mutated.wait()
+        return _SeenOutput(marker=inputs.source.resource.metadata["marker"])
+
+    graph = WorkflowGraph(
+        [
+            WorkflowNode(
+                "source",
+                (),
+                1.0,
+                source,
+                input_model=_EmptyInput,
+                output_model=_ResourceOutput,
+            ),
+            WorkflowNode(
+                "mutator",
+                ("source",),
+                1.0,
+                mutator,
+                input_model=_ResourceInput,
+                output_model=_SeenOutput,
+            ),
+            WorkflowNode(
+                "observer",
+                ("source",),
+                1.0,
+                observer,
+                input_model=_ResourceInput,
+                output_model=_SeenOutput,
+            ),
+        ]
+    )
+    execution = await graph.execute({})
+
+    assert execution.outcomes["mutator"].output["marker"] == "mutated"
+    assert execution.outcomes["observer"].output["marker"] == "original"
+    assert (
+        execution.outcomes["source"].output["resource"]["metadata"]["marker"]
+        == "original"
+    )

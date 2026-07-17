@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from typing import Any
 
 from loguru import logger
@@ -80,6 +81,7 @@ class PPTGeneratorAgent(BaseAgent):
         )
         # Render (off-thread to avoid blocking the event loop on slow disks)
         pkg_id = package_id or "ad_hoc"
+        cancel_event = threading.Event()
         try:
             pptx_path = await asyncio.to_thread(
                 self.ppt_service.build,
@@ -88,7 +90,11 @@ class PPTGeneratorAgent(BaseAgent):
                 package_id=pkg_id,
                 resource_id=resource.resource_id,
                 title=topic,
+                cancel_event=cancel_event,
             )
+        except asyncio.CancelledError:
+            cancel_event.set()
+            raise
         except Exception:  # noqa: BLE001
             failure = public_failure(
                 "PPT_RENDER_FAILED", "PPT rendering failed", retryable=True

@@ -112,6 +112,12 @@ class FollowUpTaskContract(BaseModel):
     dedupe_key: str = Field(min_length=1)
 
 
+class ResourceIntentNodeInput(BaseModel):
+    """The intent node consumes no dependency output."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
 class ResourceIntentNodeOutput(BaseModel):
     """Validated intent passed into the resource-generation DAG."""
 
@@ -126,6 +132,12 @@ class ResourceIntentNodeOutput(BaseModel):
     confidence: float = 0.0
 
 
+class ResourceProfileNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent: ResourceIntentNodeOutput
+
+
 class ResourceProfileNodeOutput(BaseModel):
     """Copy-isolated learner snapshot paired with the normalized intent."""
 
@@ -133,6 +145,12 @@ class ResourceProfileNodeOutput(BaseModel):
 
     intent: ResourceIntentNodeOutput
     profile_snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResourceSourceNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile_snapshot: ResourceProfileNodeOutput
 
 
 class ResourceSourceNodeOutput(BaseModel):
@@ -146,6 +164,12 @@ class ResourceSourceNodeOutput(BaseModel):
     source_resource: Resource | None = None
 
 
+class ResourcePedagogyNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: ResourceSourceNodeOutput
+
+
 class ResourcePedagogyNodeOutput(BaseModel):
     """Teaching rewrite consumed by all independent artifact branches."""
 
@@ -155,6 +179,12 @@ class ResourcePedagogyNodeOutput(BaseModel):
     pedagogy_resource: Resource | None = None
 
 
+class ResourceArtifactNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pedagogy: ResourcePedagogyNodeOutput
+
+
 class ResourceArtifactNodeOutput(BaseModel):
     """Usable artifacts emitted by one named branch."""
 
@@ -162,6 +192,32 @@ class ResourceArtifactNodeOutput(BaseModel):
 
     pedagogy: ResourcePedagogyNodeOutput
     resources: tuple[Resource, ...] = ()
+
+
+class ResourceQualityNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    mindmap: ResourceArtifactNodeOutput | None = None
+    exercise: ResourceArtifactNodeOutput | None = None
+    code: ResourceArtifactNodeOutput | None = None
+    video_code: ResourceArtifactNodeOutput | None = Field(
+        default=None,
+        alias="video-code",
+    )
+    reading: ResourceArtifactNodeOutput | None = None
+
+    def available_outputs(self) -> tuple[ResourceArtifactNodeOutput, ...]:
+        return tuple(
+            output
+            for output in (
+                self.mindmap,
+                self.exercise,
+                self.code,
+                self.video_code,
+                self.reading,
+            )
+            if output is not None
+        )
 
 
 class ResourceQualityNodeOutput(BaseModel):
@@ -176,6 +232,12 @@ class ResourceQualityNodeOutput(BaseModel):
     filtered_reviews: tuple[dict[str, Any], ...] = ()
 
 
+class ResourceSafetyNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    quality: ResourceQualityNodeOutput
+
+
 class ResourceSafetyNodeOutput(BaseModel):
     """Quality-approved artifacts after safety rejection filtering."""
 
@@ -185,6 +247,12 @@ class ResourceSafetyNodeOutput(BaseModel):
     resources: tuple[Resource, ...] = ()
     safety_reports: tuple[Any, ...] = ()
     filtered_safety: tuple[dict[str, Any], ...] = ()
+
+
+class ResourcePackageNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    safety: ResourceSafetyNodeOutput
 
 
 class JobResultContract(BaseModel):
@@ -232,11 +300,19 @@ __all__ = [
     "JobResultContract",
     "JobTerminalStatus",
     "JobWarning",
+    "ResourceArtifactNodeInput",
     "ResourceArtifactNodeOutput",
+    "ResourceIntentNodeInput",
     "ResourceIntentNodeOutput",
+    "ResourcePackageNodeInput",
+    "ResourcePedagogyNodeInput",
     "ResourcePedagogyNodeOutput",
+    "ResourceProfileNodeInput",
     "ResourceProfileNodeOutput",
+    "ResourceQualityNodeInput",
     "ResourceQualityNodeOutput",
+    "ResourceSafetyNodeInput",
     "ResourceSafetyNodeOutput",
+    "ResourceSourceNodeInput",
     "ResourceSourceNodeOutput",
 ]

@@ -23,16 +23,18 @@ and the path is stored in ``Resource.format_specific["pptx_path"]``.
 from __future__ import annotations
 
 import re
+import threading
+import uuid
+from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from loguru import logger
 from pptx import Presentation
 from pptx.util import Inches, Pt
 
 from tutor.services.config.settings import get_settings
-
 
 # ---------------------------------------------------------------------------
 # Markdown slice
@@ -201,17 +203,14 @@ def render_slides(slides: list[Slide], output_path: Path, *, title: str = "") ->
         layout = bullet_layout if (i > 0 or s.bullets) else title_layout
         slide = prs.slides.add_slide(layout)
         # Title placeholder
-        try:
+        with suppress(Exception):
             slide.shapes.title.text = s.title or title or "未命名"
-        except Exception:
-            pass
         # Body bullets (skip for cover slide)
         if s.bullets and i > 0:
             _set_bullets(slide, s.bullets)
-        elif not s.bullets and i == 0:
+        elif not s.bullets and i == 0 and len(slide.placeholders) > 1:
             # Subtitle hint on the cover
-            if len(slide.placeholders) > 1:
-                slide.placeholders[1].text = title or ""
+            slide.placeholders[1].text = title or ""
 
     prs.save(str(output_path))
     logger.info(f"PPT written to {output_path} ({len(slides)} slides)")
@@ -241,12 +240,23 @@ class PPTGenerationService:
         package_id: str,
         resource_id: str,
         title: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Path:
         slides = slice_markdown_to_slides(topic, markdown)
         out_dir = self.output_dir / package_id
         out_path = out_dir / f"{resource_id}.pptx"
-        render_slides(slides, out_path, title=title or topic)
-        return out_path
+        temp_path = self.output_dir / ".tmp" / f"{resource_id}-{uuid.uuid4().hex}.pptx"
+        try:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("PPT generation cancelled")
+            render_slides(slides, temp_path, title=title or topic)
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("PPT generation cancelled")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            temp_path.replace(out_path)
+            return out_path
+        finally:
+            temp_path.unlink(missing_ok=True)
 
 
 # Singleton accessor

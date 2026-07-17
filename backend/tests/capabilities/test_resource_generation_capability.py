@@ -568,6 +568,8 @@ async def test_resource_graph_is_explicit_and_failed_video_is_isolated(
         "safety": ("quality",),
         "package": ("safety",),
     }
+    assert all(node.input_model is not None for node in graph.nodes)
+    assert all(node.output_model is not None for node in graph.nodes)
 
     result = await capability.run(context, bus)
     package_types = {resource["type"] for resource in result.payload["package"]["resources"]}
