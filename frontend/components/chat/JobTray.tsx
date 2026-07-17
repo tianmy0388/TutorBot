@@ -37,6 +37,7 @@ import {
 import { useJobQueue } from "@/hooks/useJobQueue";
 import { useTutorStore } from "@/lib/store";
 import type { JobStatus, JobSummary } from "@/lib/types";
+import { isJobTerminal, isTerminal } from "@/lib/job-reducer";
 import { cn } from "@/lib/utils";
 
 const STATUS_META: Record<
@@ -95,11 +96,33 @@ const CAPABILITY_META: Record<string, { icon: any; color: string; label: string 
 
 export function JobTray() {
   const userId = useTutorStore((s) => s.userId);
+  const jobsById = useTutorStore((s) => s.jobsById);
   const queue = useJobQueue(userId);
   const [open, setOpen] = useState(false);
 
-  const active = queue.activeJobs.length;
-  const recent = queue.jobs.slice(0, 8);
+  const recent = queue.jobs.slice(0, 8).map((job) => {
+    const durable = jobsById[job.job_id];
+    if (!durable) return job;
+    return {
+      ...job,
+      status: durable.status,
+      error: durable.error,
+      finished_at: durable.finished_at
+        ? new Date(durable.finished_at).toISOString()
+        : job.finished_at,
+    };
+  });
+  const durableActiveIds = new Set(
+    Object.values(jobsById)
+      .filter((job) => !isJobTerminal(job))
+      .map((job) => job.job_id),
+  );
+  const queueOnlyActive = queue.jobs.filter(
+    (job) =>
+      !jobsById[job.job_id] &&
+      !isTerminal(job.status),
+  ).length;
+  const active = durableActiveIds.size + queueOnlyActive;
 
   return (
     <div className="relative">

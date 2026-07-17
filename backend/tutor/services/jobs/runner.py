@@ -50,6 +50,7 @@ from tutor.runtime.registry.capability_registry import (
     CapabilityRegistry,
     get_capability_registry,
 )
+from tutor.services.intent.router import classify
 from tutor.services.jobs.contracts import (
     ArtifactResult,
     FollowUpTaskContract,
@@ -135,8 +136,11 @@ class JobRunner:
 
     async def submit(self, req: JobSubmit) -> Job:
         """Accept a job, persist as PENDING, schedule execution."""
-        # Resolve capability (cheap, no LLM — defaults to resource_generation)
-        cap_name = req.capability or "resource_generation"
+        # Explicit validated hints stay explicit. Only submissions without a
+        # capability cross the single deterministic intent-routing boundary.
+        cap_name = req.capability
+        if cap_name is None:
+            cap_name = classify(req.message).capability
         if self.capabilities.get(cap_name) is None:
             raise ValueError(f"Unknown capability: {cap_name!r}")
 

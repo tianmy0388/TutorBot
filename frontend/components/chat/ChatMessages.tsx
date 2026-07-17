@@ -10,7 +10,7 @@
  * read it) but the chat surface derives everything — text,
  * thinking, stage, error, and "is a turn in progress?" — from the
  * per-job events. The "in progress" check is now
- * ``!isTerminal(job.status)`` rather than
+ * ``!isJobTerminal(job)`` rather than
  * ``activeTurn.phase !== "idle"``, which used to leave the spinner
  * hanging after ``job_terminal`` (the regression called out in the
  * 2026-06-21 stability plan).
@@ -24,7 +24,7 @@ import rehypeKatex from "rehype-katex";
 import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { StageIndicator, StageRow } from "./StageIndicator";
-import { isTerminal } from "@/lib/job-reducer";
+import { isJobTerminal } from "@/lib/job-reducer";
 import {
   Bot,
   User,
@@ -41,7 +41,6 @@ import {
 
 export function ChatMessages() {
   const messages = useTutorStore((s) => s.messages);
-  const activeTurn = useTutorStore((s) => s.activeTurn);
   const jobsById = useTutorStore((s) => s.jobsById);
   const jobOrder = useTutorStore((s) => s.jobOrder);
   const tracePanelOpen = useTutorStore((s) => s.tracePanelOpen);
@@ -54,13 +53,12 @@ export function ChatMessages() {
   // source of truth for "show the spinner / streaming view". Once
   // every job is terminal, the view collapses to the message list —
   // the "正在调用 Agent" badge no longer hangs because we no longer
-  // use phase !== idle as the trigger. The streaming buffers still
-  // live on activeTurn (the event-handler keeps them updated in
-  // lockstep with the WS), so we still read them there.
+  // use phase !== idle as the trigger. Streaming buffers are owned by
+  // that same durable ClientJob.
   const liveJob = useMemo(() => {
     for (let i = jobOrder.length - 1; i >= 0; i--) {
       const job = jobsById[jobOrder[i]];
-      if (job && !isTerminal(job.status)) return job;
+      if (job && !isJobTerminal(job)) return job;
     }
     return null;
   }, [jobOrder, jobsById]);
@@ -70,14 +68,11 @@ export function ChatMessages() {
   // record still claims to be "streaming" or "success" — the live
   // view stays collapsed and the message list takes over.
   const showLive = !!liveJob;
-  // 2026-06-21 plan (B2): streaming buffers now live on the
-  // per-job ClientJob state. The legacy activeTurn fields are
-  // a fallback for callers that haven't been updated yet
-  // (event-handler, useWebSocket still write to activeTurn).
-  const textBuffer = liveJob?.text_buffer || activeTurn.text_buffer;
-  const thinkingBuffer = liveJob?.thinking_buffer || activeTurn.thinking_buffer;
-  const errorText = liveJob?.error || activeTurn.error;
-  const events = liveJob?.events?.length ? liveJob.events : activeTurn.events;
+  // Streaming output is read only from the durable per-job state.
+  const textBuffer = liveJob?.text_buffer ?? "";
+  const thinkingBuffer = liveJob?.thinking_buffer ?? "";
+  const errorText = liveJob?.error ?? null;
+  const events = liveJob?.events ?? [];
   const stage = liveJob?.stage || "";
 
   // Auto-scroll on new content
@@ -89,7 +84,7 @@ export function ChatMessages() {
     messages.length,
     liveJob?.text_buffer,
     liveJob?.thinking_buffer,
-    liveJob?.events.length ?? activeTurn.events.length,
+    liveJob?.events.length,
   ]);
 
   return (

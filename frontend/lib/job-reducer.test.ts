@@ -14,6 +14,7 @@ import {
   createJobState,
   emptyJobsState,
   getJobIdFromEvent,
+  isJobTerminal,
   isTerminal,
   reduceJobEvent,
   type JobsState,
@@ -98,6 +99,27 @@ describe("job-reducer", () => {
       (m) => m.metadata?.job_id === "job-3" && m.metadata?.terminal === true,
     ).length;
     expect(assistantCount).toBe(1);
+  });
+
+  it("dedupes the same canonical terminal across snapshot and live replay", () => {
+    const state = createJobState("job-terminal-replay", "tutoring");
+    const terminal = terminalEvent("job-terminal-replay", "ok");
+    const once = reduceJobEvent(state, terminal);
+    const twice = reduceJobEvent(
+      once,
+      streamEvent("job-terminal-replay", {
+        type: "job_terminal",
+        event_id: terminal.event_id,
+        metadata: {
+          job_id: "job-terminal-replay",
+          contract: terminal.result,
+        },
+      }),
+    );
+
+    expect(twice.jobsById["job-terminal-replay"].events).toHaveLength(
+      once.jobsById["job-terminal-replay"].events.length,
+    );
   });
 
   it("dedupes events by event_id", () => {
@@ -288,6 +310,81 @@ describe("job-reducer", () => {
     });
     expect(next.jobsById["job-10"]?.status).toBe("succeeded");
     expect(next.messages.at(-1)?.content).toBe("从快照恢复的消息");
+  });
+
+  it.each(["succeeded", "partial", "failed", "cancelled"] as const)(
+    "isJobTerminal treats %s as terminal",
+    (status) => {
+      const state = createJobState(`job-${status}`, "tutoring");
+      state.jobsById[`job-${status}`].status = status;
+      expect(isJobTerminal(state.jobsById[`job-${status}`])).toBe(true);
+    },
+  );
+
+  it.each(["job_terminal", "done", "cancelled"] as const)(
+    "isJobTerminal accepts replayed %s truth even when status is stale",
+    (type) => {
+      const state = createJobState(`job-${type}`, "tutoring");
+      state.jobsById[`job-${type}`].status = "running";
+      state.jobsById[`job-${type}`].events = [
+        streamEvent(`job-${type}`, { type }).event,
+      ];
+      expect(isJobTerminal(state.jobsById[`job-${type}`])).toBe(true);
+    },
+  );
+
+  it("keeps a terminal parent terminal while its child is running", () => {
+    const state = createJobState("parent", "resource_generation");
+    const parent = state.jobsById.parent;
+    parent.status = "succeeded";
+    parent.background_status = "running";
+    parent.children = [
+      {
+        job_id: "child",
+        capability: "video_render",
+        status: "running",
+        parent_job_id: "parent",
+        task_kind: "video_render",
+      },
+    ];
+
+    expect(isJobTerminal(parent)).toBe(true);
+  });
+
+  it("normalizes a canonical terminal replay whose snapshot status is stale", () => {
+    const state = emptyJobsState();
+    const contract = terminalEvent("job-replay", "replayed").result;
+    const event = streamEvent("job-replay", {
+      type: "job_terminal",
+      metadata: { job_id: "job-replay", contract },
+    }).event;
+
+    const next = reduceJobEvent(state, {
+      type: "snapshot",
+      job: {
+        job_id: "job-replay",
+        capability: "resource_generation",
+        status: "running",
+        events: [event],
+        result: contract,
+      },
+    });
+
+    expect(next.jobsById["job-replay"].status).toBe("succeeded");
+    expect(next.messages.at(-1)?.content).toBe("replayed");
+  });
+
+  it.each([
+    ["done", "succeeded"],
+    ["cancelled", "cancelled"],
+  ] as const)("normalizes legacy %s events to %s", (type, status) => {
+    const state = createJobState(`legacy-${type}`, "tutoring");
+    const next = reduceJobEvent(
+      state,
+      streamEvent(`legacy-${type}`, { type }),
+    );
+    expect(next.jobsById[`legacy-${type}`].status).toBe(status);
+    expect(isJobTerminal(next.jobsById[`legacy-${type}`])).toBe(true);
   });
 
   it("snapshot hydrates durable children and failed background status", () => {

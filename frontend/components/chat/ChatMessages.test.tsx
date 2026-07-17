@@ -149,6 +149,43 @@ describe("ChatMessages — terminal state", () => {
     expect(screen.queryByText(/调用 Agent/i)).not.toBeInTheDocument();
   });
 
+  it("trusts a canonical terminal event when the replayed status is stale", () => {
+    const job = {
+      ...baseTerminalJob("job-canonical"),
+      status: "running" as const,
+      finished_at: null,
+    };
+    mockStoreState({
+      activeTurn: { phase: "streaming" },
+      jobs: { jobsById: { [job.job_id]: job }, jobOrder: [job.job_id] },
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.queryByText(/调用 Agent/i)).not.toBeInTheDocument();
+  });
+
+  it("does not render stale activeTurn buffers for a durable running job", () => {
+    const job = {
+      ...baseTerminalJob("job-running"),
+      status: "running" as const,
+      finished_at: null,
+      events: [],
+    };
+    mockStoreState({
+      activeTurn: {
+        phase: "streaming",
+        text_buffer: "来自旧 activeTurn 的错误内容",
+      },
+      jobs: { jobsById: { [job.job_id]: job }, jobOrder: [job.job_id] },
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.queryByText("来自旧 activeTurn 的错误内容")).not.toBeInTheDocument();
+    expect(screen.getByText(/调用 Agent/i)).toBeInTheDocument();
+  });
+
   it("renders the streamed text from jobsById on a succeeded job", () => {
     const now = Date.now();
     const job: ClientJob = {
@@ -165,20 +202,19 @@ describe("ChatMessages — terminal state", () => {
       events: [],
       result: null,
       error: null,
-      text_buffer: "",
+      text_buffer: "self-attention 计算 QKV 注意力。",
       thinking_buffer: "",
       stage: "",
       open_stages: [],
     };
     // While the job is non-terminal, ChatMessages renders the live
-    // streaming view. textBuffer lives on activeTurn (the event
-    // handler keeps it in lockstep with the WS) and must be visible.
+    // streaming view. The per-job buffer is authoritative and must be visible.
     mockStoreState({
       activeTurn: {
         turn_id: "t1",
         phase: "streaming",
         started_at: now - 1000,
-        text_buffer: "self-attention 计算 QKV 注意力。",
+        text_buffer: "",
         thinking_buffer: "",
         events: [],
         result: null,
@@ -213,3 +249,39 @@ describe("ChatMessages — terminal state", () => {
     expect(dismiss).toHaveBeenCalledWith(0);
   });
 });
+
+function baseTerminalJob(jobId: string): ClientJob {
+  const now = Date.now();
+  return {
+    job_id: jobId,
+    capability: "tutoring",
+    status: "succeeded",
+    message_preview: "hello",
+    submitted_at: now - 1000,
+    started_at: now - 1000,
+    finished_at: now,
+    last_seq: 1,
+    event_count: 1,
+    seen_event_ids: new Set(),
+    events: [
+      {
+        type: "job_terminal",
+        source: "job_runner",
+        stage: "terminal",
+        content: "done",
+        metadata: { job_id: jobId },
+        session_id: "s1",
+        turn_id: "",
+        seq: 1,
+        timestamp: now / 1000,
+        event_id: `terminal-${jobId}`,
+      },
+    ],
+    result: null,
+    error: null,
+    text_buffer: "",
+    thinking_buffer: "",
+    stage: "",
+    open_stages: [],
+  };
+}

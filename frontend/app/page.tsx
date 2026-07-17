@@ -27,6 +27,7 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { SettingsModal } from "@/components/layout/SettingsModal";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useTutorStore } from "@/lib/store";
+import { isJobTerminal } from "@/lib/job-reducer";
 import {
   Brain,
   Sparkles,
@@ -92,7 +93,9 @@ export default function HomePage() {
   const latestAssessment = useTutorStore((s) => s.latestAssessment);
   const selectedResourceId = useTutorStore((s) => s.resourceSelection.selectedResourceId);
   const plannedPath = useTutorStore((s) => s.plannedPath);
-  const activeTurnPhase = useTutorStore((s) => s.activeTurn.phase);
+  const hasActiveJob = useTutorStore((s) =>
+    Object.values(s.jobsById).some((job) => !isJobTerminal(job)),
+  );
 
   const lastPackageId = useRef<string | null>(null);
   const lastTutorId = useRef<string | null>(null);
@@ -177,7 +180,7 @@ export default function HomePage() {
           </div>
           <div className="flex items-center gap-3">
             <JobTray />
-            {activeTurnPhase !== "idle" && (
+            {hasActiveJob && (
               <div className="text-[10px] flex items-center gap-1.5 px-2.5 h-7 rounded-full"
                 style={{
                   color: "var(--color-brand-300)",

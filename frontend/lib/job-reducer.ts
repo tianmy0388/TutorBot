@@ -275,6 +275,20 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
     return state;
   }
 
+  if (stream.type === "job_terminal") {
+    const contract = stream.metadata?.contract;
+    if (isJobResultContract(contract)) {
+      return applyTerminal(state, {
+        type: "job_terminal",
+        job_id: ev.job_id,
+        capability: contract.capability || job.capability,
+        result: contract,
+        timestamp: stream.timestamp,
+        event_id: stream.event_id,
+      });
+    }
+  }
+
   // Order: ignore out-of-order duplicates unless seq is newer.
   if (typeof stream.seq === "number" && stream.seq <= job.last_seq && stream.event_id && job.seen_event_ids.has(stream.event_id) === false) {
     // First time seeing this event_id but seq is older than last_seq — still
@@ -296,6 +310,11 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
   if (stream.type === "stage_start" && job.status === "pending") {
     status = "running";
     started_at = stream.timestamp ? stream.timestamp * 1000 : Date.now();
+  }
+  if (stream.type === "done") {
+    status = "succeeded";
+  } else if (stream.type === "cancelled") {
+    status = "cancelled";
   }
 
   // 2026-06-21 plan (B2): accumulate streaming content into
@@ -354,11 +373,21 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
     openStages = job.open_stages ?? [];
     jobStage = job.stage ?? "";
   }
+  if (stream.type === "done" || stream.type === "cancelled") {
+    openStages = [];
+    jobStage = "";
+  }
 
   const next: ClientJob = {
     ...job,
     status,
     started_at,
+    finished_at:
+      stream.type === "done" || stream.type === "cancelled"
+        ? stream.timestamp
+          ? stream.timestamp * 1000
+          : Date.now()
+        : job.finished_at,
     events: trimmed,
     event_count: job.event_count + 1,
     last_seq:
@@ -492,6 +521,10 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
 function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
   const incoming = ev.job;
   const existing = state.jobsById[incoming.job_id];
+  const replayStatus = terminalStatusFromEvents(incoming.events ?? []);
+  const effectiveStatus = isTerminal(incoming.status)
+    ? incoming.status
+    : replayStatus ?? incoming.status;
 
   // If we have a fresher local view (newer last_seq or more events), keep it.
   if (existing) {
@@ -531,7 +564,11 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
   // already terminal, clear the open_stages stack regardless of
   // the local stage string — the chip must stop spinning once the
   // job is over.
-  const isIncomingTerminal = isTerminal(incoming.status);
+  const isIncomingTerminal =
+    isTerminal(effectiveStatus) ||
+    (incoming.events ?? []).some((event) =>
+      TERMINAL_EVENT_TYPES.has(event.type),
+    );
   const snapStage = isIncomingTerminal
     ? ""
     : existing?.stage ?? "";
@@ -542,7 +579,7 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
   const next: ClientJob = {
     job_id: incoming.job_id,
     capability: incoming.capability,
-    status: incoming.status,
+    status: effectiveStatus,
     message_preview: incoming.message_preview ?? "",
     submitted_at: incoming.submitted_at ?? Date.now(),
     started_at: toMillis(incoming.started_at),
@@ -610,6 +647,42 @@ export function isTerminal(status: JobStatus): boolean {
     status === "partial" ||
     status === "failed" ||
     status === "cancelled"
+  );
+}
+
+const TERMINAL_EVENT_TYPES = new Set(["job_terminal", "done", "cancelled"]);
+
+function isJobResultContract(value: unknown): value is JobResultContract {
+  if (!value || typeof value !== "object") return false;
+  const contract = value as Partial<JobResultContract>;
+  return (
+    typeof contract.job_id === "string" &&
+    typeof contract.capability === "string" &&
+    typeof contract.assistant_message === "string" &&
+    contract.status !== undefined &&
+    isTerminal(contract.status)
+  );
+}
+
+function terminalStatusFromEvents(events: StreamEvent[]): JobStatus | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type === "cancelled") return "cancelled";
+    if (event.type === "done") return "succeeded";
+    if (event.type === "job_terminal") {
+      const contract = event.metadata?.contract;
+      if (isJobResultContract(contract)) return contract.status;
+    }
+  }
+  return null;
+}
+
+/** Durable job state is the sole loading/terminal authority for the UI. */
+export function isJobTerminal(job: ClientJob): boolean {
+  return (
+    isTerminal(job.status) ||
+    job.finished_at != null ||
+    job.events.some((event) => TERMINAL_EVENT_TYPES.has(event.type))
   );
 }
 

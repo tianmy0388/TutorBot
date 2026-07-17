@@ -8,11 +8,26 @@ video/PPT-explicit-only rule are the key product decisions.
 from __future__ import annotations
 
 import pytest
-
 from tutor.services.intent.router import (
-    IntentDecision,
     classify,
 )
+
+
+@pytest.mark.parametrize(
+    ("message", "capability"),
+    [
+        ("解释一下注意力机制", "tutoring"),
+        ("生成一份代码示例", "resource_generation"),
+        ("给我做一次测验", "assessment"),
+        ("查看我的学习画像", "profile"),
+        ("下一步该学什么", "path_planning"),
+    ],
+)
+def test_router_covers_every_public_capability(message: str, capability: str) -> None:
+    decision = classify(message)
+    assert decision.capability == capability
+    assert 0.0 <= decision.confidence <= 1.0
+    assert decision.reason
 
 
 def test_explanation_routes_to_tutoring() -> None:
