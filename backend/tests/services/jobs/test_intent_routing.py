@@ -96,7 +96,7 @@ async def test_submit_rejects_an_invalid_explicit_capability_without_rerouting(
     route = Mock(side_effect=AssertionError("invalid explicit hints must not reroute"))
     monkeypatch.setattr(runner_module, "classify", route)
 
-    with pytest.raises(ValueError, match="Unknown capability"):
+    with pytest.raises(ValueError, match="INVALID_CAPABILITY"):
         await runner.submit(
             JobSubmit(message="解释注意力机制", capability="not-a-capability")
         )
@@ -122,3 +122,31 @@ def test_orchestrator_delegates_to_the_shared_router(message: str) -> None:
     context = UnifiedContext(user_message=message)
 
     assert orchestrator.route(context) == classify(message).capability
+
+
+def test_orchestrator_rejects_invalid_explicit_capability() -> None:
+    orchestrator = MainOrchestrator(capability_registry=_Capabilities())  # type: ignore[arg-type]
+    context = UnifiedContext(
+        user_message="生成一份学习资源",
+        capability="admin",
+    )
+
+    with pytest.raises(ValueError, match="INVALID_CAPABILITY"):
+        orchestrator.route(context)
+
+
+def test_orchestrator_preserves_valid_explicit_capability() -> None:
+    orchestrator = MainOrchestrator(capability_registry=_Capabilities())  # type: ignore[arg-type]
+    context = UnifiedContext(
+        user_message="生成一份学习资源",
+        capability="tutoring",
+    )
+
+    assert orchestrator.route(context) == "tutoring"
+
+
+def test_orchestrator_preserves_valid_explicit_capability_without_message() -> None:
+    orchestrator = MainOrchestrator(capability_registry=_Capabilities())  # type: ignore[arg-type]
+    context = UnifiedContext(user_message="", capability="profile")
+
+    assert orchestrator.route(context) == "profile"

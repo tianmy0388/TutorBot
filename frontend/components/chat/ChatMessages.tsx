@@ -56,8 +56,9 @@ export function ChatMessages() {
   // use phase !== idle as the trigger. Streaming buffers are owned by
   // that same durable ClientJob.
   const liveJob = useMemo(() => {
-    for (let i = jobOrder.length - 1; i >= 0; i--) {
-      const job = jobsById[jobOrder[i]];
+    // jobOrder is newest-first, so the first live entry is the latest job.
+    for (const jobId of jobOrder) {
+      const job = jobsById[jobId];
       if (job && !isJobTerminal(job)) return job;
     }
     return null;

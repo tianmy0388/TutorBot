@@ -65,10 +65,10 @@ class MainOrchestrator:
         Explicit hints stay explicit. Otherwise the shared deterministic
         intent router is the only capability selector.
         """
-        if context.capability:
-            return context.capability
-
-        return classify(context.user_message or "").capability
+        return classify(
+            context.user_message or "",
+            explicit_capability=context.capability,
+        ).capability
 
     # ------------------------------------------------------------------
     # Execution

@@ -116,6 +116,7 @@ describe("JobTray durable terminal state", () => {
     });
     const state = createJobState("job-durable-only", "tutoring");
     state.jobsById["job-durable-only"].status = "running";
+    state.jobsById["job-durable-only"].message_preview = "hello";
     useTutorStoreMock.mockImplementation((selector: (value: unknown) => unknown) =>
       selector({ userId: "local-user", jobsById: state.jobsById }),
     );
@@ -123,5 +124,25 @@ describe("JobTray durable terminal state", () => {
     render(<JobTray />);
 
     expect(screen.getByTitle("任务队列")).toHaveTextContent("1");
+    fireEvent.click(screen.getByTitle("任务队列"));
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+    expect(screen.getByText("hello")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消" })).toBeInTheDocument();
+  });
+
+  it("renders one row when queue and durable state overlap", () => {
+    mockQueue(summary("pending"));
+    const state = createJobState("job-queue", "tutoring");
+    state.jobsById["job-queue"].status = "running";
+    state.jobsById["job-queue"].message_preview = "hello";
+    useTutorStoreMock.mockImplementation((selector: (value: unknown) => unknown) =>
+      selector({ userId: "local-user", jobsById: state.jobsById }),
+    );
+
+    render(<JobTray />);
+    fireEvent.click(screen.getByTitle("任务队列"));
+
+    expect(screen.getAllByText("hello")).toHaveLength(1);
   });
 });

@@ -100,29 +100,53 @@ export function JobTray() {
   const queue = useJobQueue(userId);
   const [open, setOpen] = useState(false);
 
-  const recent = queue.jobs.slice(0, 8).map((job) => {
-    const durable = jobsById[job.job_id];
-    if (!durable) return job;
-    return {
-      ...job,
-      status: durable.status,
-      error: durable.error,
-      finished_at: durable.finished_at
+  const queueById = new Map(queue.jobs.map((job) => [job.job_id, job]));
+  const mergedJobs: JobSummary[] = [
+    ...Object.values(jobsById).map((durable): JobSummary => {
+      const queued = queueById.get(durable.job_id);
+      const startedAt = durable.started_at
+        ? new Date(durable.started_at).toISOString()
+        : (queued?.started_at ?? null);
+      const finishedAt = durable.finished_at
         ? new Date(durable.finished_at).toISOString()
-        : job.finished_at,
-    };
-  });
-  const durableActiveIds = new Set(
-    Object.values(jobsById)
-      .filter((job) => !isJobTerminal(job))
-      .map((job) => job.job_id),
+        : (queued?.finished_at ?? null);
+      const durationSeconds =
+        durable.started_at != null && durable.finished_at != null
+          ? (durable.finished_at - durable.started_at) / 1000
+          : (queued?.duration_seconds ?? null);
+
+      return {
+        ...queued,
+        job_id: durable.job_id,
+        user_id: queued?.user_id ?? userId ?? "anonymous",
+        session_id: queued?.session_id ?? "",
+        capability: durable.capability,
+        status: durable.status,
+        message_preview:
+          durable.message_preview || queued?.message_preview || "",
+        language: queued?.language ?? "zh",
+        event_count: durable.event_count,
+        created_at: new Date(durable.submitted_at).toISOString(),
+        started_at: startedAt,
+        finished_at: finishedAt,
+        duration_seconds: durationSeconds,
+        has_result: durable.result != null || (queued?.has_result ?? false),
+        error: durable.error,
+        children: durable.children ?? queued?.children,
+        background_status:
+          durable.background_status ?? queued?.background_status,
+      };
+    }),
+    ...queue.jobs.filter((job) => !jobsById[job.job_id]),
+  ].sort(
+    (left, right) =>
+      Date.parse(right.created_at) - Date.parse(left.created_at),
   );
-  const queueOnlyActive = queue.jobs.filter(
-    (job) =>
-      !jobsById[job.job_id] &&
-      !isTerminal(job.status),
-  ).length;
-  const active = durableActiveIds.size + queueOnlyActive;
+  const recent = mergedJobs.slice(0, 8);
+  const active = mergedJobs.filter((job) => {
+    const durable = jobsById[job.job_id];
+    return durable ? !isJobTerminal(durable) : !isTerminal(job.status);
+  }).length;
 
   return (
     <div className="relative">
@@ -149,7 +173,7 @@ export function JobTray() {
             active > 0 ? "bg-brand-500 text-white" : "bg-bg-card text-fg-muted",
           )}
         >
-          {active > 0 ? active : queue.total}
+          {active > 0 ? active : Math.max(queue.total, mergedJobs.length)}
         </span>
       </button>
 

@@ -26,6 +26,19 @@ class _Runner:
         yield {"type": "done", "job_id": job_id}
 
 
+class _RejectingRunner(_Runner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.submissions = []
+
+    async def submit(self, req):
+        self.submissions.append(req)
+        raise ValueError(
+            "INVALID_CAPABILITY: 'admin'; expected one of assessment, "
+            "path_planning, profile, resource_generation, tutoring"
+        )
+
+
 def _client(monkeypatch, *, multi_user_enabled: bool, owners: dict[str, str]):
     runner = _Runner()
     store = _JobStore(owners)
@@ -105,3 +118,27 @@ def test_subscribe_resolves_local_identity(monkeypatch, requested_user_id) -> No
 
     assert response == {"type": "ack", "for": "subscribe_job", "job_id": "job-local"}
     assert runner.subscriptions == ["job-local"]
+
+
+def test_submit_invalid_explicit_capability_returns_structured_ws_error(
+    monkeypatch,
+) -> None:
+    runner = _RejectingRunner()
+    monkeypatch.setattr(ws_module, "get_job_runner", lambda: runner)
+    app = FastAPI()
+    app.state.settings = SimpleNamespace(multi_user_enabled=False)
+    app.include_router(ws_module.router, prefix="/api/v1")
+
+    with TestClient(app).websocket_connect("/api/v1/ws") as websocket:
+        websocket.send_json(
+            {
+                "type": "submit_job",
+                "message": "生成一份学习资源",
+                "capability": "admin",
+            }
+        )
+        response = websocket.receive_json()
+
+    assert response["type"] == "error"
+    assert "INVALID_CAPABILITY" in response["content"]
+    assert len(runner.submissions) == 1

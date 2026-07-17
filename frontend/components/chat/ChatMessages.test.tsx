@@ -186,6 +186,25 @@ describe("ChatMessages — terminal state", () => {
     expect(screen.getByText(/调用 Agent/i)).toBeInTheDocument();
   });
 
+  it("renders the newest nonterminal job from newest-first jobOrder", () => {
+    const newest = runningJob("job-newest", "最新任务输出");
+    const older = runningJob("job-older", "旧任务输出");
+    mockStoreState({
+      jobs: {
+        jobsById: {
+          [newest.job_id]: newest,
+          [older.job_id]: older,
+        },
+        jobOrder: [newest.job_id, older.job_id],
+      },
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText("最新任务输出")).toBeInTheDocument();
+    expect(screen.queryByText("旧任务输出")).not.toBeInTheDocument();
+  });
+
   it("renders the streamed text from jobsById on a succeeded job", () => {
     const now = Date.now();
     const job: ClientJob = {
@@ -283,5 +302,15 @@ function baseTerminalJob(jobId: string): ClientJob {
     thinking_buffer: "",
     stage: "",
     open_stages: [],
+  };
+}
+
+function runningJob(jobId: string, text: string): ClientJob {
+  return {
+    ...baseTerminalJob(jobId),
+    status: "running",
+    finished_at: null,
+    events: [],
+    text_buffer: text,
   };
 }

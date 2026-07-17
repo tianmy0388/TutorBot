@@ -19,7 +19,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from tutor.services.intent.router import classify
+from tutor.services.intent.router import (
+    VALID_CAPABILITIES,
+    InvalidCapabilityError,
+    classify,
+)
 from tutor.services.jobs import JobSubmit, get_job_runner
 from tutor.services.resource_plan.schema import (
     ResourcePlan,
@@ -44,10 +48,21 @@ def _new_plan_id() -> str:
 @router.post("/plans", response_model=ResourcePlan)
 async def create_plan(req: ResourcePlanRequest) -> ResourcePlan:
     """Classify a user message and return a resource plan (no job yet)."""
-    decision = classify(
-        req.message,
-        explicit_capability=req.explicit_capability,
-    )
+    try:
+        decision = classify(
+            req.message,
+            explicit_capability=req.explicit_capability,
+        )
+    except InvalidCapabilityError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "capability": exc.capability,
+                "valid_capabilities": sorted(VALID_CAPABILITIES),
+            },
+        ) from exc
     if decision.capability != "resource_generation" or decision.resource_plan is None:
         raise HTTPException(
             status_code=422,

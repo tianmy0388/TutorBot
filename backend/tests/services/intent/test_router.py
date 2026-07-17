@@ -101,6 +101,19 @@ def test_explicit_capability_overrides_keywords() -> None:
     assert decision.capability == "path_planning"
 
 
+def test_valid_explicit_capability_is_retained_for_empty_message() -> None:
+    decision = classify("", explicit_capability="assessment")
+    assert decision.capability == "assessment"
+
+
+@pytest.mark.parametrize("explicit", ["admin", "resource_generaton"])
+def test_invalid_explicit_capability_is_rejected_without_keyword_fallback(
+    explicit: str,
+) -> None:
+    with pytest.raises(ValueError, match="INVALID_CAPABILITY"):
+        classify("生成一份学习资源", explicit_capability=explicit)
+
+
 def test_default_unknown_message_routes_to_tutoring() -> None:
     # No keywords match — must NOT silently pick resource_generation
     # (which used to be the legacy default and caused surprise generations).

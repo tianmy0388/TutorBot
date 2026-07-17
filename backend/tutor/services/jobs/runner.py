@@ -50,7 +50,7 @@ from tutor.runtime.registry.capability_registry import (
     CapabilityRegistry,
     get_capability_registry,
 )
-from tutor.services.intent.router import classify
+from tutor.services.intent.router import classify, validate_explicit_capability
 from tutor.services.jobs.contracts import (
     ArtifactResult,
     FollowUpTaskContract,
@@ -138,7 +138,7 @@ class JobRunner:
         """Accept a job, persist as PENDING, schedule execution."""
         # Explicit validated hints stay explicit. Only submissions without a
         # capability cross the single deterministic intent-routing boundary.
-        cap_name = req.capability
+        cap_name = validate_explicit_capability(req.capability)
         if cap_name is None:
             cap_name = classify(req.message).capability
         if self.capabilities.get(cap_name) is None:
