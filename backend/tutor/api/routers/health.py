@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import shutil
+import subprocess
 import sys
+import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -14,16 +20,101 @@ router = APIRouter()
 
 
 @router.get("/health")
-async def health() -> dict[str, Any]:
+async def health(request: Request) -> dict[str, Any]:
     """Liveness + readiness probe.
 
     Returns basic environment info and the set of registered capabilities/tools.
     """
+    settings = request.app.state.settings
+    matplotlib_runtime = await asyncio.to_thread(
+        _matplotlib_runtime_diagnostics,
+        settings,
+    )
     return {
         "status": "ok",
         "version": __version__,
         "python": sys.version.split()[0],
+        "runtime": {
+            "execution_python": _resolve_diagnostic_interpreter(settings),
+            "matplotlib": matplotlib_runtime,
+        },
     }
+
+
+def _resolve_diagnostic_interpreter(settings: Any) -> str:
+    """Resolve the configured executable without falling back after failure."""
+    configured = str(getattr(settings, "execution_python", "") or sys.executable)
+    located = shutil.which(configured)
+    return str(Path(located or configured).expanduser().resolve())
+
+
+def _matplotlib_runtime_diagnostics(settings: Any) -> dict[str, Any]:
+    """Probe Matplotlib in the configured child interpreter.
+
+    Only stable codes cross the HTTP boundary on failure; exception messages,
+    subprocess stderr and tracebacks stay private. The configured executable
+    and cache directory are deliberately returned as operator diagnostics.
+    """
+    cache_dir = (Path(settings.data_dir) / "cache" / "matplotlib").resolve()
+    result: dict[str, Any] = {
+        "status": "unavailable",
+        "version": None,
+        "backend": None,
+        "cache_dir": str(cache_dir),
+        "writable": False,
+        "error_code": "MATPLOTLIB_RUNTIME_UNAVAILABLE",
+    }
+    marker = cache_dir / f".health-write-{uuid.uuid4().hex}"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        marker.write_text("ok", encoding="utf-8")
+        marker.unlink()
+        result["writable"] = True
+    except OSError:
+        return result
+
+    interpreter = _resolve_diagnostic_interpreter(settings)
+    probe = (
+        "import json, matplotlib\n"
+        "print(json.dumps({"
+        "'version': matplotlib.__version__, "
+        "'backend': matplotlib.get_backend(), "
+        "'cache_dir': matplotlib.get_cachedir()"
+        "}))\n"
+    )
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["MPLCONFIGDIR"] = str(cache_dir)
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        completed = subprocess.run(
+            [interpreter, "-c", probe],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            env=env,
+        )
+        if completed.returncode != 0:
+            return result
+        line = (completed.stdout or "").strip().splitlines()[-1]
+        payload = json.loads(line)
+        if Path(str(payload["cache_dir"])).resolve() != cache_dir:
+            return result
+        result.update(
+            {
+                "status": "ok",
+                "version": str(payload["version"]),
+                "backend": str(payload["backend"]),
+                "error_code": None,
+            }
+        )
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
+        return result
+    except Exception:  # noqa: BLE001 - never expose unexpected host details
+        return result
+    return result
 
 
 @router.get("/capabilities")
@@ -96,8 +187,6 @@ def _safe_check(cmd: list[str]) -> str:
     if shutil.which(exe) is None:
         return f"{exe}: not installed"
     try:
-        import subprocess
-
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         first = (out.stdout or out.stderr).splitlines()
         return first[0] if first else "(no output)"

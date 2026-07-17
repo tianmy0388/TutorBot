@@ -23,10 +23,9 @@ Phase 5 will swap in a proper sandboxed runner (Docker / RestrictedPython).
           (``ModuleNotFoundError``).
         * ``CODE_EXECUTION_FAILED``       — the LLM-generated code
           itself raised an exception.
-  - The runner sets ``MPLBACKEND=Agg`` and a per-run
-    ``MPLCONFIGDIR`` so matplotlib imports do not try to open a
-    display and so concurrent runs don't clobber each other's
-    config caches.
+  - The runner sets ``MPLBACKEND=Agg`` and one persistent
+    ``data/cache/matplotlib`` config directory. Figure artifacts remain
+    isolated in a unique per-run directory.
   - Any image / SVG / PDF files written to the scratch dir are
     attached as artifacts on the resource so the right pane can
     render them.
@@ -36,9 +35,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -247,6 +249,7 @@ class CodeSandboxAgent(BaseAgent):
                 code,
                 interpreter=interpreter,
                 timeout=configured_timeout,
+                settings=settings,
             )
 
         # Subprocess diagnostics are untrusted strings. Preserve useful
@@ -354,12 +357,16 @@ _MISSING_MODULE_HINTS = (
     "ImportError",
 )
 
+_DEPENDENCY_PROBE_LOCK = threading.Lock()
+_DEPENDENCY_PROBE_CACHE: dict[tuple[str, str], dict[str, str]] = {}
+
 
 def _safe_run_python(
     code: str,
     *,
     interpreter: str,
     timeout: int,
+    settings: Any,
 ) -> tuple[str, str, str, str | None, dict[str, str], list[dict[str, str]], float]:
     """Run ``code`` in a fresh subprocess with a per-run scratch dir.
 
@@ -377,27 +384,33 @@ def _safe_run_python(
     - ``artifacts`` is the list of image / svg files written by the
       user code that we want the UI to render.
     """
-    settings = get_settings()
     code_runs_dir = settings.data_dir / getattr(settings, "code_run_subdir", "code_runs")
     code_runs_dir.mkdir(parents=True, exist_ok=True)
-    # Each run gets its own scratch dir so concurrent jobs don't
-    # clobber each other's intermediate files.
-    run_id = f"run_{int(time.time() * 1000)}_{os.getpid()}"
+    # UUID names avoid same-millisecond collisions between concurrent
+    # jobs in the same backend process.
+    run_id = f"run_{uuid.uuid4().hex}"
     scratch = code_runs_dir / run_id
-    scratch.mkdir(parents=True, exist_ok=True)
+    scratch.mkdir(parents=True, exist_ok=False)
 
     # Probe dependency versions in the *configured* interpreter. We
     # do this in a separate short-lived process so a user-code
     # ImportError doesn't bleed into the version snapshot.
-    deps = _probe_dependency_versions(interpreter)
-
-    # Force matplotlib to use the Agg backend with an isolated
-    # config dir — running on a headless server or in parallel
-    # would otherwise hit $HOME/.matplotlib locking and crash.
+    # Matplotlib's font/config cache is application data, not a run
+    # artifact. Reusing one stable writable directory avoids rebuilding
+    # the font cache on every execution and is safe for independent run
+    # directories. The dependency probe receives this exact environment
+    # too, so it cannot accidentally warm the user's home cache instead.
+    matplotlib_cache = (settings.data_dir / "cache" / "matplotlib").resolve()
+    matplotlib_cache.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    env.setdefault("MPLBACKEND", "Agg")
-    env["MPLCONFIGDIR"] = str(scratch / ".mpl")
+    env["MPLBACKEND"] = "Agg"
+    env["MPLCONFIGDIR"] = str(matplotlib_cache)
     env["PYTHONIOENCODING"] = "utf-8"
+    deps = _cached_dependency_versions(
+        interpreter,
+        matplotlib_cache=matplotlib_cache,
+        env=env,
+    )
     # Run with cwd=scratch so any relative file writes land in our
     # artifact directory.
     started = time.monotonic()
@@ -455,7 +468,7 @@ def _safe_run_python(
     # ``_wrap_user_code``) so they land on disk before the child exits.
     artifacts: list[dict[str, str]] = []
     try:
-        for entry in sorted(scratch.iterdir()):
+        for entry in sorted(scratch.iterdir(), key=_natural_path_key):
             if entry.is_file() and entry.suffix.lower() in {
                 ".png",
                 ".svg",
@@ -477,21 +490,60 @@ def _safe_run_python(
         # affect the run result.
         pass
 
+    stdout_text = _redact_scratch_path(proc.stdout or "", scratch)
+    stderr_text = _redact_scratch_path(proc.stderr or "", scratch)
     if proc.returncode == 0:
-        return ("success", proc.stdout or "", proc.stderr or "", None, deps, artifacts, duration)
+        return ("success", stdout_text, stderr_text, None, deps, artifacts, duration)
 
     # Classify the failure: ModuleNotFoundError / ImportError on
     # the configured interpreter is a runtime-dep issue; everything
     # else is the LLM-generated code.
-    stderr_text = proc.stderr or ""
     if any(hint in stderr_text for hint in _MISSING_MODULE_HINTS):
         error_code = "RUNTIME_DEPENDENCY_MISSING"
     else:
         error_code = "CODE_EXECUTION_FAILED"
-    return ("failed", proc.stdout or "", stderr_text, error_code, deps, artifacts, duration)
+    return ("failed", stdout_text, stderr_text, error_code, deps, artifacts, duration)
 
 
-def _probe_dependency_versions(interpreter: str) -> dict[str, str]:
+def _redact_scratch_path(text: str, scratch: Path) -> str:
+    """Keep run-private absolute paths out of resource/API text fields."""
+    redacted = text
+    variants = {str(scratch), scratch.as_posix()}
+    for value in sorted(variants, key=len, reverse=True):
+        redacted = redacted.replace(value, "<sandbox>")
+    return redacted
+
+
+def _natural_path_key(path: Path) -> tuple[tuple[int, int | str], ...]:
+    """Sort artifact names naturally (figure_2 before figure_10)."""
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.casefold())
+        for part in re.split(r"(\d+)", path.name)
+    )
+
+
+def _cached_dependency_versions(
+    interpreter: str,
+    *,
+    matplotlib_cache: Path,
+    env: dict[str, str],
+) -> dict[str, str]:
+    """Probe once per interpreter/cache pair and serialize first warm-up."""
+    key = (str(Path(interpreter).resolve()), str(matplotlib_cache))
+    with _DEPENDENCY_PROBE_LOCK:
+        cached = _DEPENDENCY_PROBE_CACHE.get(key)
+        if cached is not None:
+            return dict(cached)
+        versions = _probe_dependency_versions(interpreter, env=env)
+        _DEPENDENCY_PROBE_CACHE[key] = dict(versions)
+        return versions
+
+
+def _probe_dependency_versions(
+    interpreter: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Print the interpreter version + (best-effort) matplotlib and
     numpy versions from a short probe script.
 
@@ -530,6 +582,7 @@ def _probe_dependency_versions(interpreter: str) -> dict[str, str]:
             encoding="utf-8",
             errors="replace",
             timeout=15,
+            env=env,
         )
     except FileNotFoundError:
         return {
@@ -562,11 +615,10 @@ __all__ = ["CodeSandboxAgent", "CODE_OUTPUT_SCHEMA"]
 def _wrap_user_code(code: str, scratch: Path) -> str:
     """Wrap ``code`` with a post-run matplotlib drain.
 
-    The sandbox forces ``MPLBACKEND=Agg`` so ``plt.show()`` becomes a
-    no-op that emits
-    ``UserWarning: FigureCanvasAgg is non-interactive, and thus
-    cannot be shown`` — without this hook the figure lives only in
-    memory and the artifact picker below finds nothing on disk.
+    The sandbox forces ``MPLBACKEND=Agg`` and replaces ``plt.show()``
+    with a deterministic capture hook. This avoids the non-interactive
+    canvas warning and preserves figures even when user code closes them
+    after showing.
 
     Wrapping the user's snippet in a ``try / finally`` ensures the
     drain runs even if the snippet raises. The drain is done INSIDE
@@ -602,12 +654,33 @@ def _wrap_user_code(code: str, scratch: Path) -> str:
         "    _mpl.rcParams['axes.unicode_minus'] = False\n"
         "except Exception:\n"
         "    pass\n"
-        # 2. Force Agg backend (no display) — plt.show() becomes no-op.
+        # 2. Force Agg and install a capture-based pyplot.show before
+        #    user code imports pyplot. A WeakSet tracks figure objects,
+        #    not figure numbers, because matplotlib can reuse number 1
+        #    after a close. The counter remains monotonic for the run.
         "try:\n"
         "    import matplotlib as _mpl\n"
         "    _mpl.use('Agg', force=False)\n"
         "except Exception:\n"
         "    pass\n"
+        "import weakref as _weakref\n"
+        "import matplotlib.pyplot as _tutor_plt\n"
+        "_tutor_captured_figures = _weakref.WeakSet()\n"
+        "_tutor_figure_index = 0\n"
+        "def _tutor_capture_figures(*_args, **_kwargs):\n"
+        "    global _tutor_figure_index\n"
+        "    for _number in list(_tutor_plt.get_fignums()):\n"
+        "        _figure = _tutor_plt.figure(_number)\n"
+        "        if _figure in _tutor_captured_figures:\n"
+        "            continue\n"
+        "        _next_index = _tutor_figure_index + 1\n"
+        "        _figure.savefig(\n"
+        f"            {scratch_literal} + '/figure_' + str(_next_index) + '.png',\n"
+        "            format='png', bbox_inches='tight', dpi=160,\n"
+        "        )\n"
+        "        _tutor_figure_index = _next_index\n"
+        "        _tutor_captured_figures.add(_figure)\n"
+        "_tutor_plt.show = _tutor_capture_figures\n"
         "_user_globals = {}\n"
         "try:\n"
         "    exec(compile(" + repr(code) + ", '<sandbox>', 'exec'), _user_globals)\n"
@@ -616,14 +689,7 @@ def _wrap_user_code(code: str, scratch: Path) -> str:
         "    raise\n"
         "finally:\n"
         "    try:\n"
-        "        import matplotlib\n"
-        "        matplotlib.use('Agg', force=False)\n"
-        "        import matplotlib.pyplot as _plt\n"
-        "        for _i, _fig in enumerate(list(map(_plt.figure, _plt.get_fignums())), start=1):\n"
-        "            try:\n"
-        f"                _fig.savefig({scratch_literal} + '/figure_' + str(_i) + '.png', format='png', bbox_inches='tight')\n"
-        "            except Exception:\n"
-        "                pass\n"
+        "        _tutor_capture_figures()\n"
         "    except Exception:\n"
         "        pass\n"
     )
