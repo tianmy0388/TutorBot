@@ -225,14 +225,11 @@ class ProfileUpdateFollowUpCapability(BaseCapability):
                     },
                 )
             )
-        pending_scored = await event_store.count_scored_since(
-            context.user_id, current.event_watermark
+        next_through = await event_store.profile_trigger_sequence_since(
+            context.user_id,
+            current.event_watermark,
         )
-        pending_assessment = await event_store.has_assessment_since(
-            context.user_id, current.event_watermark
-        )
-        if pending_scored >= 5 or pending_assessment:
-            next_through = await event_store.latest_sequence(context.user_id)
+        if next_through is not None:
             pending_events = await event_store.list_since(
                 context.user_id,
                 current.event_watermark,

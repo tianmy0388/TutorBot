@@ -165,10 +165,12 @@ async def test_path_child_is_globally_deduped_by_user_and_profile_version(workfl
 
 
 @pytest.mark.asyncio
-async def test_default_reconcile_uses_one_latest_threshold_window(workflow):
+async def test_default_reconcile_stops_at_earliest_threshold_in_latest_snapshot(
+    workflow,
+):
     service, events, _, jobs = workflow
     sequences = []
-    for index in range(5):
+    for index in range(6):
         appended = await events.append(
             LearningEvent(
                 event_id=f"concurrent-{index}",
@@ -184,7 +186,7 @@ async def test_default_reconcile_uses_one_latest_threshold_window(workflow):
 
     root = await jobs.get(service.root_job_id("local-user"))
     child = (await jobs.get_children(root.job_id))[0]
-    assert child.metadata["through_sequence"] == sequences[-1]
+    assert child.metadata["through_sequence"] == sequences[4]
 
 
 @pytest.mark.asyncio
@@ -261,7 +263,7 @@ async def test_profile_child_chains_next_fixed_window_without_eleventh_event(wor
     root = await jobs.get(service.root_job_id("local-user"))
     first_child = (await jobs.get_children(root.job_id))[0]
 
-    for index in range(5, 10):
+    for index in range(5, 11):
         appended = await events.append(
             LearningEvent(
                 event_id=f"second-window-{index}",

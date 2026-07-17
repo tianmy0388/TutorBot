@@ -247,6 +247,32 @@ class LearningEventStore:
             rows = (await session.execute(stmt.order_by(EventRow.id))).scalars().all()
             return [self._row_to_event(row) for row in rows]
 
+    async def profile_trigger_sequence_since(
+        self,
+        user_id: str,
+        watermark: int,
+        *,
+        through_sequence: int | None = None,
+        scored_threshold: int = 5,
+    ) -> int | None:
+        """Return the earliest durable sequence that satisfies a profile trigger."""
+        scored = 0
+        for event in await self.list_since(
+            user_id,
+            watermark,
+            through_sequence=through_sequence,
+        ):
+            if event.event_type == EventType.ASSESSMENT_COMPLETED:
+                return event.sequence
+            if (
+                event.event_type == EventType.EXERCISE_SCORED
+                and event.score is not None
+            ):
+                scored += 1
+                if scored >= scored_threshold:
+                    return event.sequence
+        return None
+
     async def latest_sequence(self, user_id: str) -> int:
         self._ensure_engine()
         async with self._with_session() as session:

@@ -255,3 +255,53 @@ async def test_scored_event_count_uses_monotonic_sequence_watermark(store):
         "u", watermark, through_sequence=appended[4].event.sequence
     )
     assert [event.event_id for event in window] == ["evt-3", "evt-4", "evt-5"]
+
+
+@pytest.mark.asyncio
+async def test_profile_trigger_sequence_is_earliest_threshold_or_assessment(store):
+    scored_sequences = []
+    for index in range(6):
+        appended = await store.append(
+            LearningEvent(
+                event_id=f"trigger-score-{index}",
+                user_id="scored-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.7,
+            )
+        )
+        scored_sequences.append(appended.event.sequence)
+    assert await store.profile_trigger_sequence_since("scored-user", 0) == (
+        scored_sequences[4]
+    )
+
+    for index in range(2):
+        await store.append(
+            LearningEvent(
+                event_id=f"before-assessment-{index}",
+                user_id="assessment-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.5,
+            )
+        )
+    assessment = await store.append(
+        LearningEvent(
+            event_id="early-assessment",
+            user_id="assessment-user",
+            event_type=EventType.ASSESSMENT_COMPLETED,
+        )
+    )
+    for index in range(3):
+        await store.append(
+            LearningEvent(
+                event_id=f"after-assessment-{index}",
+                user_id="assessment-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.8,
+            )
+        )
+    assert await store.profile_trigger_sequence_since("assessment-user", 0) == (
+        assessment.event.sequence
+    )
