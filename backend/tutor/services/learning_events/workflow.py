@@ -10,6 +10,7 @@ from tutor.services.jobs.follow_up import FollowUpScheduler
 from tutor.services.jobs.schema import Job, JobStatus
 from tutor.services.jobs.store import JobStore, get_job_store
 from tutor.services.learner_profile.store import ProfileStore, get_profile_store
+from tutor.services.learning_events.schema import EventType
 from tutor.services.learning_events.store import (
     LearningEventStore,
     get_learning_event_store,
@@ -47,17 +48,25 @@ class LearningWorkflow:
     ) -> list[Job]:
         profile = await self.profile_store.get(user_id)
         watermark = profile.event_watermark if profile is not None else 0
-        scored = await self.event_store.count_scored_since(user_id, watermark)
-        assessment = await self.event_store.has_assessment_since(user_id, watermark)
-        if scored < PROFILE_EVENT_THRESHOLD and not assessment:
-            return []
-        latest = await self.event_store.latest_sequence(user_id)
-        through = max(int(through_sequence or 0), latest)
+        through = (
+            int(through_sequence)
+            if through_sequence is not None
+            else await self.event_store.latest_sequence(user_id)
+        )
         window = await self.event_store.list_since(
             user_id,
             watermark,
             through_sequence=through,
         )
+        scored = sum(
+            event.event_type == EventType.EXERCISE_SCORED and event.score is not None
+            for event in window
+        )
+        assessment = any(
+            event.event_type == EventType.ASSESSMENT_COMPLETED for event in window
+        )
+        if scored < PROFILE_EVENT_THRESHOLD and not assessment:
+            return []
         durable_course = next(
             (event.course for event in reversed(window) if event.course),
             course,

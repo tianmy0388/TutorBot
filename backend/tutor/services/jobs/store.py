@@ -51,6 +51,7 @@ from tutor.services.resource_package.schema import ArtifactRef
 
 _MIGRATION_STATUS_PRIORITY = {
     JobStatus.SUCCEEDED.value: 0,
+    "completed": 0,
     JobStatus.PARTIAL.value: 1,
     JobStatus.RUNNING.value: 2,
     JobStatus.PENDING.value: 3,

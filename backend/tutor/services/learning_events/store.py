@@ -224,6 +224,7 @@ class LearningEventStore:
             stmt = select(func.count(EventRow.id)).where(
                 EventRow.user_id == user_id,
                 EventRow.id > watermark,
+                EventRow.event_type == EventType.EXERCISE_SCORED.value,
                 EventRow.score.is_not(None),
             )
             return int((await session.execute(stmt)).scalar_one())

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import FastAPI
+from loguru import logger
 from tutor.api.routers.learning import router
 from tutor.services.jobs.store import JobStore
 from tutor.services.learner_profile.schema import LearnerProfile
@@ -56,6 +57,34 @@ async def test_post_canonicalizes_local_identity_and_returns_202(client):
     assert response.json()["user_id"] == "local-user"
     assert (await events.query("local-user"))[0].event_id == "evt-local"
     assert await events.query("browser-random") == []
+
+
+@pytest.mark.asyncio
+async def test_post_reconcile_lets_workflow_capture_latest_boundary(
+    client,
+    monkeypatch,
+):
+    api, _, _, _ = client
+    workflow = api._transport.app.state.learning_workflow
+    received: dict[str, object] = {}
+
+    async def capture_reconcile(user_id: str, **kwargs):
+        received.update(kwargs)
+        return []
+
+    monkeypatch.setattr(workflow, "reconcile_user", capture_reconcile)
+    response = await api.post(
+        "/api/learning/events",
+        json={
+            "event_id": "workflow-selects-boundary",
+            "event_type": "exercise_scored",
+            "concept_id": "attention",
+            "score": 0.7,
+        },
+    )
+
+    assert response.status_code == 202
+    assert "through_sequence" not in received
 
 
 @pytest.mark.asyncio
@@ -184,20 +213,29 @@ async def test_reconcile_all_recovers_course_from_durable_event(
         raise RuntimeError("private database crash detail")
 
     monkeypatch.setattr(workflow, "reconcile_user", crash_after_event)
-    for index, course in enumerate(
-        ("course-old", "", "course-middle", "", "course-recovered")
-    ):
-        response = await api.post(
-            "/api/learning/events",
-            json={
-                "event_id": f"course-crash-event-{index}",
-                "event_type": "exercise_scored",
-                "concept_id": "attention",
-                "score": 0.8,
-                "course": course,
-            },
-        )
-        assert response.status_code == 202
+    logs: list[str] = []
+    sink = logger.add(lambda message: logs.append(str(message)), format="{message}")
+    try:
+        for index, course in enumerate(
+            ("course-old", "", "course-middle", "", "course-recovered")
+        ):
+            response = await api.post(
+                "/api/learning/events",
+                json={
+                    "event_id": f"course-crash-event-{index}",
+                    "event_type": "exercise_scored",
+                    "concept_id": "attention",
+                    "score": 0.8,
+                    "course": course,
+                },
+            )
+            assert response.status_code == 202
+    finally:
+        logger.remove(sink)
+    joined_logs = "\n".join(logs)
+    assert "LEARNING_EVENT_RECONCILIATION_DEFERRED" in joined_logs
+    assert "RuntimeError" in joined_logs
+    assert "private database crash detail" not in joined_logs
     persisted = await events.query("local-user")
     assert persisted[0].to_dict()["course"] == "course-recovered"
 

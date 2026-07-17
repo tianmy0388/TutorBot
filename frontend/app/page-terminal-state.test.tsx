@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActiveTurn } from "@/lib/store";
@@ -75,7 +75,8 @@ function mockState() {
     latestTutorAnswer: null,
     latestAssessment: null,
     resourceSelection: { selectedResourceId: null },
-    plannedPath: null,
+    plannedPath: null as any,
+    plannedPathOwnerId: null as string | null,
     hydrateTheme: vi.fn(),
     hydrateSessionId: vi.fn(),
     loadConversationAggregate: vi.fn().mockResolvedValue(undefined),
@@ -83,6 +84,7 @@ function mockState() {
   useTutorStoreMock.mockImplementation((selector: (value: typeof state) => unknown) =>
     selector(state),
   );
+  return state;
 }
 
 describe("HomePage durable terminal state", () => {
@@ -113,5 +115,19 @@ describe("HomePage durable terminal state", () => {
 
     render(<HomePage />);
     expect(screen.getByText("处理中")).toBeInTheDocument();
+  });
+
+  it("hides the path badge after switching away from the cached path owner", () => {
+    const state = mockState();
+    state.userId = "a";
+    state.plannedPath = { path_id: "path-a" };
+    state.plannedPathOwnerId = "a";
+    const { rerender } = render(<HomePage />);
+    expect(within(screen.getByRole("button", { name: /路径/ })).getByText("1")).toBeInTheDocument();
+
+    state.userId = "b";
+    rerender(<HomePage />);
+
+    expect(within(screen.getByRole("button", { name: /路径/ })).queryByText("1")).not.toBeInTheDocument();
   });
 });

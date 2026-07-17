@@ -165,7 +165,7 @@ async def test_path_child_is_globally_deduped_by_user_and_profile_version(workfl
 
 
 @pytest.mark.asyncio
-async def test_early_concurrent_reconcile_uses_latest_threshold_window(workflow):
+async def test_default_reconcile_uses_one_latest_threshold_window(workflow):
     service, events, _, jobs = workflow
     sequences = []
     for index in range(5):
@@ -180,14 +180,66 @@ async def test_early_concurrent_reconcile_uses_latest_threshold_window(workflow)
         )
         sequences.append(appended.event.sequence)
 
-    await service.reconcile_user(
-        "local-user",
-        through_sequence=sequences[0],
-    )
+    await service.reconcile_user("local-user")
 
     root = await jobs.get(service.root_job_id("local-user"))
     child = (await jobs.get_children(root.job_id))[0]
     assert child.metadata["through_sequence"] == sequences[-1]
+
+
+@pytest.mark.asyncio
+async def test_explicit_reconcile_boundary_never_absorbs_later_events(workflow):
+    service, events, _, jobs = workflow
+    sequences = []
+    for index in range(6):
+        appended = await events.append(
+            LearningEvent(
+                event_id=f"fixed-window-{index}",
+                user_id="local-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.5,
+            )
+        )
+        sequences.append(appended.event.sequence)
+
+    assert await service.reconcile_user(
+        "local-user", through_sequence=sequences[3]
+    ) == []
+    children = await service.reconcile_user(
+        "local-user", through_sequence=sequences[4]
+    )
+
+    assert len(children) == 1
+    assert children[0].metadata["through_sequence"] == sequences[4]
+    root = await jobs.get(service.root_job_id("local-user"))
+    assert len(await jobs.get_children(root.job_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_only_scored_exercises_with_scores_count_toward_threshold(workflow):
+    service, events, _, jobs = workflow
+    for index in range(5):
+        await events.append(
+            LearningEvent(
+                event_id=f"resource-with-score-{index}",
+                user_id="local-user",
+                event_type=EventType.RESOURCE_VIEWED,
+                score=0.9,
+            )
+        )
+        await events.append(
+            LearningEvent(
+                event_id=f"unscored-exercise-{index}",
+                user_id="local-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=None,
+            )
+        )
+
+    assert await service.reconcile_user("local-user") == []
+    assert await jobs.get(service.root_job_id("local-user")) is None
 
 
 @pytest.mark.asyncio

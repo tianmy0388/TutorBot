@@ -232,6 +232,8 @@ async def test_init_migrates_legacy_cross_parent_learning_child_duplicates(
         row.pop("id")
         row["job_id"] = "legacy-duplicate-child"
         row["parent_job_id"] = parents[1].job_id
+        row["status"] = "completed"
+        row["result"] = '{"legacy_result":"preserved"}'
         columns = list(row)
         connection.execute(
             f"INSERT INTO jobs ({', '.join(columns)}) "
@@ -262,12 +264,16 @@ async def test_init_migrates_legacy_cross_parent_learning_child_duplicates(
         *await reopened.get_children(parents[0].job_id),
         *await reopened.get_children(parents[1].job_id),
     ]
-    assert [child.job_id for child in children] == [canonical.job_id]
-    grandchildren = await reopened.get_children(canonical.job_id)
+    assert [child.job_id for child in children] == ["legacy-duplicate-child"]
+    migrated = children[0]
+    assert migrated.status == JobStatus.SUCCEEDED
+    assert migrated.result == {"legacy_result": "preserved"}
+    grandchildren = await reopened.get_children(migrated.job_id)
     assert [child.job_id for child in grandchildren] == [
         "legacy-duplicate-grandchild"
     ]
     assert grandchildren[0].status == JobStatus.SUCCEEDED
+    assert await reopened.get(canonical.job_id) is None
     assert await reopened.get(canonical_grandchild.job_id) is None
     returned = (
         await FollowUpScheduler(reopened).enqueue(
@@ -285,7 +291,7 @@ async def test_init_migrates_legacy_cross_parent_learning_child_duplicates(
             ),
         )
     )[0]
-    assert returned.job_id == canonical.job_id
+    assert returned.job_id == migrated.job_id
     await reopened.close()
 
     with sqlite3.connect(db_path) as connection:

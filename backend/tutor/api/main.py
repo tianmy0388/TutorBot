@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
 
     workflow = app.state.learning_workflow
     resource_store = app.state.resource_package_store
+    kg_service = app.state.knowledge_graph_service
     from tutor.capabilities.assessment import AssessmentCapability
     from tutor.capabilities.path_planning import PathPlanningCapability
     from tutor.capabilities.profile import LearnerProfileCapability
@@ -64,7 +65,10 @@ async def lifespan(app: FastAPI):
             builder=profile_builder,
             package_store=resource_store,
         ),
-        PathPlanningCapability(profile_store=workflow.profile_store),
+        PathPlanningCapability(
+            profile_store=workflow.profile_store,
+            kg_service=kg_service,
+        ),
         TutoringCapability(builder=profile_builder),
         AssessmentCapability(
             builder=profile_builder,
@@ -87,14 +91,6 @@ async def lifespan(app: FastAPI):
     app.state.tools = tools
     app.state.orchestrator = orchestrator
 
-    # The application owns this persistence graph. In particular, a
-    # ``create_app(custom_settings)`` instance must never fall back to
-    # process singletons bound to another data directory.
-    await workflow.profile_store.init()
-    await workflow.event_store.init()
-    await workflow.job_store.init()
-    await resource_store.init()
-
     from tutor.services.jobs.follow_up import (
         PathRebuildFollowUpCapability,
         ProfileUpdateFollowUpCapability,
@@ -112,6 +108,7 @@ async def lifespan(app: FastAPI):
         if task_kind == "path_rebuild":
             return PathRebuildFollowUpCapability(
                 profile_store=workflow.profile_store,
+                kg_service=kg_service,
             )
         if task_kind == "video_render":
             return VideoRenderFollowUpCapability(package_store=resource_store)
@@ -123,18 +120,27 @@ async def lifespan(app: FastAPI):
         follow_up_builder=build_owned_follow_up,
     )
     app.state.learning_runner = runner
-    await workflow.reconcile_all()
-    await runner.resume_active_jobs()
-    logger.info("Application-owned learning stores initialised")
 
     try:
+        # The application owns this persistence graph. Startup is inside
+        # the cleanup boundary so partial initialisation cannot leak engines.
+        await workflow.profile_store.init()
+        await workflow.event_store.init()
+        await workflow.job_store.init()
+        await resource_store.init()
+        await workflow.reconcile_all()
+        await runner.resume_active_jobs()
+        logger.info("Application-owned learning stores initialised")
         yield
     finally:
         logger.info("Tutor shutting down")
         try:
-            await app.state.learning_runner.shutdown()
+            await runner.shutdown()
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"JobRunner shutdown failed (non-fatal): {exc!r}")
+            logger.warning(
+                "JOB_RUNNER_SHUTDOWN_FAILED exception_type={}",
+                type(exc).__name__,
+            )
         # Tear down MCP subprocesses (started lazily by MCPRegistry on
         # first web_search / understand_image call) so they don't outlive
         # the API process.
@@ -143,14 +149,20 @@ async def lifespan(app: FastAPI):
 
             await get_mcp_registry().stop_all()
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"MCP shutdown failed (non-fatal): {exc!r}")
-        try:
-            await workflow.event_store.close()
-            await workflow.profile_store.close()
-            await workflow.job_store.close()
-            await resource_store.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"Learning stores shutdown failed (non-fatal): {exc!r}")
+            logger.warning(
+                "MCP_SHUTDOWN_FAILED exception_type={}",
+                type(exc).__name__,
+            )
+        for code, close in (
+            ("LEARNING_EVENT_STORE_CLOSE_FAILED", workflow.event_store.close),
+            ("PROFILE_STORE_CLOSE_FAILED", workflow.profile_store.close),
+            ("JOB_STORE_CLOSE_FAILED", workflow.job_store.close),
+            ("RESOURCE_STORE_CLOSE_FAILED", resource_store.close),
+        ):
+            try:
+                await close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("{} exception_type={}", code, type(exc).__name__)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -170,6 +182,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # transports and identity dependencies).
     app.state.settings = settings
     from tutor.services.jobs.store import JobStore
+    from tutor.services.knowledge_graph.loader import KnowledgeGraphLoader
+    from tutor.services.knowledge_graph.service import KnowledgeGraphService
     from tutor.services.learner_profile.store import ProfileStore
     from tutor.services.learning_events.store import LearningEventStore
     from tutor.services.learning_events.workflow import LearningWorkflow
@@ -185,6 +199,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.resource_package_store = ResourcePackageStore(
         settings.data_dir / "resource_packages.db"
+    )
+    app.state.knowledge_graph_service = KnowledgeGraphService(
+        loader=KnowledgeGraphLoader(settings.kb_dir),
+        default_course=settings.kb_default,
     )
     app.state.learning_runner = None
 

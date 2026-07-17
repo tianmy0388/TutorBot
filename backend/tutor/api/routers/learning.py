@@ -113,7 +113,6 @@ async def append_learning_event(
         children = await workflow.reconcile_user(
             user_id,
             session_id=body.session_id,
-            through_sequence=appended.event.sequence,
             course=body.course,
         )
         runner = getattr(request.app.state, "learning_runner", "default")
@@ -123,8 +122,11 @@ async def append_learning_event(
             runner = get_job_runner()
         if runner is not None:
             await runner.resume_pending()
-    except Exception:  # event is durable; the next reconciliation retries safely
-        logger.exception("learning event reconciliation deferred")
+    except Exception as exc:  # event is durable; reconciliation retries safely
+        logger.error(
+            "LEARNING_EVENT_RECONCILIATION_DEFERRED exception_type={}",
+            type(exc).__name__,
+        )
 
     return {
         "event_id": appended.event.event_id,

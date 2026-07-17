@@ -243,7 +243,7 @@ async def test_scored_event_count_uses_monotonic_sequence_watermark(store):
                 else EventType.RESOURCE_VIEWED
             ),
             concept_id="attention" if index != 3 else "",
-            score=(index / 10 if index != 3 else None),
+            score=index / 10,
         )
         for index in range(1, 7)
     ]

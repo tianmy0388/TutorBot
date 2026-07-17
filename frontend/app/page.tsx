@@ -93,7 +93,9 @@ export default function HomePage() {
   const latestTutorAnswer = useTutorStore((s) => s.latestTutorAnswer);
   const latestAssessment = useTutorStore((s) => s.latestAssessment);
   const selectedResourceId = useTutorStore((s) => s.resourceSelection.selectedResourceId);
-  const plannedPath = useTutorStore((s) => s.plannedPath);
+  const hasVisiblePlannedPath = useTutorStore(
+    (s) => Boolean(s.plannedPath) && s.plannedPathOwnerId === s.userId,
+  );
   const hasActiveJob = useTutorStore((s) =>
     Object.values(s.jobsById).some((job) => !isJobTerminal(job)),
   );
@@ -241,7 +243,7 @@ export default function HomePage() {
                 onClick={() => handleTabClick("path")}
                 icon={TrendingUp}
                 label="路径"
-                badge={plannedPath ? "1" : undefined}
+                badge={hasVisiblePlannedPath ? "1" : undefined}
               />
               <TabButton
                 active={rightPane === "resource"}
