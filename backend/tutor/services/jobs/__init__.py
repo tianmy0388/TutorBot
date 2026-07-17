@@ -7,20 +7,22 @@ Exposes:
 - :class:`JobRunner` (asyncio execution engine + live event broadcast)
 """
 
+from tutor.services.jobs.follow_up import FollowUpScheduler
+from tutor.services.jobs.runner import (
+    JobRunner,
+    get_job_runner,
+    reset_job_runner,
+)
 from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
 from tutor.services.jobs.store import (
     JobStore,
     get_job_store,
     reset_job_store,
 )
-from tutor.services.jobs.runner import (
-    JobRunner,
-    get_job_runner,
-    reset_job_runner,
-)
 
 __all__ = [
     "Job",
+    "FollowUpScheduler",
     "JobRunner",
     "JobStatus",
     "JobStore",

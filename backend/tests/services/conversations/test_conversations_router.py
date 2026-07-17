@@ -33,7 +33,9 @@ async def test_aggregate_recovers_all_session_records_after_owner_migration(
     """
     from datetime import datetime, timedelta
 
+    from tutor.core.capability_result import FollowUpTaskSpec
     from tutor.services.jobs import Job, JobStatus, get_job_store, reset_job_store
+    from tutor.services.jobs.follow_up import FollowUpScheduler
     from tutor.services.learner_profile import get_profile_store
     from tutor.services.resource_package import (
         Resource,
@@ -72,6 +74,33 @@ async def test_aggregate_recovers_all_session_records_after_owner_migration(
                 created_at=now,
                 finished_at=now,
             )
+        )
+        child = (
+            await FollowUpScheduler(job_store).enqueue(
+                "job-repaired",
+                (
+                    FollowUpTaskSpec(
+                        kind="video_render",
+                        payload={
+                            "package_id": "package-second",
+                            "resource_id": "missing-resource",
+                        },
+                        dedupe_key="video:package-second:missing-resource",
+                    ),
+                ),
+            )
+        )[0]
+        await job_store.set_terminal(
+            child.job_id,
+            status=JobStatus.FAILED,
+            finished_at=now,
+            result={
+                "job_id": child.job_id,
+                "capability": "video_render",
+                "status": "failed",
+                "assistant_message": "视频渲染失败",
+            },
+            terminal_event={"type": "job_terminal", "content": "failed"},
         )
 
         package_store = get_resource_package_store()
@@ -127,6 +156,9 @@ async def test_aggregate_recovers_all_session_records_after_owner_migration(
             "second",
         ]
         assert [j["job_id"] for j in aggregate["jobs"]] == ["job-repaired"]
+        assert aggregate["jobs"][0]["background_status"] == "failed"
+        assert aggregate["jobs"][0]["children"][0]["job_id"] == child.job_id
+        assert aggregate["jobs"][0]["children"][0]["status"] == "failed"
         assert [p["package_id"] for p in aggregate["packages"]] == [
             "package-first",
             "package-second",

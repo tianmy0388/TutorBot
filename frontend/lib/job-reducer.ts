@@ -20,6 +20,7 @@
 import type {
   ChatMessage,
   JobResultContract,
+  JobChildSummary,
   JobStatus,
   StreamEvent,
 } from "./types";
@@ -75,6 +76,8 @@ export interface ClientJob {
   stage: string;
   /** Stack of open nested stages. Top of stack = current stage. */
   open_stages: string[];
+  children?: JobChildSummary[];
+  background_status?: JobStatus | null;
 }
 
 export interface JobsState {
@@ -127,6 +130,8 @@ export interface SnapshotReducerEvent {
     result?: JobResultContract | null;
     error?: string | null;
     event_count?: number;
+    children?: JobChildSummary[];
+    background_status?: JobStatus | null;
   };
 }
 
@@ -165,6 +170,8 @@ export function createJobState(
     thinking_buffer: "",
     stage: "",
     open_stages: [],
+    children: [],
+    background_status: null,
   };
   return {
     jobsById: { [job_id]: job },
@@ -227,6 +234,8 @@ function applySubmit(state: JobsState, ev: SubmitEvent): JobsState {
     thinking_buffer: "",
     stage: "",
     open_stages: [],
+    children: [],
+    background_status: null,
   };
   return {
     jobsById: { ...state.jobsById, [ev.job_id]: job },
@@ -420,6 +429,8 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       thinking_buffer: "",
       stage: "",
       open_stages: [],
+      children: [],
+      background_status: null,
     };
     return {
       jobsById: { ...state.jobsById, [ev.job_id]: fresh },
@@ -532,6 +543,9 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
     thinking_buffer: snapThinkBuf,
     stage: snapStage,
     open_stages: snapOpenStages,
+    children: incoming.children ?? existing?.children ?? [],
+    background_status:
+      incoming.background_status ?? existing?.background_status ?? null,
   };
   const jobOrder = state.jobOrder.includes(incoming.job_id)
     ? state.jobOrder

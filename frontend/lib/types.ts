@@ -429,6 +429,23 @@ export interface JobSummary {
   duration_seconds: number | null;
   has_result: boolean;
   error: string | null;
+  parent_job_id?: string | null;
+  task_kind?: string | null;
+  dedupe_key?: string | null;
+  metadata?: Record<string, unknown>;
+  children?: JobChildSummary[];
+  background_status?: JobStatus | null;
+}
+
+export interface JobChildSummary {
+  job_id: string;
+  capability: string;
+  status: JobStatus;
+  parent_job_id: string | null;
+  task_kind: string | null;
+  dedupe_key?: string | null;
+  metadata?: Record<string, unknown>;
+  error?: string | null;
 }
 
 export interface JobDetail extends JobSummary {

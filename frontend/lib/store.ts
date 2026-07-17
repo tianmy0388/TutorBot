@@ -625,6 +625,8 @@ export const useTutorStore = create<TutorState>()(
           finished_at: j.finished_at ? Date.parse(j.finished_at) : null,
           event_count: j.event_count,
           error: j.error ?? null,
+          children: j.children ?? [],
+          background_status: j.background_status ?? null,
         };
         jobsById[j.job_id] = seeded;
         jobOrder.push(j.job_id);

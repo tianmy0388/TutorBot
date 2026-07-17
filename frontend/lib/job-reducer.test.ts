@@ -290,6 +290,35 @@ describe("job-reducer", () => {
     expect(next.messages.at(-1)?.content).toBe("从快照恢复的消息");
   });
 
+  it("snapshot hydrates durable children and failed background status", () => {
+    const state = emptyJobsState();
+    const next = reduceJobEvent(state, {
+      type: "snapshot",
+      job: {
+        job_id: "parent-video",
+        capability: "resource_generation",
+        status: "succeeded",
+        background_status: "failed",
+        children: [
+          {
+            job_id: "child-video",
+            parent_job_id: "parent-video",
+            task_kind: "video_render",
+            dedupe_key: "video:pkg-1:video-1",
+            capability: "video_render",
+            status: "failed",
+            metadata: { package_id: "pkg-1", resource_id: "video-1" },
+            error: "VIDEO_RENDER_FAILED",
+          },
+        ],
+      },
+    });
+
+    expect(next.jobsById["parent-video"].background_status).toBe("failed");
+    expect(next.jobsById["parent-video"].children).toHaveLength(1);
+    expect(next.jobsById["parent-video"].children?.[0].status).toBe("failed");
+  });
+
   it("submit before any events registers the job in pending state", () => {
     const state = emptyJobsState();
     const next = reduceJobEvent(state, {

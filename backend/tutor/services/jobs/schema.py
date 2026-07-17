@@ -80,6 +80,9 @@ class Job(BaseModel):
     user_id: str = "anonymous"
     session_id: str = ""
     capability: str = "resource_generation"
+    parent_job_id: str | None = None
+    task_kind: str | None = None
+    dedupe_key: str | None = None
 
     # Inputs
     message: str = ""
@@ -113,6 +116,9 @@ class Job(BaseModel):
             "user_id": self.user_id,
             "session_id": self.session_id,
             "capability": self.capability,
+            "parent_job_id": self.parent_job_id,
+            "task_kind": self.task_kind,
+            "dedupe_key": self.dedupe_key,
             "status": self.status.value,
             "message_preview": (self.message[:60] + "…") if len(self.message) > 60 else self.message,
             "language": self.language,

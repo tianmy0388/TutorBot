@@ -143,16 +143,22 @@ class JobRunner:
         )
         await self.store.save(job)
 
-        # Schedule execution on the event loop
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(self._execute(job))
-        self._tasks[job.job_id] = task
-        task.add_done_callback(lambda t, jid=job.job_id: self._on_task_done(jid, t))
+        self._schedule(job)
         logger.info(
             f"JobRunner.submit job={job.job_id[:12]}… "
             f"user={job.user_id} capability={job.capability}"
         )
         return job
+
+    def _schedule(self, job: Job) -> None:
+        """Start one persisted job unless this runner already owns it."""
+        current = self._tasks.get(job.job_id)
+        if current is not None and not current.done():
+            return
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._execute(job))
+        self._tasks[job.job_id] = task
+        task.add_done_callback(lambda t, jid=job.job_id: self._on_task_done(jid, t))
 
     async def cancel(self, job_id: str, *, user_id: str | None = None) -> bool:
         """Cancel a PENDING or RUNNING job."""
@@ -301,6 +307,10 @@ class JobRunner:
         timeout_exceeded = False
 
         cap = self.capabilities.get(job.capability)
+        if cap is None and job.task_kind is not None:
+            from tutor.services.jobs.follow_up import build_follow_up_capability
+
+            cap = build_follow_up_capability(job.task_kind)
         await self.store.update_status(
             job.job_id,
             status=JobStatus.RUNNING,
@@ -505,6 +515,16 @@ class JobRunner:
     ) -> None:
         finished_at = datetime.now(UTC)
         cancelled = force_cancelled or job.job_id in self._cancel_requested
+        children: list[Job] = []
+        if result is not None and result.follow_up_tasks and failure is None and not cancelled:
+            from tutor.services.jobs.follow_up import FollowUpScheduler
+
+            # Use the original in-process specs here. Public terminal copies
+            # are redacted later by ``_build_contract``.
+            children = await FollowUpScheduler(self.store).enqueue(
+                job.job_id,
+                result.follow_up_tasks,
+            )
         error_log_ref = None
         if failure is not None and not cancelled:
             error_log_ref = self._write_error_log(
@@ -541,6 +561,9 @@ class JobRunner:
             finished_at=finished_at,
             error_log_ref=error_log_ref,
         )
+        for child in children:
+            if child.status == JobStatus.PENDING:
+                self._schedule(child)
         if cancelled:
             self._cancel_requested.discard(job.job_id)
 
@@ -895,9 +918,14 @@ class JobRunner:
         emitted before dying) so the right pane can still show
         what was generated.
         """
+        count = await self.resume_pending()
         active = await self.store.list_active()
-        count = 0
         for job in active:
+            # Durable children were just resumed above. They are safe to run
+            # again from their persisted payload and must not be reaped as
+            # unrecoverable primary jobs.
+            if job.parent_job_id is not None:
+                continue
             if job.status == JobStatus.RUNNING:
                 error_msg = "process restarted while job was running"
             elif job.status == JobStatus.PENDING:
@@ -960,6 +988,22 @@ class JobRunner:
                 count=count,
             )
         return count
+
+    async def resume_pending(self) -> int:
+        """Resume durable queued child jobs after process restart."""
+        resumed = 0
+        for job in await self.store.list_active():
+            if job.parent_job_id is None or job.status not in {
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+            }:
+                continue
+            current = self._tasks.get(job.job_id)
+            if current is not None and not current.done():
+                continue
+            self._schedule(job)
+            resumed += 1
+        return resumed
 
 
 # ---------------------------------------------------------------------------

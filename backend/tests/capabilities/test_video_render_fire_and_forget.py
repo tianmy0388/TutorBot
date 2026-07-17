@@ -11,6 +11,10 @@ import pytest
 from tutor.capabilities.resource_generation import ResourceGenerationCapability
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
+from tutor.services.jobs.follow_up import FollowUpScheduler
+from tutor.services.jobs.runner import JobRunner
+from tutor.services.jobs.schema import Job, JobStatus
+from tutor.services.jobs.store import JobStore
 from tutor.services.resource_package.schema import (
     Resource,
     ResourcePackage,
@@ -113,6 +117,95 @@ def test_pending_video_follow_ups_are_deterministic() -> None:
         "user_id": "u1",
     }
     assert first[0].dedupe_key == f"video:{package.package_id}:{pending.resource_id}"
+
+
+class _EmptyCapabilities:
+    def get(self, name: str):
+        return None
+
+
+async def _wait_child(store: JobStore, job_id: str) -> Job:
+    for _ in range(100):
+        child = await store.get(job_id)
+        if child is not None and child.status in {
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.PARTIAL,
+        }:
+            return child
+        await asyncio.sleep(0.02)
+    raise AssertionError("video child did not become terminal")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("render_success", "expected_job_status", "expected_render_status"),
+    [
+        (False, JobStatus.FAILED, "failed"),
+        (True, JobStatus.SUCCEEDED, "ready"),
+    ],
+)
+async def test_durable_video_child_updates_package_and_terminal_job(
+    tmp_path,
+    monkeypatch,
+    render_success,
+    expected_job_status,
+    expected_render_status,
+) -> None:
+    from tutor.services import manim_render as mr_module
+    from tutor.services.resource_package import store as package_store_module
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    package_store = ResourcePackageStore(tmp_path / "packages.db")
+    await package_store.init()
+    monkeypatch.setattr(package_store_module, "_store", package_store)
+    package = ResourcePackage(topic="t", resources=[_video_resource()])
+    await package_store.save(package, user_id="local-user")
+
+    job_store = JobStore(tmp_path / "jobs.db")
+    await job_store.init()
+    parent = Job(
+        job_id="video-parent",
+        user_id="local-user",
+        session_id="video-session",
+        status=JobStatus.SUCCEEDED,
+    )
+    await job_store.save(parent)
+    spec = ResourceGenerationCapability._video_follow_up_specs(
+        package, parent.user_id
+    )[0]
+    child = (await FollowUpScheduler(job_store).enqueue(parent.job_id, (spec,)))[0]
+    module_patch = monkeypatch_for_module(
+        mr_module, _FakeRenderService(success=render_success)
+    )
+    runner = JobRunner(
+        job_store=job_store,
+        capability_registry=_EmptyCapabilities(),  # type: ignore[arg-type]
+    )
+
+    assert await runner.resume_pending() == 1
+    terminal = await _wait_child(job_store, child.job_id)
+    reloaded = await package_store.get(package.package_id)
+    durable_parent = await job_store.get(parent.job_id)
+    module_patch.undo()
+
+    assert terminal.status == expected_job_status
+    assert (terminal.error_log_ref is not None) is (not render_success)
+    assert reloaded is not None
+    assert (
+        reloaded.resources[0].format_specific["render_status"]
+        == expected_render_status
+    )
+    if not render_success:
+        assert (
+            reloaded.resources[0].format_specific["render_error_code"]
+            == "VIDEO_RENDER_FAILED"
+        )
+    assert durable_parent is not None
+    assert durable_parent.status == JobStatus.SUCCEEDED
+    await job_store.close()
+    await package_store.close()
 
 
 @pytest.mark.asyncio

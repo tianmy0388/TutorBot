@@ -26,9 +26,20 @@ import {
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import type { Resource } from "@/lib/types";
+import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
 export function VideoViewer({ resource }: { resource: Resource }) {
+  const child = useTutorStore((state) =>
+    Object.values(state.jobsById)
+      .flatMap((job) => job.children ?? [])
+      .find(
+        (candidate) =>
+          candidate.task_kind === "video_render" &&
+          (candidate.metadata?.resource_id === resource.resource_id ||
+            candidate.dedupe_key?.endsWith(`:${resource.resource_id}`)),
+      ),
+  );
   // **2026-07-08 fix (fdb26152 regression):** ``resource.format_specific``
   // can be undefined for partial resources (e.g. the placeholder
   // cards emitted via ``contract.partial_artifacts`` on a FAILED
@@ -62,8 +73,13 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   // flip the UI into the failure banner instead of the player shell.
   const effectiveRenderStatus = videoLoadFailed
     ? "failed"
-    : formatSpec.render_status ?? "unknown";
+    : child?.status === "failed" || child?.status === "cancelled"
+      ? "failed"
+      : child?.status === "succeeded"
+        ? "succeeded"
+        : formatSpec.render_status ?? "unknown";
   const isFailed = effectiveRenderStatus === "failed";
+  const isSucceeded = effectiveRenderStatus === "succeeded" && !isReady;
   // **2026-07-08 fix:** without ``formatSpec`` being defined, a
   // missing ``render_status`` shouldn't masquerade as "rendering".
   // We also collapse the three "not ready" states into one banner
@@ -74,6 +90,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   const isPending =
     !isReady &&
     !isFailed &&
+    !isSucceeded &&
     (renderStatus === "pending" ||
       renderStatus === "rendering" ||
       renderStatus === "unknown");
@@ -167,6 +184,15 @@ export function VideoViewer({ resource }: { resource: Resource }) {
                 {formatSpec.render_error}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {isSucceeded && (
+        <div className="p-4 rounded-lg border border-green-800/40 bg-green-950/20">
+          <div className="text-sm font-medium text-green-300">渲染完成</div>
+          <div className="mt-1 text-xs text-green-400/80">
+            后台视频任务已成功完成，资源详情正在同步。
           </div>
         </div>
       )}

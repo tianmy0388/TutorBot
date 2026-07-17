@@ -79,7 +79,9 @@ async def get_job(user_id: str, job_id: str, request: Request) -> dict[str, Any]
     job = await store.get(job_id)
     if job is None or job.user_id != user_id:
         raise HTTPException(status_code=404, detail="job not found")
-    return job.to_full_dict()
+    projection = await store.get_with_children(job_id)
+    assert projection is not None
+    return projection
 
 
 @router.post("/jobs/{user_id}/{job_id}/cancel")

@@ -27,11 +27,13 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    Index,
     Integer,
     String,
     select,
     text,
 )
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -64,6 +66,9 @@ class JobRow(_Base):
     user_id = Column(String(128), nullable=False, index=True)
     session_id = Column(String(64), nullable=False, default="")
     capability = Column(String(64), nullable=False, default="resource_generation")
+    parent_job_id = Column(String(64), nullable=True, index=True)
+    task_kind = Column(String(64), nullable=True)
+    dedupe_key = Column(String(256), nullable=True)
     status = Column(String(32), nullable=False, default=JobStatus.PENDING.value, index=True)
 
     # Inputs
@@ -87,7 +92,14 @@ class JobRow(_Base):
     # Replay buffer (capped — see JobRunner)
     events = Column(JSON, nullable=False, default=list)
 
-    __table_args__ = ()
+    __table_args__ = (
+        Index(
+            "uq_jobs_parent_dedupe",
+            "parent_job_id",
+            "dedupe_key",
+            unique=True,
+        ),
+    )
 
 
 class JobStore:
@@ -128,6 +140,26 @@ class JobStore:
                 await conn.exec_driver_sql(
                     "ALTER TABLE jobs ADD COLUMN terminal_event_id VARCHAR(64)"
                 )
+            if "parent_job_id" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN parent_job_id VARCHAR(64)"
+                )
+            if "task_kind" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN task_kind VARCHAR(64)"
+                )
+            if "dedupe_key" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN dedupe_key VARCHAR(256)"
+                )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id "
+                "ON jobs (parent_job_id)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_parent_dedupe "
+                "ON jobs (parent_job_id, dedupe_key)"
+            )
         logger.info(f"JobStore ready at {self.db_path}")
 
     async def close(self) -> None:
@@ -193,6 +225,61 @@ class JobStore:
                 await session.flush()
             session.add(self._to_row(job))
         return job
+
+    async def create_child_if_absent(
+        self,
+        *,
+        parent_job_id: str,
+        task_kind: str,
+        dedupe_key: str,
+        payload: dict[str, Any],
+    ) -> Job:
+        """Create one queued child, or return the durable existing child."""
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            parent = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == parent_job_id)
+                )
+            ).scalar_one_or_none()
+            if parent is None:
+                raise KeyError(f"parent job not found: {parent_job_id}")
+            child = Job(
+                user_id=parent.user_id,
+                session_id=parent.session_id,
+                capability=task_kind,
+                parent_job_id=parent_job_id,
+                task_kind=task_kind,
+                dedupe_key=dedupe_key,
+                message=parent.message or "",
+                language=parent.language or "zh",
+                metadata=dict(payload),
+                status=JobStatus.PENDING,
+            )
+            child_row = self._to_row(child)
+            values = {
+                column.name: getattr(child_row, column.name)
+                for column in JobRow.__table__.columns
+                if column.name != "id"
+            }
+            await session.execute(
+                sqlite_insert(JobRow)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=["parent_job_id", "dedupe_key"]
+                )
+            )
+            row = (
+                await session.execute(
+                    select(JobRow).where(
+                        JobRow.parent_job_id == parent_job_id,
+                        JobRow.dedupe_key == dedupe_key,
+                    )
+                )
+            ).scalar_one()
+            return self._row_to_job(row)
 
     async def update_status(
         self,
@@ -372,6 +459,26 @@ class JobStore:
             ).scalar_one_or_none()
             return self._row_to_job(row) if row else None
 
+    async def get_children(self, parent_job_id: str) -> list[Job]:
+        self._ensure_engine()
+        async with self._with_session() as session:
+            rows = (
+                await session.execute(
+                    select(JobRow)
+                    .where(JobRow.parent_job_id == parent_job_id)
+                    .order_by(JobRow.created_at.asc(), JobRow.id.asc())
+                )
+            ).scalars().all()
+            return [self._row_to_job(row) for row in rows]
+
+    async def get_with_children(self, job_id: str) -> dict[str, Any] | None:
+        """Return a public job projection with durable child state."""
+        job = await self.get(job_id)
+        if job is None:
+            return None
+        children = await self.get_children(job_id)
+        return self._project_with_children(job, children, full=True)
+
     async def list(
         self,
         user_id: str,
@@ -383,7 +490,10 @@ class JobStore:
     ) -> list[dict[str, Any]]:
         self._ensure_engine()
         async with self._with_session() as session:
-            stmt = select(JobRow).where(JobRow.user_id == user_id)
+            stmt = select(JobRow).where(
+                JobRow.user_id == user_id,
+                JobRow.parent_job_id.is_(None),
+            )
             if status is not None:
                 stmt = stmt.where(JobRow.status == status.value)
             # 2026-06-21 plan: filter by session_id so conversation
@@ -394,7 +504,11 @@ class JobStore:
                 stmt = stmt.where(JobRow.session_id == session_id)
             stmt = stmt.order_by(JobRow.created_at.desc()).limit(limit).offset(offset)
             rows = (await session.execute(stmt)).scalars().all()
-            return [self._row_to_job(r).to_summary() for r in rows if r is not None]
+            jobs = [self._row_to_job(r) for r in rows if r is not None]
+        return [
+            self._project_with_children(job, await self.get_children(job.job_id))
+            for job in jobs
+        ]
 
     async def list_for_session(
         self,
@@ -407,12 +521,19 @@ class JobStore:
         async with self._with_session() as session:
             stmt = (
                 select(JobRow)
-                .where(JobRow.session_id == session_id)
+                .where(
+                    JobRow.session_id == session_id,
+                    JobRow.parent_job_id.is_(None),
+                )
                 .order_by(JobRow.created_at.desc(), JobRow.id.desc())
                 .limit(limit)
             )
             rows = (await session.execute(stmt)).scalars().all()
-            return [self._row_to_job(row).to_summary() for row in reversed(rows)]
+            jobs = [self._row_to_job(row) for row in reversed(rows)]
+        return [
+            self._project_with_children(job, await self.get_children(job.job_id))
+            for job in jobs
+        ]
 
     async def count(
         self,
@@ -422,7 +543,10 @@ class JobStore:
     ) -> int:
         self._ensure_engine()
         async with self._with_session() as session:
-            stmt = select(JobRow).where(JobRow.user_id == user_id)
+            stmt = select(JobRow).where(
+                JobRow.user_id == user_id,
+                JobRow.parent_job_id.is_(None),
+            )
             if status is not None:
                 stmt = stmt.where(JobRow.status == status.value)
             rows = (await session.execute(stmt)).scalars().all()
@@ -486,6 +610,9 @@ class JobStore:
             user_id=job.user_id,
             session_id=job.session_id or "",
             capability=job.capability,
+            parent_job_id=job.parent_job_id,
+            task_kind=job.task_kind,
+            dedupe_key=job.dedupe_key,
             status=job.status.value,
             message=job.message or "",
             language=job.language,
@@ -507,6 +634,26 @@ class JobStore:
         )
 
     @staticmethod
+    def _project_with_children(
+        job: Job,
+        children: list[Job],
+        *,
+        full: bool = False,
+    ) -> dict[str, Any]:
+        from tutor.core.redaction import redact_sensitive
+
+        payload = job.to_full_dict() if full else job.to_summary()
+        child_payloads: list[dict[str, Any]] = []
+        for child in children:
+            projected = child.to_summary()
+            projected["metadata"] = redact_sensitive(dict(child.metadata or {}))
+            child_payloads.append(projected)
+        payload["children"] = child_payloads
+        payload["background_status"] = _background_status(children)
+        public_payload = redact_sensitive(payload)
+        return public_payload if isinstance(public_payload, dict) else {}
+
+    @staticmethod
     def _row_to_job(row: JobRow) -> Job:
         # Legacy "completed" rows (pre-Phase 5.2) hydrate as SUCCEEDED so
         # existing jobs.db files stay readable without a migration.
@@ -522,6 +669,9 @@ class JobStore:
             user_id=row.user_id,
             session_id=row.session_id,
             capability=row.capability,
+            parent_job_id=row.parent_job_id,
+            task_kind=row.task_kind,
+            dedupe_key=row.dedupe_key,
             status=status,
             message=row.message or "",
             language=row.language or "zh",
@@ -565,6 +715,25 @@ def get_job_store() -> JobStore:
 def reset_job_store() -> None:
     global _store
     _store = None
+
+
+def _background_status(children: list[Job]) -> str | None:
+    if not children:
+        return None
+    statuses = {child.status for child in children}
+    if JobStatus.RUNNING in statuses:
+        return JobStatus.RUNNING.value
+    if JobStatus.PENDING in statuses:
+        return JobStatus.PENDING.value
+    failed = statuses & {JobStatus.FAILED, JobStatus.CANCELLED}
+    succeeded = statuses & {JobStatus.SUCCEEDED, JobStatus.PARTIAL}
+    if failed and succeeded:
+        return JobStatus.PARTIAL.value
+    if failed:
+        return JobStatus.FAILED.value
+    if JobStatus.PARTIAL in statuses:
+        return JobStatus.PARTIAL.value
+    return JobStatus.SUCCEEDED.value
 
 
 __all__ = ["JobStore", "get_job_store", "reset_job_store"]
