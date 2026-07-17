@@ -294,9 +294,9 @@ async def fresh_builder(tmp_path, monkeypatch):
 
     reset_settings_cache()
     from tutor.services.learner_profile import (
-    _close_profile_store_sync,
-    reset_profile_builder,
-)
+        _close_profile_store_sync,
+        reset_profile_builder,
+    )
 
     reset_profile_builder()
     _close_profile_store_sync()
@@ -474,12 +474,9 @@ async def test_full_pipeline_emits_result_event(capability, fresh_builder):
     pending_video_ids = {
         resource["resource_id"]
         for resource in payload["package"]["resources"]
-        if resource["type"] == "video"
-        and resource["format_specific"].get("render_status") == "pending"
+        if resource["type"] == "video" and resource["format_specific"].get("render_status") == "pending"
     }
-    assert {
-        spec.payload["resource_id"] for spec in result.follow_up_tasks
-    } == pending_video_ids
+    assert {spec.payload["resource_id"] for spec in result.follow_up_tasks} == pending_video_ids
     assert not hasattr(capability, "_bg_render_tasks")
 
 
@@ -516,6 +513,153 @@ async def test_package_contains_all_resource_types(capability, fresh_builder):
     assert "document" in types_in_pkg or len(types_in_pkg) >= 1
     # If mocks worked, more types should be present
     assert len(types_in_pkg) >= 1
+
+
+@pytest.mark.asyncio
+async def test_resource_graph_is_explicit_and_failed_video_is_isolated(
+    capability,
+    fresh_builder,
+):
+    from tutor.services.resource_package.schema import ResourceReview
+
+    class FailingVideoAgent:
+        agent_name = "failing_video"
+
+        async def process(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("provider detail must stay private")
+
+    class CapturingReviewer:
+        agent_name = "capturing_reviewer"
+
+        def __init__(self) -> None:
+            self.seen_types: list[ResourceType] = []
+
+        async def process(self, context, resource, stream=None):  # type: ignore[no-untyped-def]
+            self.seen_types.append(resource.type)
+            return ResourceReview(
+                resource_id=resource.resource_id,
+                verdict=ReviewVerdict.PASS,
+                quality_score=0.9,
+            )
+
+    reviewer = CapturingReviewer()
+    capability.manim_video = FailingVideoAgent()
+    capability.quality_reviewer = reviewer
+    context = UnifiedContext(
+        job_id="job-video-isolation",
+        user_id="alice",
+        user_message="系统学习 LSTM 并用动画演示",
+        language="zh",
+    )
+    bus = StreamBus()
+
+    graph = capability.build_resource_graph(context, bus)
+    assert {node.name: node.dependencies for node in graph.nodes} == {
+        "intent": (),
+        "profile_snapshot": ("intent",),
+        "source": ("profile_snapshot",),
+        "pedagogy": ("source",),
+        "mindmap": ("pedagogy",),
+        "exercise": ("pedagogy",),
+        "code": ("pedagogy",),
+        "video-code": ("pedagogy",),
+        "reading": ("pedagogy",),
+        "quality": ("mindmap", "exercise", "code", "video-code", "reading"),
+        "safety": ("quality",),
+        "package": ("safety",),
+    }
+
+    result = await capability.run(context, bus)
+    package_types = {resource["type"] for resource in result.payload["package"]["resources"]}
+
+    assert ResourceType.VIDEO not in reviewer.seen_types
+    assert "video" not in package_types
+    assert all(spec.kind != "video_render" for spec in result.follow_up_tasks)
+    assert ResourceType.MINDMAP in reviewer.seen_types
+    assert "mindmap" in package_types
+
+
+@pytest.mark.asyncio
+async def test_failed_quality_review_never_enters_package_or_followups(
+    capability,
+    fresh_builder,
+):
+    from tutor.services.resource_package.schema import ResourceReview
+
+    class SelectiveReviewer:
+        agent_name = "selective_reviewer"
+
+        async def process(self, context, resource, stream=None):  # type: ignore[no-untyped-def]
+            if resource.type == ResourceType.VIDEO:
+                raise RuntimeError("review provider failure")
+            return ResourceReview(
+                resource_id=resource.resource_id,
+                verdict=ReviewVerdict.PASS,
+                quality_score=0.9,
+            )
+
+    capability.quality_reviewer = SelectiveReviewer()
+    result = await capability.run(
+        UnifiedContext(
+            job_id="job-review-isolation",
+            user_id="alice",
+            user_message="系统学习 LSTM 并用动画演示",
+            language="zh",
+        ),
+        StreamBus(),
+    )
+
+    assert all(resource["type"] != "video" for resource in result.payload["package"]["resources"])
+    assert all(spec.kind != "video_render" for spec in result.follow_up_tasks)
+    assert any(resource["type"] != "video" for resource in result.payload["package"]["resources"])
+
+
+@pytest.mark.asyncio
+async def test_safety_rejected_video_never_enters_package_or_followups(
+    capability,
+    fresh_builder,
+):
+    from tutor.agents.safety.anti_hallucination import (
+        AntiHallucinationReport,
+        OverallVerdict,
+    )
+
+    class SelectiveSafetyAgent:
+        agent_name = "selective_safety"
+
+        async def process(  # type: ignore[no-untyped-def]
+            self,
+            context,
+            stream=None,
+            *,
+            resource_content,
+            topic="",
+            source_documents=None,
+        ):
+            verdict = (
+                OverallVerdict.UNSAFE
+                if "动画" in resource_content or "Manim" in resource_content
+                else OverallVerdict.SAFE
+            )
+            return AntiHallucinationReport(
+                overall_verdict=verdict,
+                overall_confidence=0.95,
+            )
+
+    capability.anti_hallucination = SelectiveSafetyAgent()
+    result = await capability.run(
+        UnifiedContext(
+            job_id="job-safety-isolation",
+            user_id="alice",
+            user_message="系统学习 LSTM 并用动画演示",
+            language="zh",
+        ),
+        StreamBus(),
+    )
+
+    assert all(resource["type"] != "video" for resource in result.payload["package"]["resources"])
+    assert all(spec.kind != "video_render" for spec in result.follow_up_tasks)
+    assert result.payload["package"]["resources"]
 
 
 @pytest.mark.asyncio
@@ -612,11 +756,7 @@ class _CannedReviewer:
     async def process(self, context, resource, stream=None):
         from tutor.services.resource_package.schema import ResourceReview
 
-        verdict_str = (
-            self._verdicts.pop(0)
-            if self._verdicts
-            else "pass"
-        )
+        verdict_str = self._verdicts.pop(0) if self._verdicts else "pass"
         rev = ResourceReview(
             resource_id=resource.resource_id,
             verdict=self._map[verdict_str],
@@ -711,18 +851,14 @@ async def test_rejected_resources_filtered_from_package(capability, fresh_builde
             }
 
     rejected_ids = {
-        r.resource_id
-        for r in pkg.resources
-        if (r.metadata.get("review") or {}).get("verdict") == "reject"
+        r.resource_id for r in pkg.resources if (r.metadata.get("review") or {}).get("verdict") == "reject"
     }
     pkg.resources = [r for r in pkg.resources if r.resource_id not in rejected_ids]
 
     # Only r1 (pass) and r4 (revise) survive. r2 + r3 (both reject)
     # must be dropped.
     surviving_ids = [r.resource_id for r in pkg.resources]
-    assert surviving_ids == ["r1", "r4"], (
-        f"expected only pass+revise to survive, got {surviving_ids}"
-    )
+    assert surviving_ids == ["r1", "r4"], f"expected only pass+revise to survive, got {surviving_ids}"
 
 
 @pytest.mark.asyncio
@@ -803,9 +939,7 @@ async def test_prefilter_drops_failed_video_resources():
     kept_ids = [r.resource_id for r in kept]
 
     # The failed video MUST be dropped.
-    assert "vid-failed" not in kept_ids, (
-        f"failed video should be pre-filtered, kept={kept_ids}"
-    )
+    assert "vid-failed" not in kept_ids, f"failed video should be pre-filtered, kept={kept_ids}"
     # Other resources MUST be kept:
     #   - document
     #   - the pending video (not failed yet)
@@ -984,9 +1118,7 @@ async def test_resource_planning_respects_modality():
         "modality_dominant": "diagram",
         "knowledge_count": 0,
     }
-    planned = cap._plan_resources(
-        intent=intent, profile_snapshot=profile_snapshot, kg_summary={}
-    )
+    planned = cap._plan_resources(intent=intent, profile_snapshot=profile_snapshot, kg_summary={})
     assert ResourceType.MINDMAP in planned
     assert ResourceType.VIDEO not in planned  # not added for diagram modality
 
@@ -1013,7 +1145,5 @@ async def test_resource_planning_overview_skips_video():
     cap = ResourceGenerationCapability.__new__(ResourceGenerationCapability)
     intent = parse_intent_keyword("概览一下 NLP")
     profile_snapshot = {"modality_dominant": "video"}
-    planned = cap._plan_resources(
-        intent=intent, profile_snapshot=profile_snapshot, kg_summary={}
-    )
+    planned = cap._plan_resources(intent=intent, profile_snapshot=profile_snapshot, kg_summary={})
     assert ResourceType.VIDEO not in planned

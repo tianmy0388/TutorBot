@@ -24,6 +24,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from tutor.services.resource_package.schema import Resource, ResourceReview
+
 
 class JobTerminalStatus(str, Enum):  # noqa: UP042 - wire enum compatibility
     """Terminal outcome of a job.
@@ -110,6 +112,81 @@ class FollowUpTaskContract(BaseModel):
     dedupe_key: str = Field(min_length=1)
 
 
+class ResourceIntentNodeOutput(BaseModel):
+    """Validated intent passed into the resource-generation DAG."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    topic: str
+    scope: str
+    resource_types: tuple[str, ...] = ()
+    prerequisites: tuple[str, ...] = ()
+    goal: str = ""
+    raw_message: str = ""
+    confidence: float = 0.0
+
+
+class ResourceProfileNodeOutput(BaseModel):
+    """Copy-isolated learner snapshot paired with the normalized intent."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent: ResourceIntentNodeOutput
+    profile_snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResourceSourceNodeOutput(BaseModel):
+    """Content-source result and the deterministic resource plan."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile: ResourceProfileNodeOutput
+    kg_summary: dict[str, Any] = Field(default_factory=dict)
+    planned_types: tuple[str, ...] = ()
+    source_resource: Resource | None = None
+
+
+class ResourcePedagogyNodeOutput(BaseModel):
+    """Teaching rewrite consumed by all independent artifact branches."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: ResourceSourceNodeOutput
+    pedagogy_resource: Resource | None = None
+
+
+class ResourceArtifactNodeOutput(BaseModel):
+    """Usable artifacts emitted by one named branch."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pedagogy: ResourcePedagogyNodeOutput
+    resources: tuple[Resource, ...] = ()
+
+
+class ResourceQualityNodeOutput(BaseModel):
+    """Only artifacts with a completed non-reject quality review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pedagogy: ResourcePedagogyNodeOutput
+    resources: tuple[Resource, ...] = ()
+    reviews: tuple[ResourceReview, ...] = ()
+    filtered_failed: tuple[dict[str, Any], ...] = ()
+    filtered_reviews: tuple[dict[str, Any], ...] = ()
+
+
+class ResourceSafetyNodeOutput(BaseModel):
+    """Quality-approved artifacts after safety rejection filtering."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    quality: ResourceQualityNodeOutput
+    resources: tuple[Resource, ...] = ()
+    safety_reports: tuple[Any, ...] = ()
+    filtered_safety: tuple[dict[str, Any], ...] = ()
+
+
 class JobResultContract(BaseModel):
     """The single, typed terminal result of a job.
 
@@ -155,4 +232,11 @@ __all__ = [
     "JobResultContract",
     "JobTerminalStatus",
     "JobWarning",
+    "ResourceArtifactNodeOutput",
+    "ResourceIntentNodeOutput",
+    "ResourcePedagogyNodeOutput",
+    "ResourceProfileNodeOutput",
+    "ResourceQualityNodeOutput",
+    "ResourceSafetyNodeOutput",
+    "ResourceSourceNodeOutput",
 ]
