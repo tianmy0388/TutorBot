@@ -117,6 +117,7 @@ class JobRunner:
         # job_id → asyncio.Task executing _run()
         self._tasks: dict[str, asyncio.Task] = {}
         self._claim_retry_tasks: dict[str, asyncio.Task] = {}
+        self._lost_claims: set[tuple[str, int]] = set()
         # job_id → list[asyncio.Queue[dict | None]] of live subscribers
         self._subscribers: dict[str, list[asyncio.Queue[Any]]] = defaultdict(list)
         # Monotonically increasing broadcast id (used for log scoping)
@@ -126,6 +127,7 @@ class JobRunner:
         # Cancellation intent is in-memory only; the durable transition is
         # committed by the same terminal writer used by every other outcome.
         self._cancel_requested: set[str] = set()
+        self._shutting_down = False
 
     # ------------------------------------------------------------------
     # Submit / cancel
@@ -158,6 +160,8 @@ class JobRunner:
 
     def _schedule(self, job: Job) -> None:
         """Start one persisted job unless this runner already owns it."""
+        if self._shutting_down:
+            return
         current = self._tasks.get(job.job_id)
         if current is not None and not current.done():
             return
@@ -300,27 +304,49 @@ class JobRunner:
 
     async def _execute(self, job: Job) -> None:
         """Compatibility wrapper for the single-owner execution path."""
-        heartbeat: asyncio.Task | None = None
-        if job.parent_job_id is not None:
-            heartbeat = asyncio.create_task(self._heartbeat_child_claim(job.job_id))
-        try:
+        if job.parent_job_id is None:
             await self._run_job(job)
+            return
+        run_task = asyncio.create_task(self._run_job(job))
+        heartbeat = asyncio.create_task(self._heartbeat_child_claim(job))
+        try:
+            done, _ = await asyncio.wait(
+                {run_task, heartbeat},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat in done:
+                lost = True
+                with suppress(Exception):
+                    lost = heartbeat.result() is False
+                if lost:
+                    token = (job.job_id, job.claim_generation)
+                    self._lost_claims.add(token)
+                    run_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await run_task
+                    self._ensure_child_claim_retry(job.job_id)
+                    return
+            await run_task
         finally:
-            if heartbeat is not None:
-                heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await heartbeat
+            if not run_task.done():
+                run_task.cancel()
+                await asyncio.gather(run_task, return_exceptions=True)
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            self._lost_claims.discard((job.job_id, job.claim_generation))
 
-    async def _heartbeat_child_claim(self, job_id: str) -> None:
+    async def _heartbeat_child_claim(self, job: Job) -> bool:
         while True:
             await asyncio.sleep(self.CHILD_HEARTBEAT_SECONDS)
             renewed = await self.store.renew_child_claim(
-                job_id,
+                job.job_id,
                 owner=self._runner_id,
+                generation=job.claim_generation,
                 lease_seconds=self.CHILD_LEASE_SECONDS,
             )
             if not renewed:
-                return
+                return False
 
     async def _run_job(self, job: Job) -> None:
         """Run one capability and commit exactly one terminal transition."""
@@ -361,6 +387,17 @@ class JobRunner:
             )
             return
 
+        context_metadata = dict(job.metadata or {})
+        if job.parent_job_id is not None:
+            async def _claim_validator() -> bool:
+                return await self.store.claim_is_current(
+                    job.job_id,
+                    owner=str(job.claim_owner or ""),
+                    generation=job.claim_generation,
+                )
+
+            context_metadata["_claim_validator"] = _claim_validator
+            context_metadata["_claim_generation"] = job.claim_generation
         context = UnifiedContext(
             session_id=job.session_id,
             job_id=job.job_id,
@@ -368,7 +405,7 @@ class JobRunner:
             user_message=job.message,
             language=job.language,
             capability=job.capability,
-            metadata=dict(job.metadata or {}),
+            metadata=context_metadata,
         )
         bus: StreamBus = context.stream_bus
 
@@ -501,6 +538,11 @@ class JobRunner:
             failure = TimeoutError(f"Job timed out after {timeout_seconds}s")
             failure_traceback = failure_traceback or str(failure)
 
+        # Process teardown is not a user cancellation. Leave durable state
+        # resumable instead of publishing a false FAILED/CANCELLED terminal.
+        if self._shutting_down and isinstance(failure, asyncio.CancelledError):
+            return
+
         await asyncio.shield(
             self._finish_job(
                 job,
@@ -605,8 +647,19 @@ class JobRunner:
                     await self._claim_and_schedule(child)
         elif children:
             durable_parent = await self.store.get(job.job_id)
-            for child in children:
-                await self._settle_child_for_parent(child, durable_parent)
+            if durable_parent is not None and durable_parent.status in {
+                JobStatus.SUCCEEDED,
+                JobStatus.PARTIAL,
+            }:
+                for child in children:
+                    if child.status == JobStatus.PENDING:
+                        await self._claim_and_schedule(child)
+            elif durable_parent is None or durable_parent.status in {
+                JobStatus.CANCELLED,
+                JobStatus.FAILED,
+            }:
+                for child in children:
+                    await self._settle_child_for_parent(child, durable_parent)
         if cancelled:
             self._cancel_requested.discard(job.job_id)
 
@@ -771,6 +824,8 @@ class JobRunner:
         error_log_ref: ArtifactRef | None,
     ) -> bool:
         """Persist and publish only runner-authored terminal lifecycle events."""
+        if (job.job_id, job.claim_generation) in self._lost_claims:
+            return False
         current = await self.store.get(job.job_id)
         if current is None or current.terminal_event_id is not None:
             return False
@@ -860,6 +915,10 @@ class JobRunner:
             error=err_text,
             error_log_ref=error_log_ref,
             terminal_events=terminal_bundle,
+            expected_claim_owner=(job.claim_owner if job.parent_job_id else None),
+            expected_claim_generation=(
+                job.claim_generation if job.parent_job_id else None
+            ),
         )
         if not persisted:
             logger.debug(
@@ -908,6 +967,23 @@ class JobRunner:
             return
         task = asyncio.create_task(self._retry_child_claim(job_id))
         self._claim_retry_tasks[job_id] = task
+
+    async def shutdown(self) -> None:
+        """Cancel and gather all in-process execution and lease-monitor tasks."""
+        self._shutting_down = True
+        tasks = {
+            task
+            for task in (*self._tasks.values(), *self._claim_retry_tasks.values())
+            if not task.done()
+        }
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._claim_retry_tasks.clear()
+        self._running_user.clear()
+        self._lost_claims.clear()
 
     async def _retry_child_claim(self, job_id: str) -> None:
         """Revisit an old live lease until it expires or becomes terminal."""
@@ -1158,7 +1234,22 @@ def reset_job_runner() -> None:
     _runner = None
 
 
-__all__ = ["JobRunner", "get_job_runner", "reset_job_runner"]
+async def shutdown_job_runner() -> None:
+    """Detach the singleton, then fully stop its background asyncio tasks."""
+    global _runner
+    with _runner_lock:
+        runner = _runner
+        _runner = None
+    if runner is not None:
+        await runner.shutdown()
+
+
+__all__ = [
+    "JobRunner",
+    "get_job_runner",
+    "reset_job_runner",
+    "shutdown_job_runner",
+]
 
 
 # ---------------------------------------------------------------------------

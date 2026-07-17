@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -322,8 +322,13 @@ class ResourcePackageStore:
         self,
         package_id: str,
         resource: Resource,
+        *,
+        user_id: str,
+        claim_validator: Callable[[], Awaitable[bool]] | None = None,
     ) -> Resource:
         """Atomically replace one resource row without rewriting siblings."""
+        if claim_validator is not None and not await claim_validator():
+            raise PermissionError("follow-up claim is no longer current")
         self._ensure_engine()
         assert self._write_lock is not None
         async with self._write_lock, self._with_session() as session:
@@ -333,6 +338,7 @@ class ResourcePackageStore:
                     select(ResourceRow).where(
                         ResourceRow.package_id == package_id,
                         ResourceRow.resource_id == resource.resource_id,
+                        ResourceRow.user_id == user_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -357,6 +363,44 @@ class ResourcePackageStore:
             row.resource_metadata = dict(resource.metadata or {})
             row.created_at = resource.created_at
         return resource
+
+    async def get_for_user(
+        self,
+        package_id: str,
+        user_id: str,
+    ) -> ResourcePackage | None:
+        """Load a package only when it belongs to the requested user."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(PackageRow).where(
+                        PackageRow.package_id == package_id,
+                        PackageRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return self._row_to_package(row) if row is not None else None
+
+    async def owns_resource(
+        self,
+        package_id: str,
+        resource_id: str,
+        user_id: str,
+    ) -> bool:
+        """Return whether one resource and its package share the user owner."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(ResourceRow.id).where(
+                        ResourceRow.package_id == package_id,
+                        ResourceRow.resource_id == resource_id,
+                        ResourceRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return row is not None
 
     async def delete(self, package_id: str) -> bool:
         """Delete a package by id. Returns True if a row was removed."""

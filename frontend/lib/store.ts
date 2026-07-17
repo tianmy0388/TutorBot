@@ -207,6 +207,7 @@ export interface TutorState {
    *  can re-hydrate from REST without duplicating reducer logic. */
   rehydrateJobFromDetail: (detail: {
     job_id: string;
+    session_id?: string;
     capability: string;
     status: import("./types").JobStatus;
     message_preview: string;
@@ -679,6 +680,14 @@ export const useTutorStore = create<TutorState>()(
 
     rehydrateJobFromDetail: (detail) =>
       set((state) => {
+        if (
+          detail.session_id &&
+          state.sessionId &&
+          detail.session_id !== state.sessionId
+        ) {
+          return {};
+        }
+        const existing = state.jobsById[detail.job_id];
         const next = reduceJobEvent(
           { jobsById: state.jobsById, jobOrder: state.jobOrder, messages: state.messages },
           {
@@ -697,8 +706,11 @@ export const useTutorStore = create<TutorState>()(
               finished_at: detail.finished_at
                 ? Date.parse(detail.finished_at)
                 : null,
-              last_seq: detail.events?.length ?? 0,
-              events: detail.events ?? [],
+              last_seq:
+                detail.events === undefined
+                  ? existing?.last_seq ?? 0
+                  : Math.max(0, ...detail.events.map((event) => event.seq ?? 0)),
+              events: detail.events ?? existing?.events ?? [],
               result: (detail.result as any) ?? null,
               error: detail.error,
               event_count: detail.event_count,

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from tutor.capabilities.resource_generation import ResourceGenerationCapability
+from tutor.core.capability_result import FollowUpTaskSpec
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.jobs.follow_up import FollowUpScheduler
@@ -66,6 +67,34 @@ class _PerSceneRenderService:
             code=code,
             scene_class=scene_class,
         )
+
+
+class _LeaseRaceRenderService:
+    """Let a stale first renderer finish after the replacement owner."""
+
+    def __init__(self) -> None:
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+        self.calls = 0
+
+    async def render(self, *, code: str, scene_class: str):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        call = self.calls
+        if call == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+
+        class _R:
+            pass
+
+        result = _R()
+        result.success = True
+        result.public_url = f"https://cdn.example.com/owner-{call}.mp4"
+        result.video_path = None
+        result.duration_seconds = 30.0
+        result.error = None
+        result.attempts = 1
+        return result
 
 
 def _video_resource(render_status: str = "pending", *, code: str = "class M(Scene): pass") -> Resource:
@@ -217,6 +246,79 @@ async def test_durable_video_child_updates_package_and_terminal_job(
 
 
 @pytest.mark.asyncio
+async def test_stale_video_owner_cannot_overwrite_new_owner_package_or_terminal(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from tutor.services import manim_render as mr_module
+    from tutor.services.resource_package import store as package_store_module
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    package_store = ResourcePackageStore(tmp_path / "packages.db")
+    await package_store.init()
+    monkeypatch.setattr(package_store_module, "_store", package_store)
+    package = ResourcePackage(topic="t", resources=[_video_resource()])
+    await package_store.save(package, user_id="local-user")
+    first_store = JobStore(tmp_path / "jobs.db")
+    await first_store.init()
+    second_store = JobStore(tmp_path / "jobs.db")
+    await second_store.init()
+    parent = Job(
+        job_id="lease-race-parent",
+        user_id="local-user",
+        status=JobStatus.SUCCEEDED,
+    )
+    await first_store.save(parent)
+    spec = ResourceGenerationCapability._video_follow_up_specs(package, parent.user_id)[0]
+    child = (await FollowUpScheduler(first_store).enqueue(parent.job_id, (spec,)))[0]
+    renderer = _LeaseRaceRenderService()
+    module_patch = monkeypatch_for_module(mr_module, renderer)
+    old_runner = JobRunner(
+        job_store=first_store,
+        capability_registry=_EmptyCapabilities(),  # type: ignore[arg-type]
+    )
+    old_runner.CHILD_LEASE_SECONDS = 0.05
+    old_runner.CHILD_HEARTBEAT_SECONDS = 10
+    new_runner = JobRunner(
+        job_store=second_store,
+        capability_registry=_EmptyCapabilities(),  # type: ignore[arg-type]
+    )
+    new_runner.CHILD_LEASE_SECONDS = 2
+    new_runner.CHILD_HEARTBEAT_SECONDS = 0.2
+
+    assert await old_runner.resume_pending() == 1
+    await asyncio.wait_for(renderer.first_started.wait(), timeout=2)
+    old_task = old_runner._tasks[child.job_id]
+    await asyncio.sleep(0.1)
+    assert await new_runner.resume_pending() == 1
+    new_terminal = await _wait_child(second_store, child.job_id)
+    assert new_terminal.status == JobStatus.SUCCEEDED
+    before_stale_finish = await package_store.get(package.package_id)
+    assert before_stale_finish is not None
+    assert (
+        before_stale_finish.resources[0].format_specific["video_url"]
+        == "https://cdn.example.com/owner-2.mp4"
+    )
+
+    renderer.release_first.set()
+    await asyncio.wait_for(asyncio.shield(old_task), timeout=2)
+    durable = await second_store.get(child.job_id)
+    reloaded = await package_store.get(package.package_id)
+    module_patch.undo()
+
+    assert durable is not None and durable.status == JobStatus.SUCCEEDED
+    assert sum(event.get("type") == "job_terminal" for event in durable.events) == 1
+    assert reloaded is not None
+    assert (
+        reloaded.resources[0].format_specific["video_url"]
+        == "https://cdn.example.com/owner-2.mp4"
+    )
+    await second_store.close()
+    await first_store.close()
+    await package_store.close()
+
+
+@pytest.mark.asyncio
 async def test_resource_level_updates_do_not_overwrite_sibling_video_results(
     tmp_path,
 ) -> None:
@@ -242,8 +344,12 @@ async def test_resource_level_updates_do_not_overwrite_sibling_video_results(
     second.format_specific["render_error_code"] = "VIDEO_RENDER_FAILED"
 
     await asyncio.gather(
-        store.update_resource(package.package_id, first),
-        second_store.update_resource(package.package_id, second),
+        store.update_resource(package.package_id, first, user_id="local-user"),
+        second_store.update_resource(
+            package.package_id,
+            second,
+            user_id="local-user",
+        ),
     )
 
     reloaded = await store.get(package.package_id)
@@ -296,6 +402,75 @@ async def test_video_child_fails_when_atomic_resource_persistence_fails(
     assert reloaded.resources[0].format_specific["render_status"] == "pending"
     await job_store.close()
     await package_store.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_user_video_payload_cannot_render_or_mutate_package(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from tutor.services import manim_render as mr_module
+    from tutor.services.resource_package import store as package_store_module
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    package_store = ResourcePackageStore(tmp_path / "packages.db")
+    await package_store.init()
+    monkeypatch.setattr(package_store_module, "_store", package_store)
+    package = ResourcePackage(topic="private", resources=[_video_resource()])
+    await package_store.save(package, user_id="owner-b")
+    job_store = JobStore(tmp_path / "jobs.db")
+    await job_store.init()
+    parent = Job(job_id="owner-parent", user_id="owner-a", status=JobStatus.SUCCEEDED)
+    await job_store.save(parent)
+    spec = FollowUpTaskSpec(
+        kind="video_render",
+        payload={"package_id": package.package_id, "resource_id": package.resources[0].resource_id},
+        dedupe_key=f"video:{package.package_id}:{package.resources[0].resource_id}",
+    )
+    child = (await FollowUpScheduler(job_store).enqueue(parent.job_id, (spec,)))[0]
+    fake = _FakeRenderService(success=True)
+    module_patch = monkeypatch_for_module(mr_module, fake)
+    runner = JobRunner(
+        job_store=job_store,
+        capability_registry=_EmptyCapabilities(),  # type: ignore[arg-type]
+    )
+
+    assert await runner.resume_pending() == 1
+    terminal = await _wait_child(job_store, child.job_id)
+    module_patch.undo()
+    reloaded = await package_store.get(package.package_id)
+
+    assert terminal.status == JobStatus.FAILED
+    assert fake.calls == []
+    assert reloaded is not None
+    assert reloaded.resources[0].format_specific["render_status"] == "pending"
+    await job_store.close()
+    await package_store.close()
+
+
+@pytest.mark.asyncio
+async def test_atomic_resource_update_rejects_wrong_owner(tmp_path) -> None:
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    store = ResourcePackageStore(tmp_path / "packages.db")
+    await store.init()
+    package = ResourcePackage(topic="private", resources=[_video_resource()])
+    await store.save(package, user_id="owner-b")
+    snapshot = await store.get(package.package_id)
+    assert snapshot is not None
+    resource = snapshot.resources[0]
+    resource.format_specific["render_status"] = "ready"
+
+    with pytest.raises((KeyError, PermissionError)):
+        await store.update_resource(
+            package.package_id,
+            resource,
+            user_id="owner-a",
+        )
+    reloaded = await store.get(package.package_id)
+    assert reloaded is not None
+    assert reloaded.resources[0].format_specific["render_status"] == "pending"
+    await store.close()
 
 
 @pytest.mark.asyncio

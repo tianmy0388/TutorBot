@@ -121,6 +121,12 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logger.info("Tutor shutting down")
+        try:
+            from tutor.services.jobs import shutdown_job_runner
+
+            await shutdown_job_runner()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"JobRunner shutdown failed (non-fatal): {exc!r}")
         # Tear down MCP subprocesses (started lazily by MCPRegistry on
         # first web_search / understand_image call) so they don't outlive
         # the API process.

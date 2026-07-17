@@ -63,10 +63,23 @@ class VideoRenderFollowUpCapability(BaseCapability):
 
         package_id = str(context.metadata.get("package_id") or "")
         resource_id = str(context.metadata.get("resource_id") or "")
+        claim_validator = context.metadata.get("_claim_validator")
+
+        async def require_current_claim() -> None:
+            if callable(claim_validator) and not await claim_validator():
+                raise PermissionError("follow-up claim is no longer current")
+
+        await require_current_claim()
         package_store = self._package_store or get_resource_package_store()
-        package = await package_store.get(package_id)
+        package = await package_store.get_for_user(package_id, context.user_id)
         if package is None:
-            raise RuntimeError("Video package is unavailable")
+            raise PermissionError("Video package is unavailable for this user")
+        if not await package_store.owns_resource(
+            package_id,
+            resource_id,
+            context.user_id,
+        ):
+            raise PermissionError("Video resource is unavailable for this user")
         resource = next(
             (item for item in package.resources if item.resource_id == resource_id),
             None,
@@ -81,8 +94,21 @@ class VideoRenderFollowUpCapability(BaseCapability):
             context,
             stream,
             persist_package=False,
+            emit_resource=False,
         )
-        await package_store.update_resource(package.package_id, resource)
+        await require_current_claim()
+        await package_store.update_resource(
+            package.package_id,
+            resource,
+            user_id=context.user_id,
+            claim_validator=(claim_validator if callable(claim_validator) else None),
+        )
+        await require_current_claim()
+        await stream.resource(
+            resource,
+            source="resource_capability",
+            stage="video_rendering",
+        )
         render_status = str(
             (resource.format_specific or {}).get("render_status") or "failed"
         )

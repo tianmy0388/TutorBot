@@ -93,6 +93,20 @@ class _CountingBlockingCapability:
         return CapabilityResult(assistant_message="child complete")
 
 
+class _CancellationAwareCapability:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def run(self, context: UnifiedContext, bus: StreamBus) -> CapabilityResult:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
 class _ParentWithUnsupportedFollowUp:
     async def run(self, context: UnifiedContext, bus: StreamBus) -> CapabilityResult:
         return CapabilityResult(
@@ -349,6 +363,88 @@ async def test_cancel_winning_parent_terminal_cas_never_dispatches_enqueued_chil
     child = await _wait_terminal(store, children[0].job_id)
     assert child.status == JobStatus.CANCELLED
     assert not child_capability.started.is_set()
+    await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "expected_parent_status"),
+    [
+        ({}, JobStatus.SUCCEEDED),
+        (
+            {
+                "artifacts": [
+                    {"resource_type": "document", "status": "succeeded"},
+                    {"resource_type": "video", "status": "failed"},
+                ]
+            },
+            JobStatus.PARTIAL,
+        ),
+    ],
+)
+async def test_successful_parent_cas_loser_never_settles_claimed_child(
+    tmp_path,
+    monkeypatch,
+    payload,
+    expected_parent_status,
+) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    await store.init()
+    parent = Job(
+        job_id="parent-success-race",
+        user_id="local-user",
+        status=JobStatus.RUNNING,
+    )
+    await store.save(parent)
+    child_capability = _CountingBlockingCapability()
+    from tutor.services.jobs import follow_up as follow_up_module
+
+    monkeypatch.setattr(
+        follow_up_module,
+        "build_follow_up_capability",
+        lambda kind: child_capability,
+    )
+    runner = JobRunner(
+        job_store=store,
+        capability_registry=_CapabilitiesStub(),  # type: ignore[arg-type]
+    )
+    result = CapabilityResult(
+        assistant_message="parent complete",
+        payload=payload,
+        follow_up_tasks=(
+            FollowUpTaskSpec(
+                kind="video_render",
+                payload={"package_id": "pkg", "resource_id": "video"},
+                dedupe_key="video:pkg:video",
+            ),
+        ),
+    )
+
+    await runner._finish_job(
+        parent,
+        result=result,
+        failure=None,
+        failure_traceback=None,
+        partial_resources=[],
+    )
+    await asyncio.wait_for(child_capability.started.wait(), timeout=2)
+    await runner._finish_job(
+        parent,
+        result=result,
+        failure=None,
+        failure_traceback=None,
+        partial_resources=[],
+    )
+
+    children = await store.get_children(parent.job_id)
+    assert len(children) == 1
+    durable_child = await store.get(children[0].job_id)
+    assert durable_child is not None and durable_child.status == JobStatus.RUNNING
+    assert durable_child.terminal_event_id is None
+    assert (await store.get(parent.job_id)).status == expected_parent_status
+    child_capability.release.set()
+    assert (await _wait_terminal(store, children[0].job_id)).status == JobStatus.SUCCEEDED
+    assert child_capability.calls == 1
     await store.close()
 
 
@@ -686,6 +782,182 @@ async def test_two_runners_atomically_claim_one_child_for_single_execution(
     assert (await _wait_terminal(store_a, child.job_id)).status == JobStatus.SUCCEEDED
     await store_a.close()
     await store_b.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_generation_fences_stale_owner_terminal_write(tmp_path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    await store.init()
+    parent = Job(job_id="fence-parent", status=JobStatus.SUCCEEDED)
+    await store.save(parent)
+    child = (
+        await FollowUpScheduler(store).enqueue(
+            parent.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="video_render",
+                    payload={"package_id": "pkg", "resource_id": "video"},
+                    dedupe_key="video:pkg:video",
+                ),
+            ),
+        )
+    )[0]
+    first_at = datetime.now(UTC)
+    old = await store.claim_child(
+        child.job_id,
+        owner="old-owner",
+        lease_seconds=1,
+        now=first_at,
+    )
+    new = await store.claim_child(
+        child.job_id,
+        owner="new-owner",
+        lease_seconds=60,
+        now=first_at + timedelta(seconds=2),
+    )
+    assert old is not None and new is not None
+    assert new.claim_generation == old.claim_generation + 1
+    assert not await store.claim_is_current(
+        child.job_id,
+        owner="old-owner",
+        generation=old.claim_generation,
+    )
+    assert await store.claim_is_current(
+        child.job_id,
+        owner="new-owner",
+        generation=new.claim_generation,
+    )
+    assert not await store.set_terminal(
+        child.job_id,
+        status=JobStatus.SUCCEEDED,
+        finished_at=None,
+        result={"status": "succeeded"},
+        terminal_event={"type": "job_terminal", "content": "stale"},
+        expected_claim_owner="old-owner",
+        expected_claim_generation=old.claim_generation,
+    )
+    assert await store.set_terminal(
+        child.job_id,
+        status=JobStatus.SUCCEEDED,
+        finished_at=None,
+        result={"status": "succeeded"},
+        terminal_event={"type": "job_terminal", "content": "current"},
+        expected_claim_owner="new-owner",
+        expected_claim_generation=new.claim_generation,
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_heartbeat_cancels_owner_execution_without_terminal_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    await store.init()
+    parent = Job(job_id="heartbeat-parent", status=JobStatus.SUCCEEDED)
+    await store.save(parent)
+    child = (
+        await FollowUpScheduler(store).enqueue(
+            parent.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="video_render",
+                    payload={"package_id": "pkg", "resource_id": "video"},
+                    dedupe_key="video:pkg:video",
+                ),
+            ),
+        )
+    )[0]
+    capability = _CancellationAwareCapability()
+    from tutor.services.jobs import follow_up as follow_up_module
+
+    monkeypatch.setattr(
+        follow_up_module,
+        "build_follow_up_capability",
+        lambda kind: capability,
+    )
+
+    async def reject_renewal(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(store, "renew_child_claim", reject_renewal)
+    runner = JobRunner(
+        job_store=store,
+        capability_registry=_CapabilitiesStub(),  # type: ignore[arg-type]
+    )
+    runner.CHILD_HEARTBEAT_SECONDS = 0.01
+    assert await runner.resume_pending() == 1
+    await asyncio.wait_for(capability.started.wait(), timeout=2)
+    try:
+        await asyncio.wait_for(capability.cancelled.wait(), timeout=1)
+    finally:
+        task = runner._tasks.get(child.job_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    durable = await store.get(child.job_id)
+    assert durable is not None and durable.status == JobStatus.RUNNING
+    assert durable.terminal_event_id is None
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_runner_shutdown_cancels_and_gathers_jobs_and_claim_retry_monitors(
+    tmp_path,
+) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    await store.init()
+    runner = JobRunner(
+        job_store=store,
+        capability_registry=_CapabilitiesStub(),  # type: ignore[arg-type]
+    )
+    job_cancelled = asyncio.Event()
+    retry_cancelled = asyncio.Event()
+
+    async def block(cancelled: asyncio.Event) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    job_task = asyncio.create_task(block(job_cancelled))
+    retry_task = asyncio.create_task(block(retry_cancelled))
+    runner._tasks["active"] = job_task
+    runner._claim_retry_tasks["retry"] = retry_task
+    await asyncio.sleep(0)
+
+    await runner.shutdown()
+
+    assert job_cancelled.is_set() and retry_cancelled.is_set()
+    assert job_task.done() and retry_task.done()
+    assert runner._tasks == {}
+    assert runner._claim_retry_tasks == {}
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_job_runner_clears_singleton_after_gather(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from tutor.services.jobs import runner as runner_module
+
+    store = JobStore(tmp_path / "jobs.db")
+    await store.init()
+    runner = JobRunner(
+        job_store=store,
+        capability_registry=_CapabilitiesStub(),  # type: ignore[arg-type]
+    )
+    task = asyncio.create_task(asyncio.Event().wait())
+    runner._claim_retry_tasks["retry"] = task
+    monkeypatch.setattr(runner_module, "_runner", runner)
+
+    await runner_module.shutdown_job_runner()
+
+    assert task.done()
+    assert runner_module._runner is None
+    await store.close()
 
 
 @pytest.mark.asyncio

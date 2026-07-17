@@ -739,6 +739,7 @@ class ResourceGenerationCapability(BaseCapability):
         stream: StreamBus,
         *,
         persist_package: bool = True,
+        emit_resource: bool = True,
     ) -> None:
         """Render a single video, updating its ``format_specific`` and
         emitting a ``RESOURCE`` event when done.
@@ -828,18 +829,19 @@ class ResourceGenerationCapability(BaseCapability):
             # player. We do this in ``finally`` so even render failures
             # surface (the user sees "渲染失败" instead of a forever-
             # pending placeholder).
-            try:
-                await stream.resource(
-                    res,
-                    source="resource_capability",
-                    stage="video_rendering",
-                )
-            except Exception:  # noqa: BLE001
-                log_degraded(
-                    code="RESOURCE_STREAM_EMIT_FAILED",
-                    source="resource_capability",
-                    stage="video_rendering",
-                )
+            if emit_resource:
+                try:
+                    await stream.resource(
+                        res,
+                        source="resource_capability",
+                        stage="video_rendering",
+                    )
+                except Exception:  # noqa: BLE001
+                    log_degraded(
+                        code="RESOURCE_STREAM_EMIT_FAILED",
+                        source="resource_capability",
+                        stage="video_rendering",
+                    )
             # Re-save the package so the updated format_specific is
             # persisted for reconnection / reload.
             if persist_package:

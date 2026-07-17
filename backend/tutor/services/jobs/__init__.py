@@ -12,6 +12,7 @@ from tutor.services.jobs.runner import (
     JobRunner,
     get_job_runner,
     reset_job_runner,
+    shutdown_job_runner,
 )
 from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
 from tutor.services.jobs.store import (
@@ -30,5 +31,6 @@ __all__ = [
     "get_job_runner",
     "get_job_store",
     "reset_job_runner",
+    "shutdown_job_runner",
     "reset_job_store",
 ]

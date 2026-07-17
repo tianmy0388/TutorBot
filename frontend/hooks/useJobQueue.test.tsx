@@ -76,7 +76,12 @@ async function flushPromises() {
 beforeEach(() => {
   vi.useFakeTimers();
   apiMocks.getJobStats.mockResolvedValue(null);
-  useTutorStore.setState({ jobsById: {}, jobOrder: [], messages: [] });
+  useTutorStore.setState({
+    jobsById: {},
+    jobOrder: [],
+    messages: [],
+    sessionId: "current-page",
+  });
 });
 
 afterEach(() => {
@@ -111,6 +116,22 @@ describe("useJobQueue durable child refresh", () => {
           children: job("pending").children,
         },
       });
+      useTutorStore.getState().applyReducerEvent({
+        type: "stream",
+        job_id: "parent-live",
+        event: {
+          type: "progress",
+          source: "resource_capability",
+          stage: "video_rendering",
+          content: "rendering",
+          metadata: { job_id: "parent-live" },
+          session_id: "current-page",
+          turn_id: "",
+          seq: 7,
+          timestamp: Date.parse("2026-07-17T00:00:07Z") / 1000,
+          event_id: "streamed-seven",
+        },
+      });
       apiMocks.listJobs
         .mockResolvedValueOnce({ items: [job("pending")], total: 1 })
         .mockResolvedValueOnce({ items: [job(terminalStatus)], total: 1 });
@@ -130,6 +151,8 @@ describe("useJobQueue durable child refresh", () => {
       expect(
         useTutorStore.getState().jobsById["parent-live"].children?.[0].status,
       ).toBe(terminalStatus);
+      expect(useTutorStore.getState().jobsById["parent-live"].last_seq).toBe(7);
+      expect(useTutorStore.getState().jobsById["parent-live"].events).toHaveLength(1);
     },
   );
 
@@ -143,5 +166,35 @@ describe("useJobQueue durable child refresh", () => {
     const hydrated = useTutorStore.getState().jobsById["parent-live"];
     expect(hydrated.children?.[0].status).toBe("failed");
     expect(hydrated.background_status).toBe("failed");
+  });
+
+  it("hydrates only the current session when another session has the same resource id", async () => {
+    const other = {
+      ...job("failed"),
+      job_id: "parent-other",
+      session_id: "other-page",
+      children: [
+        {
+          ...job("failed").children[0],
+          job_id: "child-other",
+          parent_job_id: "parent-other",
+        },
+      ],
+    };
+    const current = job("pending");
+    apiMocks.listJobs.mockResolvedValue({
+      items: [other, current],
+      total: 2,
+    });
+
+    const { result } = renderHook(() => useJobQueue("local-user"));
+    render(<VideoViewer resource={resource} />);
+    await act(flushPromises);
+
+    expect(result.current.jobs).toHaveLength(2);
+    expect(useTutorStore.getState().jobsById["parent-other"]).toBeUndefined();
+    expect(useTutorStore.getState().jobsById["parent-live"]).toBeDefined();
+    expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+    expect(screen.queryByText("渲染失败")).not.toBeInTheDocument();
   });
 });

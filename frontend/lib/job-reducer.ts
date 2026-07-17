@@ -499,6 +499,20 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
       (toMillis(incoming.finished_at) ?? 0) < (existing.finished_at ?? 0) ||
       (existing.last_seq ?? 0) > (incoming.last_seq ?? 0);
     if (localNewer) {
+      if (incoming.children !== undefined || incoming.background_status !== undefined) {
+        return {
+          ...state,
+          jobsById: {
+            ...state.jobsById,
+            [incoming.job_id]: {
+              ...existing,
+              children: incoming.children ?? existing.children ?? [],
+              background_status:
+                incoming.background_status ?? existing.background_status ?? null,
+            },
+          },
+        };
+      }
       return state;
     }
   }

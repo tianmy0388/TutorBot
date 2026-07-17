@@ -85,6 +85,7 @@ class Job(BaseModel):
     dedupe_key: str | None = None
     claim_owner: str | None = None
     claim_expires_at: datetime | None = None
+    claim_generation: int = 0
 
     # Inputs
     message: str = ""

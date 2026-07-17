@@ -71,6 +71,7 @@ class JobRow(_Base):
     dedupe_key = Column(String(256), nullable=True)
     claim_owner = Column(String(64), nullable=True)
     claim_expires_at = Column(DateTime(timezone=True), nullable=True)
+    claim_generation = Column(Integer, nullable=False, default=0)
     status = Column(String(32), nullable=False, default=JobStatus.PENDING.value, index=True)
 
     # Inputs
@@ -161,6 +162,10 @@ class JobStore:
             if "claim_expires_at" not in columns:
                 await conn.exec_driver_sql(
                     "ALTER TABLE jobs ADD COLUMN claim_expires_at DATETIME"
+                )
+            if "claim_generation" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0"
                 )
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id "
@@ -333,6 +338,8 @@ class JobStore:
         terminal_events: list[dict[str, Any]] | None = None,
         error: str | None = None,
         error_log_ref: ArtifactRef | None = None,
+        expected_claim_owner: str | None = None,
+        expected_claim_generation: int | None = None,
     ) -> bool:
         """Atomically persist a job's one terminal transition.
 
@@ -369,6 +376,12 @@ class JobStore:
                 )
             ).scalar_one_or_none()
             if row is None:
+                return False
+            if expected_claim_owner is not None and (
+                row.claim_owner != expected_claim_owner
+                or int(row.claim_generation or 0)
+                != int(expected_claim_generation or 0)
+            ):
                 return False
             if row.terminal_event_id or row.status not in {
                 JobStatus.PENDING.value,
@@ -448,6 +461,7 @@ class JobStore:
                 return None
             row.status = JobStatus.RUNNING.value
             row.claim_owner = owner
+            row.claim_generation = int(row.claim_generation or 0) + 1
             row.claim_expires_at = claimed_at + timedelta(seconds=lease_seconds)
             row.started_at = row.started_at or claimed_at
             await session.flush()
@@ -458,6 +472,7 @@ class JobStore:
         job_id: str,
         *,
         owner: str,
+        generation: int,
         lease_seconds: float,
     ) -> bool:
         """Extend an active child lease only for its current owner."""
@@ -475,10 +490,33 @@ class JobStore:
                 or row.parent_job_id is None
                 or row.status != JobStatus.RUNNING.value
                 or row.claim_owner != owner
+                or int(row.claim_generation or 0) != generation
             ):
                 return False
             row.claim_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
             return True
+
+    async def claim_is_current(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        generation: int,
+    ) -> bool:
+        """Check the unexpired fencing token immediately before publication."""
+        job = await self.get(job_id)
+        if (
+            job is None
+            or job.status != JobStatus.RUNNING
+            or job.claim_owner != owner
+            or job.claim_generation != generation
+            or job.claim_expires_at is None
+        ):
+            return False
+        expires_at = job.claim_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        return expires_at > datetime.now(UTC)
 
     async def append_event(
         self,
@@ -707,6 +745,7 @@ class JobStore:
             dedupe_key=job.dedupe_key,
             claim_owner=job.claim_owner,
             claim_expires_at=job.claim_expires_at,
+            claim_generation=job.claim_generation,
             status=job.status.value,
             message=job.message or "",
             language=job.language,
@@ -768,6 +807,7 @@ class JobStore:
             dedupe_key=row.dedupe_key,
             claim_owner=row.claim_owner,
             claim_expires_at=row.claim_expires_at,
+            claim_generation=int(row.claim_generation or 0),
             status=status,
             message=row.message or "",
             language=row.language or "zh",
