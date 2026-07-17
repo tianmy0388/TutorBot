@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +69,8 @@ class JobRow(_Base):
     parent_job_id = Column(String(64), nullable=True, index=True)
     task_kind = Column(String(64), nullable=True)
     dedupe_key = Column(String(256), nullable=True)
+    claim_owner = Column(String(64), nullable=True)
+    claim_expires_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(32), nullable=False, default=JobStatus.PENDING.value, index=True)
 
     # Inputs
@@ -151,6 +153,14 @@ class JobStore:
             if "dedupe_key" not in columns:
                 await conn.exec_driver_sql(
                     "ALTER TABLE jobs ADD COLUMN dedupe_key VARCHAR(256)"
+                )
+            if "claim_owner" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN claim_owner VARCHAR(64)"
+                )
+            if "claim_expires_at" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN claim_expires_at DATETIME"
                 )
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id "
@@ -389,6 +399,85 @@ class JobStore:
                 if error_log_ref is not None
                 else None
             )
+            row.claim_owner = None
+            row.claim_expires_at = None
+            return True
+
+    async def claim_child(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        lease_seconds: float,
+        now: datetime | None = None,
+    ) -> Job | None:
+        """Atomically claim eligible child work across runner processes."""
+        self._ensure_engine()
+        assert self._write_lock is not None
+        claimed_at = now or datetime.now(UTC)
+        if claimed_at.tzinfo is None:
+            claimed_at = claimed_at.replace(tzinfo=UTC)
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if row is None or row.parent_job_id is None:
+                return None
+            parent = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == row.parent_job_id)
+                )
+            ).scalar_one_or_none()
+            if parent is None or parent.status not in {
+                JobStatus.SUCCEEDED.value,
+                JobStatus.PARTIAL.value,
+            }:
+                return None
+            if row.status not in {
+                JobStatus.PENDING.value,
+                JobStatus.RUNNING.value,
+            }:
+                return None
+            expires_at = row.claim_expires_at
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if row.claim_owner and expires_at is not None and expires_at > claimed_at:
+                return None
+            row.status = JobStatus.RUNNING.value
+            row.claim_owner = owner
+            row.claim_expires_at = claimed_at + timedelta(seconds=lease_seconds)
+            row.started_at = row.started_at or claimed_at
+            await session.flush()
+            return self._row_to_job(row)
+
+    async def renew_child_claim(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        lease_seconds: float,
+    ) -> bool:
+        """Extend an active child lease only for its current owner."""
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if (
+                row is None
+                or row.parent_job_id is None
+                or row.status != JobStatus.RUNNING.value
+                or row.claim_owner != owner
+            ):
+                return False
+            row.claim_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
             return True
 
     async def append_event(
@@ -569,7 +658,10 @@ class JobStore:
         async with self._with_session() as session:
             rows = (
                 await session.execute(
-                    select(JobRow).where(JobRow.user_id == user_id)
+                    select(JobRow).where(
+                        JobRow.user_id == user_id,
+                        JobRow.parent_job_id.is_(None),
+                    )
                 )
             ).scalars().all()
 
@@ -613,6 +705,8 @@ class JobStore:
             parent_job_id=job.parent_job_id,
             task_kind=job.task_kind,
             dedupe_key=job.dedupe_key,
+            claim_owner=job.claim_owner,
+            claim_expires_at=job.claim_expires_at,
             status=job.status.value,
             message=job.message or "",
             language=job.language,
@@ -672,6 +766,8 @@ class JobStore:
             parent_job_id=row.parent_job_id,
             task_kind=row.task_kind,
             dedupe_key=row.dedupe_key,
+            claim_owner=row.claim_owner,
+            claim_expires_at=row.claim_expires_at,
             status=status,
             message=row.message or "",
             language=row.language or "zh",

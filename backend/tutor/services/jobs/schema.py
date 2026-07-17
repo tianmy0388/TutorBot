@@ -83,6 +83,8 @@ class Job(BaseModel):
     parent_job_id: str | None = None
     task_kind: str | None = None
     dedupe_key: str | None = None
+    claim_owner: str | None = None
+    claim_expires_at: datetime | None = None
 
     # Inputs
     message: str = ""

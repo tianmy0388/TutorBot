@@ -404,6 +404,7 @@ async def test_runner_terminal_public_projection_redacts_internal_payloads(
         + f'session = "{jwt}"\n'
     )
     follow_up_payload = {
+        "package_id": "pkg-redaction",
         "resource_id": "video-1",
         "refresh_token": "follow-up-refresh-secret",
         "source_code": generated_code,

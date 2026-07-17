@@ -22,6 +22,8 @@ class FollowUpScheduler:
         parent_job_id: str,
         specs: tuple[FollowUpTaskSpec, ...],
     ) -> list[Job]:
+        for spec in specs:
+            validate_follow_up_spec(spec)
         children: list[Job] = []
         for spec in specs:
             children.append(
@@ -45,6 +47,10 @@ class VideoRenderFollowUpCapability(BaseCapability):
         tags=["internal", "follow_up", "video"],
     )
 
+    def __init__(self, package_store=None) -> None:
+        super().__init__()
+        self._package_store = package_store
+
     async def run(
         self,
         context: UnifiedContext,
@@ -57,7 +63,7 @@ class VideoRenderFollowUpCapability(BaseCapability):
 
         package_id = str(context.metadata.get("package_id") or "")
         resource_id = str(context.metadata.get("resource_id") or "")
-        package_store = get_resource_package_store()
+        package_store = self._package_store or get_resource_package_store()
         package = await package_store.get(package_id)
         if package is None:
             raise RuntimeError("Video package is unavailable")
@@ -69,7 +75,14 @@ class VideoRenderFollowUpCapability(BaseCapability):
             raise RuntimeError("Video resource is unavailable")
 
         capability = ResourceGenerationCapability(package_store=package_store)
-        await capability._render_one_video(resource, package, context, stream)
+        await capability._render_one_video(
+            resource,
+            package,
+            context,
+            stream,
+            persist_package=False,
+        )
+        await package_store.update_resource(package.package_id, resource)
         render_status = str(
             (resource.format_specific or {}).get("render_status") or "failed"
         )
@@ -97,14 +110,36 @@ class VideoRenderFollowUpCapability(BaseCapability):
         )
 
 
+_FOLLOW_UP_BUILDERS = {
+    "video_render": VideoRenderFollowUpCapability,
+}
+
+
+def validate_follow_up_spec(spec: FollowUpTaskSpec) -> None:
+    """Reject unsupported or malformed internal work before persistence."""
+    if spec.kind not in _FOLLOW_UP_BUILDERS:
+        raise ValueError(f"unsupported follow-up kind: {spec.kind}")
+    if not isinstance(spec.payload, dict):
+        raise ValueError("follow-up payload must be an object")
+    if not isinstance(spec.dedupe_key, str) or not spec.dedupe_key.strip():
+        raise ValueError("follow-up dedupe_key must be non-empty")
+    if len(spec.dedupe_key) > 256:
+        raise ValueError("follow-up dedupe_key exceeds 256 characters")
+    if spec.kind == "video_render":
+        for field in ("package_id", "resource_id"):
+            value = spec.payload.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"video_render follow-up requires {field}")
+
+
 def build_follow_up_capability(task_kind: str) -> BaseCapability | None:
-    if task_kind == "video_render":
-        return VideoRenderFollowUpCapability()
-    return None
+    builder = _FOLLOW_UP_BUILDERS.get(task_kind)
+    return builder() if builder is not None else None
 
 
 __all__ = [
     "FollowUpScheduler",
     "VideoRenderFollowUpCapability",
     "build_follow_up_capability",
+    "validate_follow_up_spec",
 ]

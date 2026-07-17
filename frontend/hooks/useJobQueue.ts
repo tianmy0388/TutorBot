@@ -88,6 +88,9 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
       ]);
       setJobs(listResp.items);
       setTotal(listResp.total);
+      for (const item of listResp.items) {
+        useTutorStore.getState().rehydrateJobFromDetail(item);
+      }
       if (statsResp) setStats(statsResp);
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -240,29 +243,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         try {
           const detail = await getJobDetail(userId || "anonymous", jobId);
           if (detail) {
-            useTutorStore.getState().applyReducerEvent({
-              type: "snapshot",
-              job: {
-                job_id: detail.job_id,
-                capability: detail.capability,
-                status: detail.status,
-                message_preview: detail.message_preview,
-                submitted_at: detail.created_at
-                  ? Date.parse(detail.created_at)
-                  : Date.now(),
-                started_at: detail.started_at
-                  ? Date.parse(detail.started_at)
-                  : null,
-                finished_at: detail.finished_at
-                  ? Date.parse(detail.finished_at)
-                  : null,
-                last_seq: detail.events?.length ?? 0,
-                events: detail.events ?? [],
-                result: (detail.result as any) ?? null,
-                error: detail.error,
-                event_count: detail.event_count,
-              },
-            });
+            useTutorStore.getState().rehydrateJobFromDetail(detail);
           }
         } catch (e) {
           // snapshot fetch is best-effort; the WS replay will still

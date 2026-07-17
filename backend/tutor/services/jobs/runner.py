@@ -100,6 +100,10 @@ class JobRunner:
     SQLite-backed :class:`JobStore`.
     """
 
+    CHILD_LEASE_SECONDS = 60.0
+    CHILD_HEARTBEAT_SECONDS = 20.0
+    CHILD_CLAIM_RETRY_SECONDS = 1.0
+
     def __init__(
         self,
         *,
@@ -108,9 +112,11 @@ class JobRunner:
     ) -> None:
         self.store = job_store or get_job_store()
         self.capabilities = capability_registry or get_capability_registry()
+        self._runner_id = uuid.uuid4().hex
 
         # job_id → asyncio.Task executing _run()
         self._tasks: dict[str, asyncio.Task] = {}
+        self._claim_retry_tasks: dict[str, asyncio.Task] = {}
         # job_id → list[asyncio.Queue[dict | None]] of live subscribers
         self._subscribers: dict[str, list[asyncio.Queue[Any]]] = defaultdict(list)
         # Monotonically increasing broadcast id (used for log scoping)
@@ -294,7 +300,27 @@ class JobRunner:
 
     async def _execute(self, job: Job) -> None:
         """Compatibility wrapper for the single-owner execution path."""
-        await self._run_job(job)
+        heartbeat: asyncio.Task | None = None
+        if job.parent_job_id is not None:
+            heartbeat = asyncio.create_task(self._heartbeat_child_claim(job.job_id))
+        try:
+            await self._run_job(job)
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
+
+    async def _heartbeat_child_claim(self, job_id: str) -> None:
+        while True:
+            await asyncio.sleep(self.CHILD_HEARTBEAT_SECONDS)
+            renewed = await self.store.renew_child_claim(
+                job_id,
+                owner=self._runner_id,
+                lease_seconds=self.CHILD_LEASE_SECONDS,
+            )
+            if not renewed:
+                return
 
     async def _run_job(self, job: Job) -> None:
         """Run one capability and commit exactly one terminal transition."""
@@ -306,16 +332,19 @@ class JobRunner:
         failure_traceback: str | None = None
         timeout_exceeded = False
 
-        cap = self.capabilities.get(job.capability)
-        if cap is None and job.task_kind is not None:
+        cap = None
+        if job.task_kind is not None:
             from tutor.services.jobs.follow_up import build_follow_up_capability
 
             cap = build_follow_up_capability(job.task_kind)
-        await self.store.update_status(
-            job.job_id,
-            status=JobStatus.RUNNING,
-            started_at=datetime.now(UTC),
-        )
+        else:
+            cap = self.capabilities.get(job.capability)
+        if job.parent_job_id is None:
+            await self.store.update_status(
+                job.job_id,
+                status=JobStatus.RUNNING,
+                started_at=datetime.now(UTC),
+            )
         self._running_user[job.job_id] = job.user_id
 
         if cap is None:
@@ -521,10 +550,16 @@ class JobRunner:
 
             # Use the original in-process specs here. Public terminal copies
             # are redacted later by ``_build_contract``.
-            children = await FollowUpScheduler(self.store).enqueue(
-                job.job_id,
-                result.follow_up_tasks,
-            )
+            try:
+                children = await FollowUpScheduler(self.store).enqueue(
+                    job.job_id,
+                    result.follow_up_tasks,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure = exc
+                failure_traceback = "".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                )
         error_log_ref = None
         if failure is not None and not cancelled:
             error_log_ref = self._write_error_log(
@@ -554,16 +589,24 @@ class JobRunner:
             finished_at=finished_at,
             partial_artifacts=partial_resources,
         )
-        await self._write_terminal(
+        terminal_won = await self._write_terminal(
             job,
             contract=contract,
             capability_result=result,
             finished_at=finished_at,
             error_log_ref=error_log_ref,
         )
-        for child in children:
-            if child.status == JobStatus.PENDING:
-                self._schedule(child)
+        if terminal_won and contract.status in {
+            JobTerminalStatus.SUCCEEDED,
+            JobTerminalStatus.PARTIAL,
+        }:
+            for child in children:
+                if child.status == JobStatus.PENDING:
+                    await self._claim_and_schedule(child)
+        elif children:
+            durable_parent = await self.store.get(job.job_id)
+            for child in children:
+                await self._settle_child_for_parent(child, durable_parent)
         if cancelled:
             self._cancel_requested.discard(job.job_id)
 
@@ -726,11 +769,11 @@ class JobRunner:
         capability_result: CapabilityResult | None,
         finished_at: datetime,
         error_log_ref: ArtifactRef | None,
-    ) -> None:
+    ) -> bool:
         """Persist and publish only runner-authored terminal lifecycle events."""
         current = await self.store.get(job.job_id)
         if current is None or current.terminal_event_id is not None:
-            return
+            return False
 
         next_seq = (current.last_seq or 0) + 1
         compatibility_events: list[dict[str, Any]] = []
@@ -824,9 +867,82 @@ class JobRunner:
                 job_id=job.job_id[:12],
             )
 
-            return
+            return False
         for event in terminal_bundle:
             await self._broadcast(job.job_id, event)
+        return True
+
+    async def _settle_child_for_parent(
+        self,
+        child: Job,
+        parent: Job | None,
+    ) -> None:
+        """Terminalize child work whose parent cannot authorize dispatch."""
+        current = await self.store.get(child.job_id)
+        if current is None or current.terminal_event_id is not None:
+            return
+        cancelled = parent is not None and parent.status == JobStatus.CANCELLED
+        await self._finish_job(
+            current,
+            result=None,
+            failure=None if cancelled else RuntimeError("parent did not succeed"),
+            failure_traceback=None if cancelled else "parent did not succeed",
+            partial_resources=[],
+            force_cancelled=cancelled,
+        )
+
+    async def _claim_and_schedule(self, child: Job) -> bool:
+        claimed = await self.store.claim_child(
+            child.job_id,
+            owner=self._runner_id,
+            lease_seconds=self.CHILD_LEASE_SECONDS,
+        )
+        if claimed is None:
+            return False
+        self._schedule(claimed)
+        return True
+
+    def _ensure_child_claim_retry(self, job_id: str) -> None:
+        current = self._claim_retry_tasks.get(job_id)
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(self._retry_child_claim(job_id))
+        self._claim_retry_tasks[job_id] = task
+
+    async def _retry_child_claim(self, job_id: str) -> None:
+        """Revisit an old live lease until it expires or becomes terminal."""
+        try:
+            while True:
+                await asyncio.sleep(self.CHILD_CLAIM_RETRY_SECONDS)
+                child = await self.store.get(job_id)
+                if (
+                    child is None
+                    or child.parent_job_id is None
+                    or child.status
+                    not in {JobStatus.PENDING, JobStatus.RUNNING}
+                ):
+                    return
+                parent = await self.store.get(child.parent_job_id)
+                if parent is None or parent.status in {
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                }:
+                    await self._settle_child_for_parent(child, parent)
+                    return
+                if parent.status not in {
+                    JobStatus.SUCCEEDED,
+                    JobStatus.PARTIAL,
+                }:
+                    continue
+                current = self._tasks.get(job_id)
+                if current is not None and not current.done():
+                    return
+                if await self._claim_and_schedule(child):
+                    return
+        finally:
+            current = self._claim_retry_tasks.get(job_id)
+            if current is asyncio.current_task():
+                self._claim_retry_tasks.pop(job_id, None)
 
     @staticmethod
     def _runner_event(
@@ -976,6 +1092,7 @@ class JobRunner:
                 error_log_ref=self._write_error_log(job.job_id, error_msg),
             )
             count += 1
+        await self.resume_pending()
         if count:
             # This is normal on dev restart — the previous process's
             # asyncio tasks are gone and the UI needs terminal states.
@@ -998,11 +1115,22 @@ class JobRunner:
                 JobStatus.RUNNING,
             }:
                 continue
+            parent = await self.store.get(job.parent_job_id)
+            if parent is None or parent.status in {
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+            }:
+                await self._settle_child_for_parent(job, parent)
+                continue
+            if parent.status not in {JobStatus.SUCCEEDED, JobStatus.PARTIAL}:
+                continue
             current = self._tasks.get(job.job_id)
             if current is not None and not current.done():
                 continue
-            self._schedule(job)
-            resumed += 1
+            if await self._claim_and_schedule(job):
+                resumed += 1
+            else:
+                self._ensure_child_claim_retry(job.job_id)
         return resumed
 
 

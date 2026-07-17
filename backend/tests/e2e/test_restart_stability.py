@@ -69,7 +69,10 @@ class _RestartCapabilities:
 
 
 @pytest.mark.asyncio
-async def test_queued_follow_up_child_resumes_after_fresh_runner(tmp_path) -> None:
+async def test_queued_follow_up_child_resumes_after_fresh_runner(
+    tmp_path,
+    monkeypatch,
+) -> None:
     db_path = tmp_path / "restart-child.db"
     first_store = JobStore(db_path)
     await first_store.init()
@@ -99,6 +102,13 @@ async def test_queued_follow_up_child_resumes_after_fresh_runner(tmp_path) -> No
     runner = JobRunner(
         job_store=fresh_store,
         capability_registry=_RestartCapabilities(),  # type: ignore[arg-type]
+    )
+    from tutor.services.jobs import follow_up as follow_up_module
+
+    monkeypatch.setattr(
+        follow_up_module,
+        "build_follow_up_capability",
+        lambda kind: _RestartedVideoCapability(),
     )
     assert await runner.resume_pending() == 1
     for _ in range(100):

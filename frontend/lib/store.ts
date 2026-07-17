@@ -217,6 +217,8 @@ export interface TutorState {
     event_count?: number;
     result?: unknown;
     error?: string | null;
+    children?: import("./types").JobChildSummary[];
+    background_status?: import("./types").JobStatus | null;
   }) => void;
 }
 
@@ -700,6 +702,8 @@ export const useTutorStore = create<TutorState>()(
               result: (detail.result as any) ?? null,
               error: detail.error,
               event_count: detail.event_count,
+              children: detail.children ?? [],
+              background_status: detail.background_status ?? null,
             },
           },
         );

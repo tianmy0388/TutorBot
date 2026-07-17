@@ -1,0 +1,147 @@
+import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const apiMocks = vi.hoisted(() => ({
+  listJobs: vi.fn(),
+  getJobStats: vi.fn(),
+  getJobDetail: vi.fn(),
+  cancelJob: vi.fn(),
+  deleteJob: vi.fn(),
+}));
+
+vi.mock("@/lib/api", () => apiMocks);
+vi.mock("@/lib/ws", () => ({
+  WsClient: class {},
+  startJobMessage: vi.fn(),
+}));
+
+import { VideoViewer } from "@/components/resources/VideoViewer";
+import { useJobQueue } from "@/hooks/useJobQueue";
+import { useTutorStore } from "@/lib/store";
+import type { JobStatus, Resource } from "@/lib/types";
+
+const resource = {
+  resource_id: "video-live",
+  type: "video",
+  title: "实时视频",
+  content: "",
+  format_specific: { render_status: "pending" },
+  difficulty: 2,
+  estimated_minutes: 5,
+  prerequisites: [],
+  generated_by: [],
+  confidence_score: 0.8,
+  topic: "并发",
+  tags: [],
+  created_at: "2026-07-17T00:00:00Z",
+  metadata: { package_id: "pkg-live" },
+} satisfies Resource;
+
+function job(status: JobStatus) {
+  return {
+    job_id: "parent-live",
+    user_id: "local-user",
+    session_id: "current-page",
+    capability: "resource_generation",
+    status: "succeeded" as const,
+    message_preview: "video",
+    language: "zh",
+    event_count: 1,
+    created_at: "2026-07-17T00:00:00Z",
+    started_at: "2026-07-17T00:00:01Z",
+    finished_at: "2026-07-17T00:00:02Z",
+    duration_seconds: 1,
+    has_result: true,
+    error: null,
+    background_status: status,
+    children: [
+      {
+        job_id: "child-live",
+        capability: "video_render",
+        parent_job_id: "parent-live",
+        task_kind: "video_render",
+        dedupe_key: "video:pkg-live:video-live",
+        status,
+        metadata: { package_id: "pkg-live", resource_id: "video-live" },
+      },
+    ],
+  };
+}
+
+async function flushPromises() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  apiMocks.getJobStats.mockResolvedValue(null);
+  useTutorStore.setState({ jobsById: {}, jobOrder: [], messages: [] });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.clearAllMocks();
+});
+
+describe("useJobQueue durable child refresh", () => {
+  it.each([
+    ["failed" as const, "渲染失败"],
+    ["succeeded" as const, "渲染完成"],
+  ])(
+    "hydrates a %s child on the 5s current-page poll without a page reload",
+    async (terminalStatus, terminalText) => {
+      useTutorStore.getState().applyReducerEvent({
+        type: "snapshot",
+        job: {
+          job_id: "parent-live",
+          capability: "resource_generation",
+          status: "succeeded",
+          message_preview: "video",
+          submitted_at: Date.parse("2026-07-17T00:00:00Z"),
+          started_at: null,
+          finished_at: null,
+          last_seq: 0,
+          events: [],
+          result: null,
+          error: null,
+          event_count: 0,
+          background_status: "pending",
+          children: job("pending").children,
+        },
+      });
+      apiMocks.listJobs
+        .mockResolvedValueOnce({ items: [job("pending")], total: 1 })
+        .mockResolvedValueOnce({ items: [job(terminalStatus)], total: 1 });
+
+      renderHook(() => useJobQueue("local-user"));
+      render(<VideoViewer resource={resource} />);
+      await act(flushPromises);
+      expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+        await flushPromises();
+      });
+
+      expect(screen.getByText(terminalText)).toBeInTheDocument();
+      expect(screen.queryByText("视频渲染中…")).not.toBeInTheDocument();
+      expect(
+        useTutorStore.getState().jobsById["parent-live"].children?.[0].status,
+      ).toBe(terminalStatus);
+    },
+  );
+
+  it("passes detail children and background status through store rehydration", () => {
+    useTutorStore.getState().rehydrateJobFromDetail({
+      ...job("failed"),
+      events: [],
+      result: null,
+    });
+
+    const hydrated = useTutorStore.getState().jobsById["parent-live"];
+    expect(hydrated.children?.[0].status).toBe("failed");
+    expect(hydrated.background_status).toBe("failed");
+  });
+});

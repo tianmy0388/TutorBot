@@ -737,6 +737,8 @@ class ResourceGenerationCapability(BaseCapability):
         package: ResourcePackage,
         context: UnifiedContext,
         stream: StreamBus,
+        *,
+        persist_package: bool = True,
     ) -> None:
         """Render a single video, updating its ``format_specific`` and
         emitting a ``RESOURCE`` event when done.
@@ -840,14 +842,15 @@ class ResourceGenerationCapability(BaseCapability):
                 )
             # Re-save the package so the updated format_specific is
             # persisted for reconnection / reload.
-            try:
-                await self._store.save(package, user_id=context.user_id)
-            except Exception:  # noqa: BLE001
-                log_degraded(
-                    code="VIDEO_RENDER_PERSIST_FAILED",
-                    source="resource_capability",
-                    stage="video_rendering",
-                )
+            if persist_package:
+                try:
+                    await self._store.save(package, user_id=context.user_id)
+                except Exception:  # noqa: BLE001
+                    log_degraded(
+                        code="VIDEO_RENDER_PERSIST_FAILED",
+                        source="resource_capability",
+                        stage="video_rendering",
+                    )
 
     # ------------------------------------------------------------------
     # Resource planning

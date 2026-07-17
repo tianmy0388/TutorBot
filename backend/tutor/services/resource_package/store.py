@@ -41,8 +41,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Iterable
-from datetime import datetime, timezone
-from functools import lru_cache
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -59,6 +58,7 @@ from sqlalchemy import (
     Integer,
     String,
     select,
+    text,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -215,18 +215,18 @@ class ResourcePackageStore:
         store = self
 
         class _Ctx:
-            async def __aenter__(self_):
-                self_._s = store._sessionmaker()  # type: ignore[union-attr]
-                return self_._s
+            async def __aenter__(self):
+                self._s = store._sessionmaker()  # type: ignore[union-attr]
+                return self._s
 
-            async def __aexit__(self_, exc_type, exc, tb):
+            async def __aexit__(self, exc_type, exc, tb):
                 try:
                     if exc_type is None:
-                        await self_._s.commit()
+                        await self._s.commit()
                     else:
-                        await self_._s.rollback()
+                        await self._s.rollback()
                 finally:
-                    await self_._s.close()
+                    await self._s.close()
 
         return _Ctx()
 
@@ -249,59 +249,58 @@ class ResourcePackageStore:
         package.metadata.setdefault("user_id", uid)
         summary = package.summary()
 
-        async with self._write_lock:
-            async with self._with_session() as session:
-                # Wipe any existing package with the same id (cascade kills
-                # children).
-                existing = await session.execute(
-                    select(PackageRow).where(
-                        PackageRow.package_id == package.package_id
+        async with self._write_lock, self._with_session() as session:
+            # Wipe any existing package with the same id (cascade kills
+            # children).
+            existing = await session.execute(
+                select(PackageRow).where(
+                    PackageRow.package_id == package.package_id
+                )
+            )
+            existing_row = existing.scalar_one_or_none()
+            if existing_row is not None:
+                await session.delete(existing_row)
+                await session.flush()
+
+            pkg_row = PackageRow(
+                package_id=package.package_id,
+                user_id=uid,
+                topic=package.topic or "",
+                resource_count=summary["resource_count"],
+                total_minutes=summary["total_minutes"],
+                avg_confidence=summary["avg_confidence"],
+                generated_by=list(package.generated_by or []),
+                target_profile_snapshot=dict(package.target_profile_snapshot or {}),
+                learning_path_summary=dict(package.learning_path_summary or {}),
+                package_metadata=dict(package.metadata or {}),
+                created_at=package.created_at,
+            )
+            session.add(pkg_row)
+
+            for r in package.resources:
+                format_specific = _portable_format_specific(
+                    r.format_specific, get_settings().data_dir
+                )
+                session.add(
+                    ResourceRow(
+                        resource_id=r.resource_id,
+                        package_id=package.package_id,
+                        user_id=uid,
+                        type=r.type.value,
+                        title=r.title,
+                        content=r.content or "",
+                        format_specific=format_specific,
+                        difficulty=r.difficulty,
+                        estimated_minutes=r.estimated_minutes,
+                        prerequisites=list(r.prerequisites or []),
+                        generated_by=list(r.generated_by or []),
+                        confidence_score=float(r.confidence_score),
+                        topic=r.topic or "",
+                        tags=list(r.tags or []),
+                        resource_metadata=dict(r.metadata or {}),
+                        created_at=r.created_at,
                     )
                 )
-                existing_row = existing.scalar_one_or_none()
-                if existing_row is not None:
-                    await session.delete(existing_row)
-                    await session.flush()
-
-                pkg_row = PackageRow(
-                    package_id=package.package_id,
-                    user_id=uid,
-                    topic=package.topic or "",
-                    resource_count=summary["resource_count"],
-                    total_minutes=summary["total_minutes"],
-                    avg_confidence=summary["avg_confidence"],
-                    generated_by=list(package.generated_by or []),
-                    target_profile_snapshot=dict(package.target_profile_snapshot or {}),
-                    learning_path_summary=dict(package.learning_path_summary or {}),
-                    package_metadata=dict(package.metadata or {}),
-                    created_at=package.created_at,
-                )
-                session.add(pkg_row)
-
-                for r in package.resources:
-                    format_specific = _portable_format_specific(
-                        r.format_specific, get_settings().data_dir
-                    )
-                    session.add(
-                        ResourceRow(
-                            resource_id=r.resource_id,
-                            package_id=package.package_id,
-                            user_id=uid,
-                            type=r.type.value,
-                            title=r.title,
-                            content=r.content or "",
-                            format_specific=format_specific,
-                            difficulty=r.difficulty,
-                            estimated_minutes=r.estimated_minutes,
-                            prerequisites=list(r.prerequisites or []),
-                            generated_by=list(r.generated_by or []),
-                            confidence_score=float(r.confidence_score),
-                            topic=r.topic or "",
-                            tags=list(r.tags or []),
-                            resource_metadata=dict(r.metadata or {}),
-                            created_at=r.created_at,
-                        )
-                    )
 
         logger.info(
             f"ResourcePackageStore.save pkg={package.package_id[:12]}… "
@@ -319,38 +318,76 @@ class ResourcePackageStore:
             count += 1
         return count
 
+    async def update_resource(
+        self,
+        package_id: str,
+        resource: Resource,
+    ) -> Resource:
+        """Atomically replace one resource row without rewriting siblings."""
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(ResourceRow).where(
+                        ResourceRow.package_id == package_id,
+                        ResourceRow.resource_id == resource.resource_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise KeyError(
+                    f"resource not found: {package_id}/{resource.resource_id}"
+                )
+            row.type = resource.type.value
+            row.title = resource.title
+            row.content = resource.content or ""
+            row.format_specific = _portable_format_specific(
+                resource.format_specific,
+                get_settings().data_dir,
+            )
+            row.difficulty = resource.difficulty
+            row.estimated_minutes = resource.estimated_minutes
+            row.prerequisites = list(resource.prerequisites or [])
+            row.generated_by = list(resource.generated_by or [])
+            row.confidence_score = float(resource.confidence_score)
+            row.topic = resource.topic or ""
+            row.tags = list(resource.tags or [])
+            row.resource_metadata = dict(resource.metadata or {})
+            row.created_at = resource.created_at
+        return resource
+
     async def delete(self, package_id: str) -> bool:
         """Delete a package by id. Returns True if a row was removed."""
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                row = (
-                    await session.execute(
-                        select(PackageRow).where(
-                            PackageRow.package_id == package_id
-                        )
+        async with self._write_lock, self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(PackageRow).where(
+                        PackageRow.package_id == package_id
                     )
-                ).scalar_one_or_none()
-                if row is None:
-                    return False
-                await session.delete(row)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            await session.delete(row)
         return True
 
     async def delete_user(self, user_id: str) -> int:
         """Delete all packages for a user. Returns count removed."""
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                rows = (
-                    await session.execute(
-                        select(PackageRow).where(PackageRow.user_id == user_id)
-                    )
-                ).scalars().all()
-                count = len(rows)
-                for r in rows:
-                    await session.delete(r)
+        async with self._write_lock, self._with_session() as session:
+            rows = (
+                await session.execute(
+                    select(PackageRow).where(PackageRow.user_id == user_id)
+                )
+            ).scalars().all()
+            count = len(rows)
+            for r in rows:
+                await session.delete(r)
         return count
 
     # ---- reads ------------------------------------------------------------
