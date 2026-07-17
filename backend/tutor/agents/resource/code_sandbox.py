@@ -38,7 +38,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -46,14 +45,15 @@ from typing import Any
 from loguru import logger
 
 from tutor.agents.base_agent import BaseAgent
-from tutor.core.context import UnifiedContext
-from tutor.core.stream_bus import StreamBus
-from tutor.services.artifacts import to_artifact_key
-from tutor.services.config.settings import get_settings
 from tutor.agents.resource.manim_video import (
     _extract_first_python_block,
     _normalize_code_newlines,
 )
+from tutor.core.context import UnifiedContext
+from tutor.core.redaction import public_failure, redact_sensitive, redact_text
+from tutor.core.stream_bus import StreamBus
+from tutor.services.artifacts import to_artifact_key
+from tutor.services.config.settings import get_settings
 from tutor.services.resource_package.schema import (
     ArtifactRef,
     CodeResource,
@@ -61,7 +61,6 @@ from tutor.services.resource_package.schema import (
     ResourceType,
     build_resource,
 )
-
 
 CODE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -211,11 +210,17 @@ class CodeSandboxAgent(BaseAgent):
                 f"## 诊断\n\nLLM 未能为此主题生成有效的代码示例。\n\n"
                 f"**建议**：重新提交请求或简化主题描述。\n"
             )
+            failed_payload = payload.model_dump()
+            failed_payload["failure"] = public_failure(
+                "CODE_EMPTY_LLM_OUTPUT",
+                "Code generation failed",
+                retryable=True,
+            )
             return build_resource(
                 type=ResourceType.CODE,
                 title=f"{title} — 代码生成失败",
                 content=markdown,
-                format_specific=payload.model_dump(),
+                format_specific=failed_payload,
                 difficulty=difficulty,
                 estimated_minutes=0,
                 prerequisites=[],
@@ -243,6 +248,12 @@ class CodeSandboxAgent(BaseAgent):
                 interpreter=interpreter,
                 timeout=configured_timeout,
             )
+
+        # Subprocess diagnostics are untrusted strings. Preserve useful
+        # educational errors while removing credential-shaped fragments.
+        stdout = redact_text(stdout)
+        stderr = redact_text(stderr)
+        dependency_versions = redact_sensitive(dependency_versions)
 
         payload = CodeResource(
             language=language,
@@ -285,17 +296,26 @@ class CodeSandboxAgent(BaseAgent):
             }.get(error_code, error_code)
             markdown += f"\n**错误类型**：{pretty}\n"
         if artifacts:
-            markdown += f"\n## 产物\n\n"
+            markdown += "\n## 产物\n\n"
             for art in artifacts:
                 markdown += f"- `{art['name']}` ({art['kind']})\n"
 
         confidence = 0.8 if execution_status == "success" else 0.6
 
+        format_specific = payload.model_dump()
+        if execution_status in {"failed", "timeout"}:
+            format_specific["failure"] = public_failure(
+                error_code or "CODE_EXECUTION_FAILED",
+                "Code execution failed",
+                retryable=execution_status == "timeout"
+                or error_code == "RUNTIME_DEPENDENCY_MISSING",
+            )
+
         return build_resource(
             type=ResourceType.CODE,
             title=title,
             content=markdown,
-            format_specific=payload.model_dump(),
+            format_specific=format_specific,
             difficulty=difficulty,
             estimated_minutes=5,
             prerequisites=[],
@@ -403,24 +423,24 @@ def _safe_run_python(
             [],
             duration,
         )
-    except FileNotFoundError as exc:
+    except FileNotFoundError:
         # Interpreter binary not on PATH.
         duration = time.monotonic() - started
         return (
             "failed",
             "",
-            f"[interpreter not found: {interpreter!r} ({exc})]",
+            "[configured interpreter unavailable]",
             "RUNTIME_DEPENDENCY_MISSING",
             deps,
             [],
             duration,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         duration = time.monotonic() - started
         return (
             "failed",
             "",
-            f"[execution error: {exc}]",
+            "[code execution failed]",
             "CODE_EXECUTION_FAILED",
             deps,
             [],
@@ -516,13 +536,13 @@ def _probe_dependency_versions(interpreter: str) -> dict[str, str]:
             "python": "unknown",
             "probe_error": f"interpreter not found: {interpreter!r}",
         }
-    except Exception as exc:  # noqa: BLE001
-        return {"python": "unknown", "probe_error": f"{type(exc).__name__}: {exc}"}
+    except Exception:  # noqa: BLE001
+        return {"python": "unknown", "probe_error": "DEPENDENCY_PROBE_FAILED"}
     if proc.returncode != 0:
         return {
             "python": "unknown",
             "probe_error": f"returncode={proc.returncode}",
-            "probe_stderr": (proc.stderr or "")[:500],
+            "probe_stderr": redact_text((proc.stderr or "")[:500]),
         }
     last = (proc.stdout or "").strip().splitlines()[-1] if proc.stdout else ""
     try:
@@ -532,7 +552,7 @@ def _probe_dependency_versions(interpreter: str) -> dict[str, str]:
         return {
             "python": "unknown",
             "probe_error": "stdout parse failed",
-            "probe_stdout": (proc.stdout or "")[:200],
+            "probe_stdout": redact_text((proc.stdout or "")[:200]),
         }
 
 

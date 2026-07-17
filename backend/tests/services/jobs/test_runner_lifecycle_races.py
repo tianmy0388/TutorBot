@@ -119,6 +119,69 @@ async def test_saturated_capability_stream_drains_and_terminalizes(
 
 
 @pytest.mark.asyncio
+async def test_allowed_resource_events_are_recursively_redacted(store: JobStore) -> None:
+    secret = "SECRET_TOKEN_RUNNER_RESOURCE_d43a"
+
+    class EmitsSensitiveResource:
+        async def run(self, context: UnifiedContext, bus: StreamBus) -> CapabilityResult:
+            await bus.resource(
+                {
+                    "resource_id": "resource-1",
+                    "type": "document",
+                    "title": "Tokenization lesson",
+                    "content": "A normal educational token is a unit of text.",
+                    "format_specific": {
+                        "failure": {
+                            "code": "DOCUMENT_GENERATION_FAILED",
+                            "message": "Document generation failed",
+                            "retryable": True,
+                        }
+                    },
+                    "metadata": {
+                        "api_key": secret,
+                        "nested": {
+                            "authorization": "Bearer bearer-runner-secret",
+                            "private_reasoning": "hidden chain",
+                            "note": f"provider returned token={secret}",
+                        },
+                    },
+                },
+                source="sensitive-capability",
+                metadata={
+                    "password": "runner-password",
+                    "source_code": "print('private')",
+                },
+            )
+            return CapabilityResult(assistant_message="ok")
+
+    runner = JobRunner(
+        job_store=store,
+        capability_registry=_Capabilities(EmitsSensitiveResource()),  # type: ignore[arg-type]
+    )
+    job = await runner.submit(JobSubmit(capability="tutoring"))
+    stored = await _wait_status(store, job.job_id, {JobStatus.SUCCEEDED})
+
+    public = json.dumps(stored.to_full_dict(), ensure_ascii=False)
+    assert secret not in public
+    assert "bearer-runner-secret" not in public
+    assert "runner-password" not in public
+    assert "hidden chain" not in public
+    assert "print('private')" not in public
+    assert "[REDACTED]" in public
+    assert "DOCUMENT_GENERATION_FAILED" in public
+    assert "A normal educational token is a unit of text." in public
+    contract = JobResultContract.model_validate(stored.result)
+    partial = next(
+        artifact
+        for artifact in contract.partial_artifacts
+        if artifact.resource_id == "resource-1"
+    )
+    assert partial.status == "failed"
+    assert partial.error is not None
+    assert partial.error.code == "DOCUMENT_GENERATION_FAILED"
+
+
+@pytest.mark.asyncio
 async def test_cancel_commits_terminal_before_return_and_replays_it(store: JobStore) -> None:
     started = asyncio.Event()
 

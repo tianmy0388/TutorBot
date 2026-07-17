@@ -26,6 +26,7 @@ from typing import Any
 from loguru import logger
 
 from tutor.agents.base_agent import BaseAgent
+from tutor.core.redaction import public_failure
 from tutor.core.stream_bus import StreamBus
 from tutor.services.ppt import get_ppt_service
 from tutor.services.resource_package.schema import (
@@ -88,19 +89,26 @@ class PPTGeneratorAgent(BaseAgent):
                 resource_id=resource.resource_id,
                 title=topic,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(f"PPTGeneratorAgent failed for topic={topic!r}: {exc!r}")
+        except Exception:  # noqa: BLE001
+            failure = public_failure(
+                "PPT_RENDER_FAILED", "PPT rendering failed", retryable=True
+            )
+            logger.error("PPT_RENDER_FAILED agent={}", self.agent_name)
             if stream is not None:
                 await stream.error(
-                    f"PPT 渲染失败: {exc}", source=self.agent_name
+                    "PPT rendering failed",
+                    source=self.agent_name,
+                    metadata=failure,
                 )
-            # Return a degraded resource with an error message in
-            # format_specific so the UI can show something useful.
+            # A failed renderer did not create a usable educational resource.
+            # Keep the typed diagnostic for trace/retry UI, but never retain
+            # the source document in this failed artifact.
+            resource.content = "PPT rendering failed. Please retry."
             resource.format_specific = {
                 "slide_count": 0,
                 "pptx_path": None,
                 "slide_titles": [],
-                "error": str(exc),
+                "failure": failure,
             }
             resource.confidence_score = 0.0
             return resource
@@ -108,8 +116,8 @@ class PPTGeneratorAgent(BaseAgent):
         # Populate format_specific from the on-disk artifact.
         try:
             slide_titles, slide_count = _peek_pptx(pptx_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"PPT peek failed (file still usable): {exc!r}")
+        except Exception:  # noqa: BLE001
+            logger.warning("PPT_INSPECTION_FAILED file_usable=true")
             slide_titles, slide_count = [], 0
 
         payload = PPTResource(

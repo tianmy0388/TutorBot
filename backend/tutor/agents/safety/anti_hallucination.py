@@ -28,6 +28,7 @@ from loguru import logger
 from tutor.agents.base_agent import BaseAgent
 from tutor.agents.safety.content_safety import ContentSafetyAgent, SafetyReport
 from tutor.core.context import UnifiedContext
+from tutor.core.redaction import redact_sensitive
 from tutor.core.stream_bus import StreamBus
 from tutor.services.fact_check.verifier import (
     ClaimVerdict,
@@ -37,13 +38,12 @@ from tutor.services.fact_check.verifier import (
 )
 from tutor.services.llm.base import LLMMessage, LLMRequest
 
-
 # ---------------------------------------------------------------------------
 # Output model
 # ---------------------------------------------------------------------------
 
 
-class OverallVerdict(str, Enum):
+class OverallVerdict(str, Enum):  # noqa: UP042 - persisted enum compatibility
     """Top-level safety / factuality verdict."""
 
     SAFE = "safe"               # everything checks out
@@ -64,14 +64,14 @@ class AntiHallucinationReport:
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        return redact_sensitive({
             "overall_verdict": self.overall_verdict.value,
             "overall_confidence": round(self.overall_confidence, 3),
             "fact_check": self.fact_check.to_dict() if self.fact_check else None,
             "safety": self.safety.to_dict() if self.safety else None,
             "consistency_issues": list(self.consistency_issues),
             "notes": self.notes,
-        }
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -134,8 +134,8 @@ class AntiHallucinationAgent(BaseAgent):
                 topic=topic,
                 source_documents=source_documents,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(f"FactCheck failed: {exc!r}")
+        except Exception:  # noqa: BLE001
+            logger.warning("ANTI_HALLUCINATION_FACT_CHECK_FAILED policy=unverified")
 
         # ------------------------------------------------------------------
         # Stage 2: Content safety
@@ -144,17 +144,20 @@ class AntiHallucinationAgent(BaseAgent):
             report.safety = await self.content_safety.process(
                 context, stream=stream, content=resource_content
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(f"ContentSafety failed: {exc!r}")
-            report.safety = SafetyReport(is_safe=True, notes=f"safety check failed: {exc}")
+        except Exception:  # noqa: BLE001
+            logger.warning("ANTI_HALLUCINATION_CONTENT_SAFETY_FAILED policy=failed_open")
+            report.safety = SafetyReport(
+                is_safe=True,
+                notes="ANTI_HALLUCINATION_CONTENT_SAFETY_FAILED: safety check unavailable",
+            )
 
         # ------------------------------------------------------------------
         # Stage 3: Consistency (LLM call)
         # ------------------------------------------------------------------
         try:
             report.consistency_issues = await self._check_consistency(resource_content)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"Consistency check failed: {exc!r}")
+        except Exception:  # noqa: BLE001
+            logger.warning("ANTI_HALLUCINATION_CONSISTENCY_FAILED")
             report.consistency_issues = []
 
         # ------------------------------------------------------------------
@@ -172,7 +175,7 @@ class AntiHallucinationAgent(BaseAgent):
             fc = report.fact_check
             if fc.overall_verdict == ClaimVerdict.REFUTED:
                 report.overall_verdict = OverallVerdict.UNSAFE
-                report.notes = f"refuted claims: {fc.notes}"
+                report.notes = "refuted claims detected"
                 report.overall_confidence = 0.3
                 return report
             report.overall_confidence = fc.overall_confidence
@@ -194,7 +197,7 @@ class AntiHallucinationAgent(BaseAgent):
 
         if not report.notes:
             report.notes = (
-                f"fact_check: {report.fact_check.notes if report.fact_check else 'n/a'}, "
+                f"fact_check: {'completed' if report.fact_check else 'unavailable'}, "
                 f"safety: {'safe' if report.safety and report.safety.is_safe else 'unsafe'}, "
                 f"consistency_issues: {len(report.consistency_issues)}"
             )
@@ -235,8 +238,8 @@ class AntiHallucinationAgent(BaseAgent):
         )
         try:
             resp = await self.resolved_llm.call(request)
-        except Exception as exc:
-            logger.warning(f"Consistency LLM call failed: {exc!r}")
+        except Exception:
+            logger.warning("ANTI_HALLUCINATION_CONSISTENCY_LLM_FAILED")
             return []
 
         data = self.parse_json_response(resp.content, fallback={})

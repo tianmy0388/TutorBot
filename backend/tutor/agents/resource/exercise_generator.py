@@ -20,6 +20,8 @@ import json
 from collections import Counter
 from typing import Any
 
+from loguru import logger
+
 from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
@@ -31,7 +33,6 @@ from tutor.services.resource_package.schema import (
     ResourceType,
     build_resource,
 )
-
 
 EXERCISE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -167,8 +168,8 @@ class ExerciseGeneratorAgent(BaseAgent):
                     estimated_seconds=int(q.get("estimated_seconds") or 60),
                 )
                 questions.append(eq)
-            except Exception as exc:
-                logger.warning(f"Skipping malformed exercise: {exc!r}")
+            except Exception:
+                logger.warning("EXERCISE_ITEM_INVALID skipped=true")
                 continue
 
         if not questions:

@@ -371,13 +371,28 @@ class JobRunner:
                 await self.store.append_event(job.job_id, evt_dict, evt.seq)
                 await self._broadcast(job.job_id, evt_dict)
                 if event_type == "resource":
-                    md = evt.metadata or {}
+                    # Partial-artifact projection must consume the already
+                    # redacted public event, never the original agent object.
+                    md = evt_dict.get("metadata") or {}
+                    resource_payload = md.get("resource")
+                    format_specific = (
+                        resource_payload.get("format_specific")
+                        if isinstance(resource_payload, dict)
+                        else None
+                    )
+                    resource_failure = (
+                        format_specific.get("failure")
+                        if isinstance(format_specific, dict)
+                        else None
+                    )
+                    failed = isinstance(resource_failure, dict)
                     partial_resources.append(
                         {
                             "resource_type": str(md.get("resource_type") or "unknown"),
-                            "status": "succeeded",
+                            "status": "failed" if failed else "succeeded",
                             "resource_id": md.get("resource_id"),
                             "title": md.get("title"),
+                            "error": resource_failure if failed else None,
                             "metadata": {"source_event_seq": evt.seq},
                         }
                     )
@@ -429,20 +444,23 @@ class JobRunner:
     @staticmethod
     def _normalize_capability_event(evt: Any, event_type: str) -> dict[str, Any]:
         """Project capability output onto the stable public event vocabulary."""
+        from tutor.core.redaction import redact_sensitive
+
         event = evt.to_dict()
         allowed = {"progress", "stage_start", "stage_end", "resource", "sources"}
-        if event_type in allowed:
-            return event
-        metadata = dict(event.get("metadata") or {})
-        metadata.update(
-            {
-                "original_event_type": event_type,
-                "message": str(event.get("content") or ""),
-            }
-        )
-        event["type"] = "progress"
-        event["metadata"] = metadata
-        return event
+        if event_type not in allowed:
+            metadata = dict(event.get("metadata") or {})
+            metadata.update(
+                {
+                    "original_event_type": event_type,
+                    "message": str(event.get("content") or ""),
+                }
+            )
+            event["type"] = "progress"
+            event["metadata"] = metadata
+        # Defense in depth applies equally to already-allowed resource/source
+        # events and to normalized legacy events. Never log the original.
+        return redact_sensitive(event)
 
     async def _finish_job(
         self,
@@ -990,16 +1008,11 @@ def _materialize_partial_artifacts(
                 # Already materialised an entry for this resource_id —
                 # skip the duplicate. The frontend dedups by
                 # resource_id, so a 2nd occurrence carries no new info.
-                logger.debug(
-                    f"dedup: skipping duplicate partial artifact for "
-                    f"resource_id={rid}"
-                )
+                logger.debug("JOB_PARTIAL_ARTIFACT_DUPLICATE skipped=true")
                 continue
             seen_ids.add(rid)
         try:
             out.append(ArtifactResult.model_validate(entry))
         except ValidationError:
-            logger.debug(
-                f"Skipping malformed partial artifact: {entry!r}"
-            )
+            logger.debug("JOB_PARTIAL_ARTIFACT_INVALID skipped=true")
     return out

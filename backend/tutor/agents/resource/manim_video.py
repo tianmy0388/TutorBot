@@ -32,6 +32,7 @@ from loguru import logger
 
 from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
+from tutor.core.redaction import public_failure
 from tutor.core.stream_bus import StreamBus
 from tutor.services.resource_package.schema import (
     Resource,
@@ -39,7 +40,6 @@ from tutor.services.resource_package.schema import (
     VideoResource,
     build_resource,
 )
-
 
 STORYBOARD_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -202,7 +202,7 @@ class ManimVideoAgent(BaseAgent):
         if stream is not None:
             async with stream.stage("video_code_generation", source=self.agent_name):
                 await stream.thinking(
-                    f"将剧本翻译为 Manim Python 代码 (stage 2/2)...",
+                    "将剧本翻译为 Manim Python 代码 (stage 2/2)...",
                     source=self.agent_name,
                     stage="video_code_generation",
                 )
@@ -228,12 +228,12 @@ class ManimVideoAgent(BaseAgent):
                     f"**诊断**：代码生成阶段因 ``max_tokens`` 限制被截断（finish_reason=length）。\n\n"
                     f"**建议**：简化主题描述或拆分为多个子主题。\n"
                 ),
-                format_specific=VideoResource(
-                    manim_code=code,
+                format_specific=_failed_video_payload(VideoResource(
+                    manim_code="",
                     scene_class="",
                     render_status="failed",
                     render_error="codegen_truncated_by_max_tokens",
-                ).model_dump(),
+                ), "VIDEO_CODEGEN_TRUNCATED", "Video code generation was truncated"),
                 difficulty=1,
                 estimated_minutes=0,
                 prerequisites=[],
@@ -265,7 +265,7 @@ class ManimVideoAgent(BaseAgent):
                     f"**诊断**：{storyboard.get('_error', '代码生成阶段未返回有效 Python') if isinstance(storyboard, dict) else '故事板为空'}\n\n"
                     f"**建议**：重新提交请求或简化主题描述。\n"
                 ),
-                format_specific=VideoResource(
+                format_specific=_failed_video_payload(VideoResource(
                     manim_code="",
                     scene_class="",
                     render_status="failed",
@@ -274,7 +274,7 @@ class ManimVideoAgent(BaseAgent):
                         if isinstance(storyboard, dict)
                         else "LLM codegen returned empty/invalid code"
                     ),
-                ).model_dump(),
+                ), "VIDEO_CODEGEN_FAILED", "Video code generation failed"),
                 difficulty=1,
                 estimated_minutes=0,
                 prerequisites=[],
@@ -296,12 +296,12 @@ class ManimVideoAgent(BaseAgent):
                 type=ResourceType.VIDEO,
                 title=f"{topic} — 视频生成失败",
                 content=f"# {topic} — 视频生成失败\n\nLLM 输出无效，生成了占位代码。\n",
-                format_specific=VideoResource(
-                    manim_code=code,
+                format_specific=_failed_video_payload(VideoResource(
+                    manim_code="",
                     scene_class="MainScene",
                     render_status="failed",
                     render_error="LLM output contains fallback/placeholder markers",
-                ).model_dump(),
+                ), "VIDEO_CODEGEN_INVALID", "Video code generation failed"),
                 difficulty=1,
                 estimated_minutes=0,
                 prerequisites=[],
@@ -322,7 +322,7 @@ class ManimVideoAgent(BaseAgent):
         if syntax_error:
             logger.warning(
                 f"manim_video: generated code has SyntaxError "
-                f"(topic={topic!r}, len={len(code)}): {syntax_error}"
+                f"(topic={topic!r}, len={len(code)})"
             )
             return build_resource(
                 type=ResourceType.VIDEO,
@@ -330,15 +330,14 @@ class ManimVideoAgent(BaseAgent):
                 content=(
                     f"# {topic} — 视频生成失败\n\n"
                     f"**诊断**：LLM 生成的代码存在语法错误，无法被 Manim 渲染。\n\n"
-                    f"**错误**：\n```\n{syntax_error}\n```\n\n"
                     f"**建议**：重新提交请求。\n"
                 ),
-                format_specific=VideoResource(
-                    manim_code=code,
+                format_specific=_failed_video_payload(VideoResource(
+                    manim_code="",
                     scene_class=_extract_scene_class(code) or "MainScene",
                     render_status="failed",
-                    render_error=f"syntax_error: {syntax_error[:200]}",
-                ).model_dump(),
+                    render_error="syntax_error: generated code is invalid",
+                ), "VIDEO_CODE_SYNTAX_INVALID", "Generated video code is invalid"),
                 difficulty=1,
                 estimated_minutes=0,
                 prerequisites=[],
@@ -415,10 +414,8 @@ class ManimVideoAgent(BaseAgent):
                     source=self.agent_name,
                     stage="video_code_generation",
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    f"manim_video inline RESOURCE emit failed: {exc!r}"
-                )
+            except Exception:  # noqa: BLE001
+                logger.debug("VIDEO_RESOURCE_EVENT_FAILED")
 
         return resource
 
@@ -462,10 +459,21 @@ def _compile_check(code: str) -> str | None:
             except OSError:
                 pass
         return None
-    except py_compile.PyCompileError as exc:
-        return str(exc).strip().splitlines()[-1] if str(exc).strip() else "compile failed"
-    except Exception as exc:  # noqa: BLE001
-        return f"{type(exc).__name__}: {exc}"
+    except py_compile.PyCompileError:
+        return "VIDEO_CODE_SYNTAX_INVALID"
+    except Exception:  # noqa: BLE001
+        return "VIDEO_CODE_COMPILE_CHECK_FAILED"
+
+
+def _failed_video_payload(
+    payload: VideoResource,
+    code: str,
+    message: str,
+) -> dict[str, Any]:
+    """Attach the common public failure contract to a failed video."""
+    data = payload.model_dump()
+    data["failure"] = public_failure(code, message, retryable=True)
+    return data
 
 
 def _extract_first_python_block(text: str) -> str:
@@ -638,27 +646,26 @@ def _normalize_code_newlines(code: str) -> str:
     # No real newlines at all.  If the code is a long sequence of
     # literal ``\n`` (two chars each), it's almost certainly LLM
     # output with un-escaped newlines.  Replace them.
-    if "\\n" in code:
-        if code.count("\\n") >= 2:
-            decoded = code.replace("\\n", "\n").replace("\\t", "\t").replace("\\\"", '"')
-            # Sanity-check: must still look like Python code (either
-            # Manim-specific OR general Python).
-            has_python_kw = any(
-                kw in decoded
-                for kw in (
-                    "from manim",
-                    "import manim",
-                    "import ",
-                    "def ",
-                    "class ",
-                    "print(",
-                    "for ",
-                    "if ",
-                    " = ",
-                )
+    if "\\n" in code and code.count("\\n") >= 2:
+        decoded = code.replace("\\n", "\n").replace("\\t", "\t").replace("\\\"", '"')
+        # Sanity-check: must still look like Python code (either
+        # Manim-specific OR general Python).
+        has_python_kw = any(
+            kw in decoded
+            for kw in (
+                "from manim",
+                "import manim",
+                "import ",
+                "def ",
+                "class ",
+                "print(",
+                "for ",
+                "if ",
+                " = ",
             )
-            if has_python_kw:
-                return decoded.rstrip().rstrip('"').rstrip("}").rstrip()
+        )
+        if has_python_kw:
+            return decoded.rstrip().rstrip('"').rstrip("}").rstrip()
     # No structural cues — return as-is, but trim obvious JSON tail.
     return code.rstrip().rstrip('"').rstrip("}").rstrip().rstrip('"').rstrip()
 
@@ -701,7 +708,7 @@ def _fallback_manim_code(topic: str, reason: str | None = None) -> str:
         f'        self.wait(1.5)\n'
         f'        self.play(FadeOut(title), FadeOut(subtitle))\n'
         + note_line +
-        f'        self.wait(1)\n'
+        '        self.wait(1)\n'
     )
 
 

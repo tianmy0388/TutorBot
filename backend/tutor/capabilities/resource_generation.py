@@ -343,7 +343,7 @@ class ResourceGenerationCapability(BaseCapability):
         # **2026-07-07 fix:** pre-filter resources whose *generation*
         # already failed (vs. resources whose content is simply
         # low-quality). The agent still returns a typed failed
-        # Resource so the user sees "视频生成失败 — 重新提交" in the
+        # Resource so the user sees a retryable failure in the
         # trace, but it must NOT enter the quality-review loop —
         # the reviewer would correctly reject it, then the reject
         # filter would strip it from the package, then the
@@ -355,7 +355,8 @@ class ResourceGenerationCapability(BaseCapability):
         #   * code      — keep; reviewer handles ``execution_status``
         #                  failures so we don't lose valid-but-env-broken
         #                  snippets.
-        #   * other     — keep.
+        #   * other     — drop only when ``format_specific.failure`` is
+        #                  present (for example, a failed PPT render).
         #
         # We emit a clear stream observation so the UI / chat
         # channel can show "1 video resource skipped (generation
@@ -1207,19 +1208,22 @@ class ResourceGenerationCapability(BaseCapability):
         """Return True if the resource's *generation* pipeline failed
         (vs. the resource being merely low-quality).
 
-        Currently the only typed failure surface is video:
-        ``format_specific.render_status == "failed"`` (Manim code
-        generation or syntax check failure).
+        Video uses ``format_specific.render_status == "failed"``. Other
+        generators may return a structured ``format_specific.failure`` when
+        no usable artifact exists (for example a failed PPT render).
 
         Code resources with ``execution_status == "failed"`` are NOT
         filtered here — ``RUNTIME_DEPENDENCY_MISSING`` is a valid
         educational resource that the user can still read; the
         quality reviewer decides.
         """
-        if resource.type != ResourceType.VIDEO:
-            return False
         fs = resource.format_specific or {}
-        return fs.get("render_status") == "failed"
+        if resource.type == ResourceType.CODE:
+            return False
+        return (
+            resource.type == ResourceType.VIDEO
+            and fs.get("render_status") == "failed"
+        ) or isinstance(fs.get("failure"), dict)
 
     async def _prefilter_failed_resources(
         self,
@@ -1246,6 +1250,11 @@ class ResourceGenerationCapability(BaseCapability):
                         "type": r.type.value,
                         "title": r.title,
                         "render_error": fs.get("render_error"),
+                        "failure": fs.get("failure") or {
+                            "code": "VIDEO_GENERATION_FAILED",
+                            "message": "Video generation failed",
+                            "retryable": True,
+                        },
                     }
                 )
                 continue
@@ -1343,8 +1352,9 @@ def _is_failed_resource(r: Resource) -> bool:
     """Return True if a resource is a known-failed artifact and should
     be filtered out **before** quality review.
 
-    **2026-07-07 fix:** resources with a self-reported hard failure
-    (currently: ``video.render_status == "failed"``) are dropped here
+    Resources with a self-reported hard failure (video
+    ``render_status == "failed"`` or a structured
+    ``format_specific.failure``) are dropped here
     so the quality reviewer doesn't waste cycles judging a "video
     generation failed" diagnostic card. The reviewer can still
     reject other resources, but those represent LLM-judged issues,
@@ -1356,7 +1366,11 @@ def _is_failed_resource(r: Resource) -> bool:
     reviewer decides.
     """
     fs = r.format_specific or {}
-    return r.type == ResourceType.VIDEO and fs.get("render_status") == "failed"
+    if r.type == ResourceType.CODE:
+        return False
+    return (
+        r.type == ResourceType.VIDEO and fs.get("render_status") == "failed"
+    ) or isinstance(fs.get("failure"), dict)
 
 
 __all__ = ["ResourceGenerationCapability"]

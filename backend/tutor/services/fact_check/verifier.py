@@ -16,13 +16,10 @@ Public API
 
 from __future__ import annotations
 
-import json
 import re
 import threading
-from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -30,15 +27,13 @@ from loguru import logger
 
 from tutor.agents.base_agent import BaseAgent
 from tutor.services.config.settings import get_settings
-from tutor.services.llm.base import LLMMessage, LLMRequest
-
 
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
 
-class ClaimVerdict(str, Enum):
+class ClaimVerdict(str, Enum):  # noqa: UP042 - persisted enum compatibility
     """How a claim compares to retrieved evidence."""
 
     SUPPORTED = "supported"     # evidence confirms the claim
@@ -111,14 +106,8 @@ class FactCheckResult:
 
 
 # Common Chinese stopwords — kept tiny for MVP
-_STOPWORDS_ZH = set(
-    "的 了 在 是 和 与 及 或 也 但 而 等 这 那 我 你 他 她 它 我们 "
-    "你们 他们 一个 一些 这个 那个 这种 那种 是的 不是 可以 可能 应该".split()
-)
-_STOPWORDS_EN = set(
-    "the a an and or but if is are was were be been have has do does "
-    "this that these those i you he she it we they self".split()
-)
+_STOPWORDS_ZH = {"的", "了", "在", "是", "和", "与", "及", "或", "也", "但", "而", "等", "这", "那", "我", "你", "他", "她", "它", "我们", "你们", "他们", "一个", "一些", "这个", "那个", "这种", "那种", "是的", "不是", "可以", "可能", "应该"}
+_STOPWORDS_EN = {"the", "a", "an", "and", "or", "but", "if", "is", "are", "was", "were", "be", "been", "have", "has", "do", "does", "this", "that", "these", "those", "i", "you", "he", "she", "it", "we", "they", "self"}
 
 
 class FactCheckService:
@@ -209,8 +198,8 @@ class FactCheckService:
             return await self.extractor.process(
                 ctx, content=content, topic=topic
             )
-        except Exception as exc:
-            logger.warning(f"FactCheck extract_claims failed: {exc!r}")
+        except Exception:
+            logger.warning("FACT_CHECK_EXTRACTION_FAILED")
             return []  # cap at 8 claims handled inside extractor
 
     # ------------------------------------------------------------------
@@ -291,10 +280,10 @@ class FactCheckService:
             check.verdict = result.verdict
             check.confidence = result.confidence
             check.reasoning = result.reasoning
-        except Exception as exc:
-            logger.warning(f"FactCheck judge failed: {exc!r}")
+        except Exception:
+            logger.warning("FACT_CHECK_JUDGE_FAILED policy=unverified")
             check.verdict = ClaimVerdict.UNVERIFIED
-            check.reasoning = f"judge failed: {exc}"
+            check.reasoning = "FACT_CHECK_JUDGE_FAILED: evidence judgement unavailable"
             check.confidence = 0.3
 
 
@@ -331,7 +320,6 @@ def _best_snippet(
     if not claim_tokens:
         return "", 0.0
 
-    claim_counter = Counter(claim_tokens)
     claim_set = set(claim_tokens)
     text_lower = text.lower()
 
