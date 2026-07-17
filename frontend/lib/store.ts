@@ -741,6 +741,7 @@ function cryptoRandom(): string {
 }
 
 const USER_ID_KEY = "tutor-user-id";
+const LEGACY_USER_ID_KEY = "tutor:user_id";
 
 /**
  * Return the per-browser user id from localStorage, or create and
@@ -753,6 +754,7 @@ export function getOrCreateUserId(multiUserEnabled = false): string {
     try {
       if (typeof window !== "undefined") {
         window.localStorage.setItem(USER_ID_KEY, "local-user");
+        window.localStorage.removeItem(LEGACY_USER_ID_KEY);
       }
     } catch {
       // localStorage blocked; the in-memory identity is still canonical.
@@ -762,8 +764,15 @@ export function getOrCreateUserId(multiUserEnabled = false): string {
   if (typeof window === "undefined") return "anonymous";
   try {
     const existing = window.localStorage.getItem(USER_ID_KEY);
-    if (existing) {
+    if (existing?.trim()) {
+      window.localStorage.removeItem(LEGACY_USER_ID_KEY);
       return existing;
+    }
+    const legacy = window.localStorage.getItem(LEGACY_USER_ID_KEY);
+    window.localStorage.removeItem(LEGACY_USER_ID_KEY);
+    if (legacy?.trim()) {
+      window.localStorage.setItem(USER_ID_KEY, legacy);
+      return legacy;
     }
   } catch {
     // localStorage blocked (private mode etc.) — fall through.

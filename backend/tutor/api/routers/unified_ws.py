@@ -41,7 +41,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from tutor.services.identity import IdentityPolicy, identity_policy_for
-from tutor.services.jobs import JobSubmit, get_job_runner
+from tutor.services.jobs import JobSubmit, get_job_runner, get_job_store
 
 router = APIRouter()
 
@@ -73,7 +73,7 @@ async def unified_ws(websocket: WebSocket) -> None:
                 continue
 
             if msg_type == "subscribe_job":
-                await _handle_subscribe(websocket, runner, envelope)
+                await _handle_subscribe(websocket, runner, envelope, identity_policy)
                 continue
 
             if msg_type == "cancel":
@@ -154,11 +154,23 @@ async def _handle_subscribe(
     websocket: WebSocket,
     runner,
     envelope: dict[str, Any],
+    identity_policy: IdentityPolicy,
 ) -> None:
     """Stream events for a known job until terminal."""
     job_id = envelope.get("job_id")
     if not job_id:
         await _send_error(websocket, "subscribe_job requires job_id")
+        return
+
+    try:
+        user_id = identity_policy.resolve(envelope.get("user_id"))
+    except ValueError as exc:
+        await _send_error(websocket, str(exc))
+        return
+
+    job = await get_job_store().get(job_id)
+    if job is None or job.user_id != user_id:
+        await _send_error(websocket, "job not found")
         return
 
     try:

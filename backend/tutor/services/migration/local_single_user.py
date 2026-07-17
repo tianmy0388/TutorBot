@@ -229,7 +229,8 @@ def _merge_sqlite_database(source: Path, target: Path, target_user_id: str) -> b
             for row in source_connection.execute(f"SELECT {selected} FROM {_quote(table)}"):
                 values = list(row)
                 for ownership_index in ownership_indexes:
-                    values[ownership_index] = target_user_id
+                    if values[ownership_index] is not None:
+                        values[ownership_index] = target_user_id
                 cursor = target_connection.execute(insert, values)
                 changed = changed or cursor.rowcount > 0
 
@@ -246,16 +247,23 @@ def _rewrite_user_ids(database: Path, target_user_id: str) -> bool:
                     f"({_quote(column)} IS NOT NULL AND {_quote(column)} != ?)"
                     for column in ownership_columns
                 )
+                selected_ownership = ", ".join(_quote(column) for column in ownership_columns)
                 legacy_rows = connection.execute(
-                    f"SELECT rowid FROM {_quote(table)} WHERE {needs_rewrite} ORDER BY rowid",
+                    f"SELECT rowid, {selected_ownership} FROM {_quote(table)} "
+                    f"WHERE {needs_rewrite} ORDER BY rowid",
                     (target_user_id,) * len(ownership_columns),
                 ).fetchall()
-                assignments = ", ".join(f"{_quote(column)} = ?" for column in ownership_columns)
-                for (rowid,) in legacy_rows:
+                for rowid, *ownership_values in legacy_rows:
+                    columns_to_rewrite = [
+                        column
+                        for column, value in zip(ownership_columns, ownership_values, strict=True)
+                        if value is not None and value != target_user_id
+                    ]
+                    assignments = ", ".join(f"{_quote(column)} = ?" for column in columns_to_rewrite)
                     try:
                         cursor = connection.execute(
                             f"UPDATE {_quote(table)} SET {assignments} WHERE rowid = ?",
-                            (target_user_id,) * len(ownership_columns) + (rowid,),
+                            (target_user_id,) * len(columns_to_rewrite) + (rowid,),
                         )
                     except sqlite3.IntegrityError:
                         # A canonical row already owns the same unique business
