@@ -8,13 +8,29 @@ process-wide.
 from __future__ import annotations
 
 import json
-import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def _repo_root() -> Path:
+    """Return the repository root independently of the process cwd."""
+    return Path(__file__).resolve().parents[4]
+
+
+def resolve_path(value: Path) -> Path:
+    """Resolve an absolute path or anchor a relative path at the repo root."""
+    if value.is_absolute():
+        return value.resolve()
+    return (_repo_root() / value).resolve()
+
+
+def _default_data_dir() -> Path:
+    """Return the single canonical, repository-root data directory."""
+    return _repo_root() / "data"
 
 
 class Settings(BaseSettings):
@@ -60,31 +76,6 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     language: Literal["zh", "en"] = "zh"
 
-    def _default_data_dir() -> Path:
-        """2026-06-21 plan: the data directory must resolve to a single
-        absolute path under the project root so that two processes
-        started from different cwds (project root vs ``backend/``)
-        agree on where SQLite, KB, and artifact files live.
-
-        Layout::
-
-            <repo-root>/data/
-                tutor.db
-                knowledge_bases/
-                resources/
-                videos/
-                code_runs/
-                temp/
-
-        The path is computed relative to this file so it does not
-        depend on the process cwd. An environment override via
-        ``TUTOR_DATA_DIR`` still wins (the pydantic-settings machinery
-        only applies the default when no env var is set).
-        """
-        # settings.py is at backend/tutor/services/config/settings.py —
-        # four ``parent``s reach the repo root.
-        return Path(__file__).resolve().parent.parent.parent.parent / "data"
-
     data_dir: Path = Field(default_factory=_default_data_dir)
 
     @field_validator("data_dir", mode="after")
@@ -102,13 +93,7 @@ class Settings(BaseSettings):
         the resolved path so the operator can see exactly which
         directory the process is using.
         """
-        if value.is_absolute():
-            return value.resolve()
-        # Treat relative as "under the project root" so cwd-independence
-        # is preserved. This avoids the historical "where am I
-        # writing?" footgun.
-        project_root = Path(__file__).resolve().parent.parent.parent.parent
-        return (project_root / value).resolve()
+        return resolve_path(value)
 
     # ---------- Server ----------
     host: str = "0.0.0.0"
@@ -284,4 +269,4 @@ def reset_settings_cache() -> None:
     get_settings.cache_clear()
 
 
-__all__ = ["Settings", "get_settings", "reset_settings_cache"]
+__all__ = ["Settings", "get_settings", "reset_settings_cache", "resolve_path"]
