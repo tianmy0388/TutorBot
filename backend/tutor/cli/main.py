@@ -166,12 +166,18 @@ def migrate_local_data_cmd(
     ),
 ) -> None:
     """盘点或安全合并历史本地数据目录。"""
-    report = run_local_migration(repo_root, target_user_id, dry_run=dry_run)
+    try:
+        report = run_local_migration(repo_root, target_user_id, dry_run=dry_run)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
     console.print(f"mode: {'dry-run' if dry_run else 'write'}")
     for source_dir in report.source_dirs:
         console.print(f"source: {source_dir}")
     console.print(f"target: {report.target_dir}")
     console.print(f"users: {', '.join(report.discovered_users) or '(none)'}")
+    for unresolved_path in report.unresolved_paths:
+        console.print(f"unresolved_path: {unresolved_path}")
     console.print(f"backup: {report.backup_dir or '(none)'}")
     console.print(f"written_files: {report.written_files}")
 

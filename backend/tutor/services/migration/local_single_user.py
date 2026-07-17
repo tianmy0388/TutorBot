@@ -9,6 +9,7 @@ same database. Source directories are never removed.
 from __future__ import annotations
 
 import filecmp
+import json
 import shutil
 import sqlite3
 from collections.abc import Iterable
@@ -18,6 +19,18 @@ from pathlib import Path
 
 _SQLITE_SUFFIXES = frozenset({".db", ".sqlite", ".sqlite3"})
 _SQLITE_SIDECAR_SUFFIXES = ("-journal", "-shm", "-wal")
+_ARTIFACT_PATH_COLUMNS = frozenset(
+    {
+        "artifact_key",
+        "artifact_path",
+        "file_path",
+        "image_path",
+        "output_path",
+        "path",
+        "public_path",
+        "video_path",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +40,11 @@ class MigrationReport:
     backup_dir: Path | None
     discovered_users: tuple[str, ...]
     written_files: int
+    unresolved_paths: tuple[str, ...] = ()
+
+
+class MigrationError(RuntimeError):
+    """Raised when a migration cannot preserve its ownership guarantees."""
 
 
 def build_migration_report(repo_root: Path, target_user_id: str) -> MigrationReport:
@@ -53,13 +71,18 @@ def run_local_migration(
         report.source_dirs,
         Path(repo_root).resolve() / "backups",
     )
-    written = _merge_databases_and_artifacts(report, target_user_id)
-    return replace(report, backup_dir=backup_dir, written_files=written)
+    written, unresolved_paths = _merge_databases_and_artifacts(report, target_user_id)
+    return replace(
+        report,
+        backup_dir=backup_dir,
+        written_files=written,
+        unresolved_paths=unresolved_paths,
+    )
 
 
 def _validate_target_user_id(target_user_id: str) -> None:
-    if not target_user_id.strip():
-        raise ValueError("target_user_id must not be empty")
+    if target_user_id != "local-user":
+        raise ValueError("--target-user-id must be exactly 'local-user'")
 
 
 def _discover_user_ids(source_dirs: Iterable[Path]) -> set[str]:
@@ -102,19 +125,23 @@ def _copy_sources_to_timestamped_backup(
             relative_source = source.resolve().relative_to(repo_root)
         except ValueError:
             relative_source = Path(f"source-{index}") / source.name
-        shutil.copytree(source, backup_dir / relative_source)
+        backup_source = backup_dir / relative_source
+        shutil.copytree(source, backup_source, ignore=_ignore_sqlite_sidecars)
+        for database in _iter_sqlite_files(source):
+            _copy_sqlite_database(database, backup_source / database.relative_to(source))
     return backup_dir.resolve()
 
 
 def _merge_databases_and_artifacts(
     report: MigrationReport,
     target_user_id: str,
-) -> int:
+) -> tuple[int, tuple[str, ...]]:
     if not report.source_dirs:
-        return 0
+        return 0, ()
 
     report.target_dir.mkdir(parents=True, exist_ok=True)
     written: set[Path] = set()
+    unresolved_paths: set[str] = set()
 
     for source_dir in report.source_dirs:
         for source_file in sorted(path for path in source_dir.rglob("*") if path.is_file()):
@@ -128,11 +155,10 @@ def _merge_databases_and_artifacts(
             target_file.parent.mkdir(parents=True, exist_ok=True)
             if _is_sqlite_file(source_file):
                 if not target_file.exists():
-                    shutil.copy2(source_file, target_file)
+                    _copy_sqlite_database(source_file, target_file)
                     written.add(target_file)
-                elif not filecmp.cmp(source_file, target_file, shallow=False):
-                    if _merge_sqlite_database(source_file, target_file, target_user_id):
-                        written.add(target_file)
+                elif _merge_sqlite_database(source_file, target_file, target_user_id):
+                    written.add(target_file)
                 continue
 
             if not target_file.exists():
@@ -147,7 +173,13 @@ def _merge_databases_and_artifacts(
     for database in _iter_sqlite_files(report.target_dir):
         if _rewrite_user_ids(database, target_user_id):
             written.add(database)
-    return len(written)
+        if _normalize_artifact_paths(
+            database,
+            (*report.source_dirs, report.target_dir),
+            unresolved_paths,
+        ):
+            written.add(database)
+    return len(written), tuple(sorted(unresolved_paths))
 
 
 def _merge_sqlite_database(source: Path, target: Path, target_user_id: str) -> bool:
@@ -195,18 +227,173 @@ def _rewrite_user_ids(database: Path, target_user_id: str) -> bool:
     try:
         with sqlite3.connect(database) as connection:
             for table in _user_id_tables(connection):
-                cursor = connection.execute(
-                    f"UPDATE OR IGNORE {_quote(table)} "
-                    f"SET {_quote('user_id')} = ? "
+                legacy_rows = connection.execute(
+                    f"SELECT rowid FROM {_quote(table)} "
+                    f"WHERE {_quote('user_id')} IS NOT NULL "
+                    f"AND {_quote('user_id')} != ? ORDER BY rowid",
+                    (target_user_id,),
+                ).fetchall()
+                for (rowid,) in legacy_rows:
+                    try:
+                        cursor = connection.execute(
+                            f"UPDATE {_quote(table)} SET {_quote('user_id')} = ? WHERE rowid = ?",
+                            (target_user_id, rowid),
+                        )
+                    except sqlite3.IntegrityError:
+                        # A canonical row already owns the same unique business
+                        # key. Keep that row and discard this migrated duplicate;
+                        # the pre-write backup retains the original source row.
+                        cursor = connection.execute(
+                            f"DELETE FROM {_quote(table)} WHERE rowid = ?",
+                            (rowid,),
+                        )
+                    changed = changed or cursor.rowcount > 0
+
+                remaining = connection.execute(
+                    f"SELECT COUNT(*) FROM {_quote(table)} "
                     f"WHERE {_quote('user_id')} IS NOT NULL "
                     f"AND {_quote('user_id')} != ?",
-                    (target_user_id, target_user_id),
-                )
-                changed = changed or cursor.rowcount > 0
-            connection.commit()
-    except sqlite3.Error:
-        return False
+                    (target_user_id,),
+                ).fetchone()[0]
+                if remaining:
+                    raise MigrationError(f"could not rewrite all user IDs in {database}:{table}")
+    except sqlite3.Error as exc:
+        raise MigrationError(f"could not rewrite user IDs in {database}: {exc}") from exc
     return changed
+
+
+def _normalize_artifact_paths(
+    database: Path,
+    data_roots: tuple[Path, ...],
+    unresolved_paths: set[str],
+) -> bool:
+    changed = False
+    try:
+        with sqlite3.connect(database) as connection:
+            tables = connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()
+            for (table,) in tables:
+                column_info = connection.execute(f"PRAGMA table_info({_quote(table)})").fetchall()
+                for column in column_info:
+                    column_name = str(column[1])
+                    declared_type = str(column[2]).upper()
+                    if column_name.lower() in _ARTIFACT_PATH_COLUMNS:
+                        changed = (
+                            _normalize_path_column(
+                                connection,
+                                table,
+                                column_name,
+                                data_roots,
+                                unresolved_paths,
+                            )
+                            or changed
+                        )
+                    elif declared_type == "JSON":
+                        changed = (
+                            _normalize_json_column(
+                                connection,
+                                table,
+                                column_name,
+                                data_roots,
+                                unresolved_paths,
+                            )
+                            or changed
+                        )
+    except sqlite3.Error as exc:
+        raise MigrationError(f"could not normalize artifact paths in {database}: {exc}") from exc
+    return changed
+
+
+def _normalize_path_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    data_roots: tuple[Path, ...],
+    unresolved_paths: set[str],
+) -> bool:
+    changed = False
+    rows = connection.execute(
+        f"SELECT rowid, {_quote(column)} FROM {_quote(table)} WHERE {_quote(column)} IS NOT NULL"
+    ).fetchall()
+    for rowid, value in rows:
+        normalized = _normalize_path_value(value, data_roots, unresolved_paths)
+        if normalized != value:
+            connection.execute(
+                f"UPDATE {_quote(table)} SET {_quote(column)} = ? WHERE rowid = ?",
+                (normalized, rowid),
+            )
+            changed = True
+    return changed
+
+
+def _normalize_json_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    data_roots: tuple[Path, ...],
+    unresolved_paths: set[str],
+) -> bool:
+    changed = False
+    rows = connection.execute(
+        f"SELECT rowid, {_quote(column)} FROM {_quote(table)} WHERE {_quote(column)} IS NOT NULL"
+    ).fetchall()
+    for rowid, value in rows:
+        if not isinstance(value, str):
+            continue
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+        normalized = _normalize_json_value(payload, data_roots, unresolved_paths)
+        if normalized != payload:
+            connection.execute(
+                f"UPDATE {_quote(table)} SET {_quote(column)} = ? WHERE rowid = ?",
+                (json.dumps(normalized, ensure_ascii=False, separators=(",", ":")), rowid),
+            )
+            changed = True
+    return changed
+
+
+def _normalize_json_value(
+    value: object,
+    data_roots: tuple[Path, ...],
+    unresolved_paths: set[str],
+) -> object:
+    if isinstance(value, dict):
+        return {
+            key: (
+                _normalize_path_value(item, data_roots, unresolved_paths)
+                if str(key).lower() in _ARTIFACT_PATH_COLUMNS
+                else _normalize_json_value(item, data_roots, unresolved_paths)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_json_value(item, data_roots, unresolved_paths) for item in value]
+    return value
+
+
+def _normalize_path_value(
+    value: object,
+    data_roots: tuple[Path, ...],
+    unresolved_paths: set[str],
+) -> object:
+    if not isinstance(value, str) or not value:
+        return value
+    path = Path(value)
+    if not path.is_absolute():
+        return value.replace("\\", "/")
+
+    resolved = path.resolve()
+    for data_root in data_roots:
+        try:
+            return resolved.relative_to(data_root.resolve()).as_posix()
+        except ValueError:
+            continue
+    unresolved_paths.add(value)
+    return value
 
 
 def _iter_sqlite_files(source_dir: Path) -> Iterable[Path]:
@@ -221,6 +408,16 @@ def _is_sqlite_file(path: Path) -> bool:
 
 def _is_sqlite_sidecar(path: Path) -> bool:
     return path.name.lower().endswith(_SQLITE_SIDECAR_SUFFIXES)
+
+
+def _ignore_sqlite_sidecars(_directory: str, names: list[str]) -> set[str]:
+    return {name for name in names if name.lower().endswith(_SQLITE_SIDECAR_SUFFIXES)}
+
+
+def _copy_sqlite_database(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _open_read_only(source) as source_connection, sqlite3.connect(target) as target_connection:
+        source_connection.backup(target_connection)
 
 
 def _open_read_only(database: Path) -> sqlite3.Connection:
@@ -242,4 +439,9 @@ def _quote(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-__all__ = ["MigrationReport", "build_migration_report", "run_local_migration"]
+__all__ = [
+    "MigrationError",
+    "MigrationReport",
+    "build_migration_report",
+    "run_local_migration",
+]
