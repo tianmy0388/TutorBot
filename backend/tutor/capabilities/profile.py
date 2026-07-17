@@ -15,8 +15,6 @@ Flow per turn
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -25,10 +23,10 @@ from tutor.agents.profile.cognitive_diagnostic import CognitiveDiagnosticAgent
 from tutor.agents.profile.feature_extractor import FeatureExtractorAgent
 from tutor.agents.profile.profile_updater import ProfileUpdaterAgent
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
+from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.learner_profile.builder import (
-    LearnerProfile,
     ProfileBuilder,
     get_profile_builder,
 )
@@ -77,7 +75,7 @@ class LearnerProfileCapability(BaseCapability):
             self.builder = get_profile_builder()
         return self.builder
 
-    async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
         user_id = context.user_id
 
         # ------------------------------------------------------------------
@@ -93,7 +91,7 @@ class LearnerProfileCapability(BaseCapability):
                 profile = await self._builder.get(user_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception(f"Failed to load profile for {user_id}: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"加载画像失败: {exc}", source="profile_capability"
                 )
                 profile = empty_profile(user_id=user_id)
@@ -130,7 +128,7 @@ class LearnerProfileCapability(BaseCapability):
             signal = await self.feature_extractor.process(context, stream=stream)
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"FeatureExtractor failed: {exc!r}")
-            await stream.error(
+            await stream.observation(
                 f"特征抽取失败: {exc}",
                 source="profile_capability",
                 stage="feature_extraction",
@@ -146,7 +144,7 @@ class LearnerProfileCapability(BaseCapability):
             updated_profile = await self.profile_updater.process(context, stream=stream)
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"ProfileUpdater failed: {exc!r}")
-            await stream.error(
+            await stream.observation(
                 f"画像更新失败: {exc}",
                 source="profile_capability",
                 stage="profile_update",
@@ -170,7 +168,7 @@ class LearnerProfileCapability(BaseCapability):
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(f"CognitiveDiagnostic failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"诊断问题生成失败: {exc}",
                     source="profile_capability",
                     stage="diagnostic_probing",
@@ -179,8 +177,7 @@ class LearnerProfileCapability(BaseCapability):
         # ------------------------------------------------------------------
         # Emit final result
         # ------------------------------------------------------------------
-        await stream.result(
-            {
+        payload = {
                 "user_id": user_id,
                 "mode": mode,
                 "profile": updated_profile.to_summary(),
@@ -190,10 +187,11 @@ class LearnerProfileCapability(BaseCapability):
                     if probe_questions
                     else "ready_for_resource_generation"
                 ),
-            },
-            source="profile_capability",
+            }
+        return CapabilityResult(
+            assistant_message="学习者画像已更新",
+            payload=payload,
         )
-        await stream.done(source="profile_capability")
 
 
 __all__ = ["LearnerProfileCapability"]

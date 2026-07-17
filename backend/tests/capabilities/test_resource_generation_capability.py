@@ -373,8 +373,8 @@ async def test_full_pipeline_emits_all_stages(capability, fresh_builder, tmp_pat
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
 
-    await capability.run(context, bus)
-    await bus.done()
+    result = await capability.run(context, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
     stages_started = [s for t, s in events if t == "stage_start"]
@@ -393,9 +393,8 @@ async def test_full_pipeline_emits_all_stages(capability, fresh_builder, tmp_pat
     assert packages[0].originating_job_id == "job-resource-generation"
     await package_store.close()
 
-    # Done event at the end
-    done_events = [t for t, _ in events if t == "done"]
-    assert len(done_events) == 1
+    assert result.payload["package"]["metadata"]["job_id"] == "job-resource-generation"
+    assert not [t for t, _ in events if t in {"result", "done", "error"}]
 
 
 @pytest.mark.asyncio
@@ -419,18 +418,27 @@ async def test_full_pipeline_emits_result_event(capability, fresh_builder):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await capability.run(context, bus)
-    await bus.done()
+    result = await capability.run(context, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    result_events = [e for e in events if e.type == StreamEventType.RESULT]
-    assert len(result_events) == 1
-    payload = json.loads(result_events[0].content)
+    assert not [e for e in events if e.type in {StreamEventType.RESULT, StreamEventType.DONE}]
+    payload = result.payload
     assert "package" in payload
     assert "summary" in payload
     assert "kg_summary" in payload
     assert "next_step" in payload
     assert payload["next_step"] == "open_resource_cards"
+    pending_video_ids = {
+        resource["resource_id"]
+        for resource in payload["package"]["resources"]
+        if resource["type"] == "video"
+        and resource["format_specific"].get("render_status") == "pending"
+    }
+    assert {
+        spec.payload["resource_id"] for spec in result.follow_up_tasks
+    } == pending_video_ids
+    assert not hasattr(capability, "_bg_render_tasks")
 
 
 @pytest.mark.asyncio
@@ -453,12 +461,11 @@ async def test_package_contains_all_resource_types(capability, fresh_builder):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await capability.run(context, bus)
-    await bus.done()
+    result = await capability.run(context, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    result = [e for e in events if e.type == StreamEventType.RESULT][0]
-    payload = json.loads(result.content)
+    payload = result.payload
     pkg = payload["package"]
     types_in_pkg = {r["type"] for r in pkg["resources"]}
 
@@ -489,12 +496,11 @@ async def test_quality_reviews_attached(capability, fresh_builder):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await capability.run(context, bus)
-    await bus.done()
+    result = await capability.run(context, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    result = [e for e in events if e.type == StreamEventType.RESULT][0]
-    payload = json.loads(result.content)
+    payload = result.payload
     reviews = payload["reviews"]
     pkg = payload["package"]
     # Each resource should have a review attached
@@ -528,7 +534,7 @@ async def test_path_integration_updates_profile(capability, fresh_builder):
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
     await capability.run(context, bus)
-    await bus.done()
+    await bus.close()
     await asyncio.wait_for(task, timeout=2)
 
     # Profile should now have last_package_id and resource_history
@@ -835,12 +841,11 @@ async def test_kg_summary_in_result(capability, fresh_builder):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await capability.run(context, bus)
-    await bus.done()
+    result = await capability.run(context, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    result = [e for e in events if e.type == StreamEventType.RESULT][0]
-    payload = json.loads(result.content)
+    payload = result.payload
     kg = payload["kg_summary"]
     assert kg.get("course") == "ai_introduction"
     # alice has mastered 2 concepts (ai_overview, ml_basics)

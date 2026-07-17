@@ -7,10 +7,8 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.agents.tutor.multimodal_enrichment import MultiModalEnrichmentAgent
 from tutor.agents.tutor.question_understanding import (
-    QuestionType,
     QuestionUnderstandingAgent,
 )
 from tutor.agents.tutor.tutoring import TutoringAgent
@@ -18,12 +16,11 @@ from tutor.capabilities.tutoring import TutoringCapability
 from tutor.core.context import UnifiedContext
 from tutor.core.stream import StreamEventType
 from tutor.core.stream_bus import StreamBus
+from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.learner_profile.builder import (
-    ProfileBuilder,
     get_profile_builder,
 )
 from tutor.services.learner_profile.store import ProfileStore
-from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.llm.base import LLMResponse
 from tutor.services.tutor.service import TutorService, reset_tutor_service
 
@@ -67,6 +64,7 @@ async def fresh_builder(tmp_path, monkeypatch):
 @pytest.fixture
 def tutor_capability(fresh_builder):
     import pathlib
+
     from tutor.services.config.settings import get_settings
 
     settings = get_settings()
@@ -126,8 +124,8 @@ async def test_full_pipeline_emits_all_5_stages(tutor_capability, fresh_builder)
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await tutor_capability.run(ctx, bus)
-    await bus.done()
+    result = await tutor_capability.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
     stages = [e.stage for e in events if e.type == StreamEventType.STAGE_START]
@@ -137,9 +135,8 @@ async def test_full_pipeline_emits_all_5_stages(tutor_capability, fresh_builder)
     assert "multi_modal_enrichment" in stages
     assert "session_recording" in stages
 
-    # Done event at end
-    done_events = [e for e in events if e.type == StreamEventType.DONE]
-    assert len(done_events) == 1
+    assert result.payload["answer"]["tldr"]
+    assert not [e for e in events if e.type in {StreamEventType.RESULT, StreamEventType.DONE}]
 
 
 @pytest.mark.asyncio
@@ -162,13 +159,11 @@ async def test_result_event_contains_all_layers(tutor_capability, fresh_builder)
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await tutor_capability.run(ctx, bus)
-    await bus.done()
+    result = await tutor_capability.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    assert len(results) == 1
-    payload = json.loads(results[0].content)
+    payload = result.payload
     assert "understanding" in payload
     assert "answer" in payload
     assert "enrichments" in payload
@@ -242,15 +237,12 @@ async def test_handles_llm_failure_gracefully(tmp_path, fresh_builder):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await cap.run(ctx, bus)
-    await bus.done()
+    result = await cap.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    # Errors emitted but capability completes
-    assert any(e.type == StreamEventType.DONE for e in events)
-    # Result still emitted
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    assert len(results) == 1
+    assert result.payload["answer"]["tldr"]
+    assert not [e for e in events if e.type in {StreamEventType.RESULT, StreamEventType.DONE}]
 
 
 @pytest.mark.asyncio
@@ -297,10 +289,9 @@ async def test_follow_up_suggestion_next_step(fresh_builder):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await cap.run(ctx, bus)
-    await bus.done()
+    result = await cap.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    payload = json.loads(results[0].content)
+    payload = result.payload
     assert payload["next_step"] == "follow_up"

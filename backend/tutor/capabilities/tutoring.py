@@ -57,6 +57,7 @@ from tutor.agents.tutor.question_understanding import (
 )
 from tutor.agents.tutor.tutoring import TutoringAgent, TutoringAnswer
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
+from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.learner_profile.builder import (
@@ -119,7 +120,7 @@ class TutoringCapability(BaseCapability):
         return self.retrieval_service or get_retrieval_service()
 
     async def _emit_retrieval_observation(
-        self, stream: StreamBus, rag: "RAGContext | None"
+        self, stream: StreamBus, rag: RAGContext | None
     ) -> None:
         """Push a human-readable status line to the stream.
 
@@ -171,7 +172,7 @@ class TutoringCapability(BaseCapability):
     # Entry point
     # ------------------------------------------------------------------
 
-    async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
         understanding: QuestionUnderstanding | None = None
         answer: TutoringAnswer | None = None
         enrichments: list[EnrichmentSuggestion] = []
@@ -185,7 +186,7 @@ class TutoringCapability(BaseCapability):
                 context.metadata["tutor_understanding"] = understanding
             except Exception as exc:
                 logger.exception(f"QuestionUnderstanding failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"问题理解失败: {exc}", source="tutoring_capability"
                 )
                 understanding = QuestionUnderstanding(
@@ -222,7 +223,7 @@ class TutoringCapability(BaseCapability):
                 await self._emit_retrieval_observation(stream, rag_context)
             except Exception as exc:
                 logger.exception(f"RAG retrieval failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"RAG 检索失败: {exc}", source="tutoring_capability"
                 )
 
@@ -254,7 +255,7 @@ class TutoringCapability(BaseCapability):
                 context.metadata["learner_profile"] = profile
             except Exception as exc:
                 logger.warning(f"Profile load failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"画像加载失败: {exc}", source="tutoring_capability"
                 )
 
@@ -270,7 +271,7 @@ class TutoringCapability(BaseCapability):
                     context.metadata["tutor_answer"] = answer
                 except Exception as exc:
                     logger.exception(f"Answer generation failed: {exc!r}")
-                    await stream.error(
+                    await stream.observation(
                         f"答案生成失败: {exc}", source="tutoring_capability"
                     )
                     answer = TutoringAnswer(
@@ -292,7 +293,7 @@ class TutoringCapability(BaseCapability):
                     )
                 except Exception as exc:
                     logger.exception(f"Enrichment failed: {exc!r}")
-                    await stream.error(
+                    await stream.observation(
                         f"多模态补充失败: {exc}", source="tutoring_capability"
                     )
 
@@ -315,8 +316,7 @@ class TutoringCapability(BaseCapability):
         # ------------------------------------------------------------------
         # Emit final result
         # ------------------------------------------------------------------
-        await stream.result(
-            {
+        payload = {
                 "understanding": (
                     understanding.to_dict() if understanding else {}
                 ),
@@ -330,10 +330,11 @@ class TutoringCapability(BaseCapability):
                     if (understanding and understanding.follow_up_questions)
                     else "ask_another"
                 ),
-            },
-            source="tutoring_capability",
+            }
+        return CapabilityResult(
+            assistant_message=(answer.tldr if answer and answer.tldr else "答疑已完成"),
+            payload=payload,
         )
-        await stream.done(source="tutoring_capability")
 
 
 __all__ = ["TutoringCapability"]

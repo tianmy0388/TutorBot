@@ -28,14 +28,16 @@ Phase 5.2 design notes:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from tutor.services.resource_package.schema import ArtifactRef
 
-class JobStatus(str, Enum):
+
+class JobStatus(str, Enum):  # noqa: UP042 - persisted enum compatibility
     """Lifecycle state of a :class:`Job`."""
 
     PENDING = "pending"        # accepted, not yet started
@@ -87,7 +89,8 @@ class Job(BaseModel):
     # Lifecycle
     status: JobStatus = JobStatus.PENDING
     error: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    error_log_ref: ArtifactRef | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
@@ -123,6 +126,11 @@ class Job(BaseModel):
             ),
             "has_result": self.result is not None,
             "error": self.error,
+            "error_log_ref": (
+                self.error_log_ref.model_dump(mode="json")
+                if self.error_log_ref is not None
+                else None
+            ),
         }
 
     def to_full_dict(self) -> dict[str, Any]:

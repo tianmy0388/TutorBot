@@ -30,16 +30,19 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import traceback
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
 from pydantic import ValidationError
 
+from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.runtime.registry.capability_registry import (
@@ -54,6 +57,7 @@ from tutor.services.jobs.contracts import (
 )
 from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
 from tutor.services.jobs.store import JobStore, get_job_store
+from tutor.services.resource_package.schema import ArtifactRef
 
 
 class JobRunner:
@@ -239,8 +243,9 @@ class JobRunner:
                     f"JobRunner subscriber queue full job={job_id[:12]}… "
                     f"size={q.maxsize}; dropping event"
                 )
-        # Always close the queues when we emit a terminal sentinel.
-        if event_dict.get("type") in ("done", "error", "cancelled", "job_terminal"):
+        # Only the canonical terminal closes live queues.  ``error`` and
+        # ``done`` are runner-authored compatibility events that precede it.
+        if event_dict.get("type") == "job_terminal":
             for q in queues:
                 with __import__("contextlib").suppress(asyncio.QueueFull):
                     q.put_nowait(None)
@@ -250,50 +255,20 @@ class JobRunner:
     # ------------------------------------------------------------------
 
     async def _execute(self, job: Job) -> None:
-        """Run a single job to completion.
+        """Compatibility wrapper for the single-owner execution path."""
+        await self._run_job(job)
 
-        Responsibilities:
-          - mark RUNNING with started_at
-          - run the capability via MainOrchestrator-equivalent flow
-          - tail the bus → append_event + broadcast
-          - build a normalized :class:`JobResultContract` at terminal time
-          - mark SUCCEEDED / PARTIAL / FAILED / CANCELLED on exit
-          - broadcast a single ``job_terminal`` event carrying the contract
-        """
-        # **2026-07-08 fix (187b2955):** collect every ``RESOURCE`` event
-        # the capability emits so we can attach them as
-        # ``partial_artifacts`` on the terminal contract. Without this,
-        # a timeout mid-video-render would leave the user staring at an
-        # empty right pane even though 3+ resources had already streamed
-        # to the trace.
+    async def _run_job(self, job: Job) -> None:
+        """Run one capability and commit exactly one terminal transition."""
         partial_resources: list[dict[str, Any]] = []
+        legacy_payload: dict[str, Any] | None = None
+        legacy_error: str | None = None
+        capability_result: CapabilityResult | None = None
+        failure: BaseException | None = None
+        failure_traceback: str | None = None
+        timeout_exceeded = False
 
         cap = self.capabilities.get(job.capability)
-        if cap is None:
-            finished_at = datetime.now(UTC)
-            contract = JobResultContract(
-                job_id=job.job_id,
-                capability=job.capability,
-                status=JobTerminalStatus.FAILED,
-                assistant_message=f"未知能力：{job.capability}",
-                error=JobError(
-                    code="UNKNOWN_CAPABILITY",
-                    message=f"未知能力：{job.capability}",
-                    retryable=False,
-                ),
-                finished_at=finished_at,
-            )
-            await self.store.update_status(
-                job.job_id,
-                status=JobStatus.FAILED,
-                finished_at=finished_at,
-                error=f"unknown capability: {job.capability}",
-                result=contract.model_dump(mode="json"),
-            )
-            await self._broadcast(job.job_id, self._terminal_event(job, contract))
-            return
-
-        # Mark RUNNING
         await self.store.update_status(
             job.job_id,
             status=JobStatus.RUNNING,
@@ -301,8 +276,20 @@ class JobRunner:
         )
         self._running_user[job.job_id] = job.user_id
 
-        # Build the execution context. Reuse the bus from the context so
-        # we can subscribe_iter() to it cleanly.
+        if cap is None:
+            failure = LookupError(f"unknown capability: {job.capability}")
+            failure_traceback = "".join(
+                traceback.format_exception_only(type(failure), failure)
+            )
+            await self._finish_job(
+                job,
+                result=None,
+                failure=failure,
+                failure_traceback=failure_traceback,
+                partial_resources=partial_resources,
+            )
+            return
+
         context = UnifiedContext(
             session_id=job.session_id,
             job_id=job.job_id,
@@ -314,227 +301,177 @@ class JobRunner:
         )
         bus: StreamBus = context.stream_bus
 
+        # Register before starting the capability.  StreamBus.close appends its
+        # sentinel after buffered events, so draining this queue preserves all
+        # progress/resource events emitted immediately before completion.
+        event_queue = bus.subscribe()
         run_task = asyncio.create_task(cap.run(context, bus))
-        final_result: dict[str, Any] | None = None
-        error_msg: str | None = None
-        cancelled = False
-        timeout_exceeded = False
 
-        # 2026-06-21 plan (B3): per-job max-runtime timeout.
-        # The pre-fix code had no upper bound on job execution.
-        # A capability that loops forever (e.g. an LLM call that
-        # hangs) would keep the job in RUNNING indefinitely.
-        # The timeout is configurable via ``job_timeout_seconds``;
-        # 0 means "unlimited". Read from ``get_settings()`` rather
-        # than an instance attribute to avoid AttributeError.
         try:
             from tutor.services.config.settings import get_settings
+
             timeout_seconds = int(get_settings().job_timeout_seconds or 0)
         except Exception:
             timeout_seconds = 0
 
-        # Watchdog: when the capability finishes (cleanly or via
-        # exception) OR the timeout fires, close the bus so the
-        # subscribe_iter loop unblocks. Without this a capability
-        # that forgets to emit ``done`` would hang the job in
-        # RUNNING forever.
-        #
-        # **2026-07-07 fix:** the watchdog now also captures any
-        # exception raised by ``run_task`` and writes it to a shared
-        # slot (``capability_exc``) so the main ``_execute`` task can
-        # surface it as ``error_msg`` in the contract. Before this
-        # fix, only ``asyncio.TimeoutError`` was caught here — every
-        # other exception escaped the watchdog task and was silently
-        # dropped by asyncio ("Task exception was never retrieved"),
-        # leaving the contract stuck on ``MISSING_RESULT`` ("能力未
-        # 返回结构化结果") with no hint of what actually blew up.
-        capability_exc: list[BaseException] = []
-
-        async def _watch_and_close() -> None:
+        async def _await_capability() -> None:
+            nonlocal capability_result, failure, failure_traceback, timeout_exceeded
             try:
-                if timeout_seconds > 0:
+                returned = (
                     await asyncio.wait_for(run_task, timeout=timeout_seconds)
-                else:
-                    await run_task
-            except TimeoutError:
-                nonlocal timeout_exceeded
+                    if timeout_seconds > 0
+                    else await run_task
+                )
+                if isinstance(returned, CapabilityResult):
+                    capability_result = returned
+            except TimeoutError as exc:
                 timeout_exceeded = True
+                failure = exc
+                failure_traceback = "".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                )
                 run_task.cancel()
-                with __import__("contextlib").suppress(asyncio.CancelledError):
+                with suppress(asyncio.CancelledError):
                     await run_task
             except BaseException as exc:  # noqa: BLE001
-                # Capture the real failure so the main task can
-                # report it instead of falling through to MISSING_RESULT.
-                capability_exc.append(exc)
-                logger.exception(
-                    "JobRunner capability raised unhandled exception "
-                    "job={job_id}: {err}",
+                failure = exc
+                failure_traceback = "".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                )
+                logger.error(
+                    "JobRunner capability failed job={job_id}: {kind}: {message}",
                     job_id=job.job_id[:12],
-                    err=exc,
+                    kind=type(exc).__name__,
+                    message=exc,
                 )
             finally:
-                with __import__("contextlib").suppress(Exception):
-                    await bus.close()
+                await bus.close()
 
-        watchdog = asyncio.create_task(_watch_and_close())
-
+        waiter = asyncio.create_task(_await_capability())
         try:
-            async for evt in bus.subscribe_iter():
+            while True:
+                evt = await event_queue.get()
+                if evt is None:
+                    break
+                event_type = getattr(evt.type, "value", str(evt.type))
+                if event_type == "result":
+                    try:
+                        parsed = json.loads(evt.content)
+                        legacy_payload = parsed if isinstance(parsed, dict) else {"raw": parsed}
+                    except (TypeError, ValueError):
+                        legacy_payload = {"raw": evt.content}
+                    continue
+                if event_type == "error":
+                    legacy_error = legacy_error or evt.content
+                    continue
+                if event_type in {"done", "cancelled", "job_terminal"}:
+                    continue
+
                 evt_dict = evt.to_dict()
                 await self.store.append_event(job.job_id, evt_dict, evt.seq)
                 await self._broadcast(job.job_id, evt_dict)
-
-                if evt.type == "result":
-                    # The capability serialised its structured payload as
-                    # JSON in evt.content; parse it once and keep.
-                    try:
-                        final_result = json.loads(evt.content)
-                    except (TypeError, ValueError):
-                        final_result = {"raw": evt.content}
-                elif evt.type == "resource":
-                    # **2026-07-08 fix (187b2955):** incremental resource
-                    # events from the capability. We materialise a minimal
-                    # ``ArtifactResult``-compatible dict so the contract
-                    # can surface them even if the pipeline ends without
-                    # a final ``result`` event.
+                if event_type == "resource":
                     md = evt.metadata or {}
                     partial_resources.append(
                         {
-                            "resource_type": str(
-                                md.get("resource_type") or "unknown"
-                            ),
+                            "resource_type": str(md.get("resource_type") or "unknown"),
                             "status": "succeeded",
                             "resource_id": md.get("resource_id"),
                             "title": md.get("title"),
                             "metadata": {"source_event_seq": evt.seq},
                         }
                     )
-                elif evt.type == "error" and error_msg is None:
-                    error_msg = evt.content
-        except asyncio.CancelledError:
-            cancelled = True
-            error_msg = "cancelled"
-            await self._broadcast(
-                job.job_id,
-                {
-                    "type": "cancelled",
-                    "source": "job_runner",
-                    "stage": "",
-                    "content": "Job cancelled",
-                    "metadata": {"job_id": job.job_id},
-                    "session_id": job.session_id,
-                    "turn_id": "",
-                    "seq": 0,
-                    "timestamp": datetime.now(UTC).timestamp(),
-                    "event_id": uuid.uuid4().hex,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            error_msg = f"{type(exc).__name__}: {exc}"
-            logger.exception(f"JobRunner._execute crashed job={job.job_id[:12]}…")
+        except asyncio.CancelledError as exc:
+            failure = exc
+            failure_traceback = "Job cancelled"
+            run_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await run_task
         finally:
-            # Watchdog task already closes the bus, but if subscribe_iter
-            # ended first (capability emitted ``done``) we still want the
-            # capability to be awaited here.
-            if not run_task.done():
-                try:
-                    await asyncio.wait_for(run_task, timeout=5.0)
-                except TimeoutError:
-                    logger.warning(
-                        f"JobRunner capability did not finish promptly job={job.job_id[:12]}…"
-                    )
-                    run_task.cancel()
-                    with suppress(asyncio.CancelledError, Exception):
-                        await run_task
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"Capability exited with: {exc!r}")
-            # Ensure watchdog is cleaned up.
-            # **2026-06-22 fix (Task 1):** ``asyncio.CancelledError`` is
-            # NOT a subclass of ``Exception`` in Python 3.11 — it lives
-            # under ``BaseException``. The pre-fix ``suppress(Exception)``
-            # missed it, so ``await watchdog`` after ``.cancel()`` raised
-            # ``CancelledError`` straight through the finally block,
-            # silently skipping terminal persistence. The job stayed
-            # ``running`` forever even though the capability had already
-            # emitted ``done`` and ``result``. We now explicitly catch
-            # ``CancelledError`` so the terminal block always runs.
-            if not watchdog.done():
-                watchdog.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await watchdog
+            with suppress(asyncio.CancelledError):
+                await waiter
 
-            finished_at = datetime.now(UTC)
-            # 2026-06-21 plan (B3): when the global timeout fires,
-            # surface a distinct error code so the UI can show
-            # "任务超时" rather than a generic "failed".
-            if timeout_exceeded and error_msg is None:
-                error_msg = (
-                    f"Job timed out after {timeout_seconds}s "
-                    f"(TUTOR_JOB_TIMEOUT_SECONDS)"
-                )
-            # **2026-07-07 fix:** surface the capability's actual
-            # exception (captured by the watchdog) so the contract
-            # reports ``CAPABILITY_ERROR`` with a real diagnostic
-            # instead of the misleading ``MISSING_RESULT``.
-            if error_msg is None and capability_exc:
-                exc = capability_exc[0]
-                error_msg = f"{type(exc).__name__}: {exc}"
-            # If a cancel() call already marked this job CANCELLED, keep
-            # that status — don't clobber it with FAILED.
-            current = await self.store.get(job.job_id)
-            if current is not None and current.status == JobStatus.CANCELLED:
-                # ensure finished_at is set; status is preserved
-                contract = self._build_contract(
-                    job,
-                    final_result=final_result,
-                    error_msg=error_msg,
-                    terminal_status=JobTerminalStatus.CANCELLED,
-                    finished_at=finished_at,
-                    partial_artifacts=partial_resources,
-                )
-            else:
-                contract = self._build_contract(
-                    job,
-                    final_result=final_result,
-                    error_msg=error_msg,
-                    terminal_status=JobTerminalStatus.CANCELLED if cancelled else None,
-                    finished_at=finished_at,
-                    partial_artifacts=partial_resources,
-                )
+        # Compatibility input only: old capabilities may have emitted a
+        # result/error.  They are never persisted or published as authored by
+        # the capability; the runner converts them to its internal contract.
+        if capability_result is None and legacy_payload is not None:
+            capability_result = CapabilityResult(
+                assistant_message=(
+                    legacy_payload.get("assistant_message")
+                    or legacy_payload.get("summary")
+                ),
+                payload=legacy_payload,
+            )
+        if failure is None and legacy_error is not None and capability_result is None:
+            failure = RuntimeError(legacy_error)
+            failure_traceback = legacy_error
+        if timeout_exceeded:
+            failure = TimeoutError(f"Job timed out after {timeout_seconds}s")
+            failure_traceback = failure_traceback or str(failure)
 
-            # **2026-06-22 fix (Task 1):** the entire terminal
-            # persistence block is now shielded from task cancellation.
-            # After the ``watchdog.cancel()`` + ``CancelledError`` fix
-            # above, the outer task may still be in a canceled state.
-            # ``asyncio.shield`` ensures the terminal status / event /
-            # broadcast always complete, even if the enclosing task is
-            # being torn down. Without this, a fast-completing capability
-            # whose ``done`` event closes the bus can cause the
-            # cancellation to propagate and skip persistence, leaving
-            # the job ``running`` in the database forever.
-            try:
-                await asyncio.shield(
-                    self._write_terminal(
-                        job, current,
-                        contract=contract,
-                        finished_at=finished_at,
-                        cancelled=cancelled,
-                    )
-                )
-            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
-                logger.exception(
-                    "JobRunner terminal-shield failed job={job_id}: {err}",
-                    job_id=job.job_id[:12],
-                    err=exc,
-                )
-                # Emergency write so the DB never stays RUNNING forever.
-                with suppress(Exception):
-                    await self.store.update_status(
-                        job.job_id,
-                        status=JobStatus.FAILED,
-                        finished_at=datetime.now(UTC),
-                        error=f"terminal-shield raised: {exc!r}",
-                    )
+        await asyncio.shield(
+            self._finish_job(
+                job,
+                result=capability_result,
+                failure=failure,
+                failure_traceback=failure_traceback,
+                partial_resources=partial_resources,
+            )
+        )
+
+    async def _finish_job(
+        self,
+        job: Job,
+        *,
+        result: CapabilityResult | None,
+        failure: BaseException | None,
+        failure_traceback: str | None,
+        partial_resources: list[dict[str, Any]],
+    ) -> None:
+        finished_at = datetime.now(UTC)
+        current = await self.store.get(job.job_id)
+        cancelled = current is not None and current.status == JobStatus.CANCELLED
+        contract = self._build_contract(
+            job,
+            capability_result=result,
+            error_msg=(
+                f"{type(failure).__name__}: {failure}" if failure is not None else None
+            ),
+            error_diagnostic=failure_traceback,
+            terminal_status=(
+                JobTerminalStatus.CANCELLED if cancelled else None
+            ),
+            finished_at=finished_at,
+            partial_artifacts=partial_resources,
+        )
+        error_log_ref = None
+        if failure is not None:
+            error_log_ref = self._write_error_log(
+                job.job_id,
+                failure_traceback or f"{type(failure).__name__}: {failure}",
+            )
+        await self._write_terminal(
+            job,
+            contract=contract,
+            capability_result=result,
+            finished_at=finished_at,
+            error_log_ref=error_log_ref,
+        )
+
+    @staticmethod
+    def _write_error_log(job_id: str, text: str) -> ArtifactRef:
+        from tutor.services.artifacts import to_artifact_key
+        from tutor.services.config.settings import get_settings
+
+        data_dir = Path(get_settings().data_dir)
+        log_path = data_dir / "job_logs" / job_id / "error.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(text, encoding="utf-8", errors="replace")
+        return ArtifactRef(
+            name="error.log",
+            kind="text",
+            artifact_key=to_artifact_key(log_path, data_dir),
+        )
 
     # ------------------------------------------------------------------
     # Contract helpers
@@ -544,23 +481,14 @@ class JobRunner:
     def _build_contract(
         job: Job,
         *,
-        final_result: dict[str, Any] | None,
+        capability_result: CapabilityResult | None,
         error_msg: str | None,
+        error_diagnostic: str | None,
         terminal_status: JobTerminalStatus | None,
         finished_at: datetime,
         partial_artifacts: list[dict[str, Any]] | None = None,
     ) -> JobResultContract:
-        """Build a :class:`JobResultContract` from the in-flight state.
-
-        Precedence (highest first):
-          1. explicit ``terminal_status`` (e.g. ``CANCELLED``)
-          2. error event without result  → ``FAILED`` with CAPABILITY_ERROR
-          3. no result event at all       → ``FAILED`` with MISSING_RESULT
-          4. structured contract inside the result event → use it
-          5. mixed succeeded/failed artifacts → ``PARTIAL``
-          6. otherwise → ``SUCCEEDED``
-        """
-        # 1. explicit cancellation wins
+        """Convert the internal capability hand-off to the public contract."""
         if terminal_status == JobTerminalStatus.CANCELLED:
             return JobResultContract(
                 job_id=job.job_id,
@@ -571,25 +499,26 @@ class JobRunner:
                 partial_artifacts=_materialize_partial_artifacts(partial_artifacts),
             )
 
-        # 2. error event
-        if error_msg is not None and final_result is None:
+        if error_msg is not None:
+            code = "JOB_TIMEOUT" if error_msg.startswith("TimeoutError:") else "CAPABILITY_FAILED"
+            if error_msg.startswith("LookupError: unknown capability"):
+                code = "UNKNOWN_CAPABILITY"
             return JobResultContract(
                 job_id=job.job_id,
                 capability=job.capability,
                 status=JobTerminalStatus.FAILED,
                 assistant_message=f"任务失败：{error_msg}"[:200],
                 error=JobError(
-                    code="CAPABILITY_ERROR",
+                    code=code,
                     message=error_msg[:200],
-                    diagnostic=error_msg,
-                    retryable=True,
+                    diagnostic=error_diagnostic or error_msg,
+                    retryable=code != "UNKNOWN_CAPABILITY",
                 ),
                 finished_at=finished_at,
                 partial_artifacts=_materialize_partial_artifacts(partial_artifacts),
             )
 
-        # 3. no result event at all
-        if final_result is None:
+        if capability_result is None:
             return JobResultContract(
                 job_id=job.job_id,
                 capability=job.capability,
@@ -604,12 +533,12 @@ class JobRunner:
                 partial_artifacts=_materialize_partial_artifacts(partial_artifacts),
             )
 
-        # 4. structured contract inside the result event
-        if isinstance(final_result, dict) and isinstance(final_result.get("result_contract"), dict):
+        payload = capability_result.payload
+        if isinstance(payload.get("result_contract"), dict):
             try:
                 base = JobResultContract.model_validate(
                     {
-                        **final_result["result_contract"],
+                        **payload["result_contract"],
                         "job_id": job.job_id,
                         "capability": job.capability,
                         "finished_at": finished_at,
@@ -620,12 +549,10 @@ class JobRunner:
                 # fall through to default
                 pass
 
-        # 5 + 6. infer status from artifacts; default SUCCEEDED
         artifacts: list[dict[str, Any]] = []
-        if isinstance(final_result, dict):
-            raw_artifacts = final_result.get("artifacts")
-            if isinstance(raw_artifacts, list):
-                artifacts = [a for a in raw_artifacts if isinstance(a, dict)]
+        raw_artifacts = payload.get("artifacts")
+        if isinstance(raw_artifacts, list):
+            artifacts = [a for a in raw_artifacts if isinstance(a, dict)]
         statuses = [a.get("status") for a in artifacts]
         if artifacts and "succeeded" in statuses and "failed" in statuses:
             status = JobTerminalStatus.PARTIAL
@@ -644,17 +571,30 @@ class JobRunner:
             assistant_message = "所有资源生成均失败"
         else:
             status = JobTerminalStatus.SUCCEEDED
-            assistant_message = (
-                (final_result.get("assistant_message") if isinstance(final_result, dict) else None)
-                or (final_result.get("summary") if isinstance(final_result, dict) else None)
-                or "任务完成"
+            payload_message = payload.get("assistant_message") or payload.get("summary")
+            assistant_message = capability_result.assistant_message or (
+                payload_message if isinstance(payload_message, str) else "任务完成"
             )
+
+        public_artifacts: list[ArtifactResult] = []
+        for artifact in artifacts:
+            with suppress(ValidationError):
+                public_artifacts.append(ArtifactResult.model_validate(artifact))
+        public_artifacts.extend(
+            ArtifactResult(
+                resource_type=artifact.kind or "artifact",
+                title=artifact.name,
+                metadata={"artifact_key": artifact.artifact_key},
+            )
+            for artifact in capability_result.artifacts
+        )
 
         return JobResultContract(
             job_id=job.job_id,
             capability=job.capability,
             status=status,
             assistant_message=assistant_message,
+            artifacts=public_artifacts,
             finished_at=finished_at,
             partial_artifacts=_materialize_partial_artifacts(partial_artifacts),
         )
@@ -662,49 +602,122 @@ class JobRunner:
     async def _write_terminal(
         self,
         job: Job,
-        current: Job | None,
         *,
         contract: JobResultContract,
+        capability_result: CapabilityResult | None,
         finished_at: datetime,
-        cancelled: bool,
+        error_log_ref: ArtifactRef | None,
     ) -> None:
-        """Idempotent terminal write: event + status + broadcast.
+        """Persist and publish only runner-authored terminal lifecycle events."""
+        current = await self.store.get(job.job_id)
+        if current is None or any(
+            event.get("type") == "job_terminal" for event in (current.events or [])
+        ):
+            return
 
-        Called inside ``asyncio.shield`` so cancellation of the
-        enclosing task cannot skip persistence.
-        """
-        next_seq = await self._next_seq(job.job_id)
+        next_seq = (current.last_seq or 0) + 1
+        compatibility_events: list[dict[str, Any]] = []
+        if contract.status in {JobTerminalStatus.SUCCEEDED, JobTerminalStatus.PARTIAL}:
+            result_payload = capability_result.payload if capability_result else {}
+            result_event = self._runner_event(
+                job,
+                event_type="result",
+                content=json.dumps(result_payload, ensure_ascii=False, default=str),
+                seq=next_seq,
+                metadata={
+                    "artifacts": [
+                        artifact.model_dump(mode="json")
+                        for artifact in (capability_result.artifacts if capability_result else ())
+                    ],
+                    "follow_up_tasks": [
+                        {
+                            "kind": spec.kind,
+                            "payload": spec.payload,
+                            "dedupe_key": spec.dedupe_key,
+                        }
+                        for spec in (
+                            capability_result.follow_up_tasks if capability_result else ()
+                        )
+                    ],
+                },
+            )
+            compatibility_events.append(result_event)
+            next_seq += 1
+            compatibility_events.append(
+                self._runner_event(job, event_type="done", content="", seq=next_seq)
+            )
+            next_seq += 1
+        elif contract.status == JobTerminalStatus.FAILED:
+            compatibility_events.append(
+                self._runner_event(
+                    job,
+                    event_type="error",
+                    content=contract.error.message if contract.error else contract.assistant_message,
+                    seq=next_seq,
+                    metadata={
+                        "code": contract.error.code if contract.error else "CAPABILITY_FAILED",
+                        "error_log_ref": (
+                            error_log_ref.model_dump(mode="json")
+                            if error_log_ref is not None
+                            else None
+                        ),
+                    },
+                )
+            )
+            next_seq += 1
+
+        for event in compatibility_events:
+            await self.store.append_event(job.job_id, event, event["seq"])
+
         terminal_evt = self._terminal_event(job, contract, seq=next_seq)
-        persisted = await self._persist_terminal_once(job.job_id, terminal_evt)
+        job_status = _contract_to_job_status(contract.status)
+        err_text = (
+            contract.error.diagnostic or contract.error.message
+            if contract.error is not None
+            else None
+        )
+        persisted = await self.store.set_terminal(
+            job.job_id,
+            status=job_status,
+            finished_at=finished_at,
+            result=contract.model_dump(mode="json"),
+            error=err_text,
+            error_log_ref=error_log_ref,
+            terminal_event=terminal_evt,
+        )
         if not persisted:
             logger.debug(
                 "JobRunner terminal event already persisted job={job_id}",
                 job_id=job.job_id[:12],
             )
 
-        if current is not None and current.status == JobStatus.CANCELLED:
-            await self.store.update_status(
-                job.job_id,
-                status=JobStatus.CANCELLED,
-                finished_at=finished_at,
-                result=contract.model_dump(mode="json"),
-            )
-        else:
-            job_status = _contract_to_job_status(contract.status)
-            err_text = (
-                contract.error.diagnostic or contract.error.message
-                if contract.error is not None
-                else None
-            )
-            await self.store.update_status(
-                job.job_id,
-                status=job_status,
-                finished_at=finished_at,
-                result=contract.model_dump(mode="json"),
-                error=err_text,
-            )
-
+            return
+        for event in compatibility_events:
+            await self._broadcast(job.job_id, event)
         await self._broadcast(job.job_id, terminal_evt)
+
+    @staticmethod
+    def _runner_event(
+        job: Job,
+        *,
+        event_type: str,
+        content: str,
+        seq: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "type": event_type,
+            "source": "job_runner",
+            "stage": "terminal",
+            "content": content,
+            "job_id": job.job_id,
+            "session_id": job.session_id,
+            "turn_id": "",
+            "seq": seq,
+            "timestamp": datetime.now(UTC).timestamp(),
+            "event_id": uuid.uuid4().hex,
+            "metadata": metadata or {},
+        }
 
     @staticmethod
     def _terminal_event(
@@ -745,28 +758,6 @@ class JobRunner:
             return 0
         return (job.last_seq or 0) + 1
 
-    async def _persist_terminal_once(
-        self,
-        job_id: str,
-        terminal_evt: dict[str, Any],
-    ) -> bool:
-        """Persist the terminal event idempotently.
-
-        Returns ``True`` if this call performed the write, ``False``
-        if a prior run already did. The guard is a simple
-        last-event-type check on the replay buffer — fast, and
-        good enough to prevent double-terminal broadcasts when a
-        process restarts mid-job and tries to resume.
-        """
-        job = await self.store.get(job_id)
-        if job is None:
-            return False
-        events = list(job.events or [])
-        if events and events[-1].get("type") == "job_terminal":
-            return False
-        await self.store.append_event(job_id, terminal_evt, terminal_evt["seq"])
-        return True
-
     # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
@@ -800,40 +791,14 @@ class JobRunner:
         for job in active:
             if job.status == JobStatus.RUNNING:
                 error_msg = "process restarted while job was running"
-                # Was running when the process died; mark as failed.
-                await self.store.update_status(
-                    job.job_id,
-                    status=JobStatus.FAILED,
-                    finished_at=datetime.now(UTC),
-                    error=error_msg,
-                )
-                count += 1
             elif job.status == JobStatus.PENDING:
                 error_msg = "process restarted before job could start"
-                # Never started; safe to leave as PENDING and let the
-                # next submit() flow bring them up via re-submission.
-                # For now, mark FAILED too so the UI doesn't hang.
-                await self.store.update_status(
-                    job.job_id,
-                    status=JobStatus.FAILED,
-                    finished_at=datetime.now(UTC),
-                    error=error_msg,
-                )
-                count += 1
             else:
-                continue
-            # **2026-07-09 fix:** synthesise a terminal contract + event
-            # so the frontend's event-handler can save the workflow
-            # timeline and assistant message to the conversation.
-            # Re-fetch the freshly reaped job (it now has finished_at
-            # and a status row we can stuff into the contract).
-            reaped = await self.store.get(job.job_id)
-            if reaped is None:
                 continue
             # Pull every resource event from the replay buffer so the
             # right pane can list "what we got before dying".
             partial_artifacts: list[dict[str, Any]] = []
-            for ev in reaped.events or []:
+            for ev in job.events or []:
                 if ev.get("type") == "resource":
                     md = ev.get("metadata") or {}
                     partial_artifacts.append(
@@ -850,6 +815,7 @@ class JobRunner:
                             },
                         }
                     )
+            finished_at = datetime.now(UTC)
             contract = JobResultContract(
                 job_id=job.job_id,
                 capability=job.capability,
@@ -862,13 +828,17 @@ class JobRunner:
                     message=error_msg,
                     retryable=True,
                 ),
-                finished_at=datetime.now(UTC),
+                finished_at=finished_at,
                 partial_artifacts=partial_artifacts,
             )
-            seq = await self._next_seq(job.job_id)
-            terminal_evt = self._terminal_event(reaped, contract, seq=seq)
-            await self._persist_terminal_once(job.job_id, terminal_evt)
-            await self._broadcast(job.job_id, terminal_evt)
+            await self._write_terminal(
+                job,
+                contract=contract,
+                capability_result=None,
+                finished_at=finished_at,
+                error_log_ref=self._write_error_log(job.job_id, error_msg),
+            )
+            count += 1
         if count:
             # This is normal on dev restart — the previous process's
             # asyncio tasks are gone and the UI needs terminal states.

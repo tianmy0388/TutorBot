@@ -10,24 +10,22 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.agents.assessment.adaptive_strategy import AdaptiveStrategyEngine
 from tutor.agents.assessment.assessment_agent import AssessmentAgent
 from tutor.capabilities.assessment import AssessmentCapability
 from tutor.core.context import UnifiedContext
 from tutor.core.stream import StreamEventType
 from tutor.core.stream_bus import StreamBus
+from tutor.services.learner_profile import _close_profile_store_sync
+from tutor.services.learner_profile.builder import (
+    get_profile_builder,
+)
+from tutor.services.learner_profile.store import ProfileStore
 from tutor.services.learning_events.schema import (
     EventType,
     LearningEvent,
 )
 from tutor.services.learning_events.store import LearningEventStore
-from tutor.services.learner_profile.builder import (
-    ProfileBuilder,
-    get_profile_builder,
-)
-from tutor.services.learner_profile.store import ProfileStore
-from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.llm.base import LLMResponse
 
 
@@ -134,7 +132,7 @@ async def test_full_pipeline_emits_all_stages(capability):
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
     await capability.run(ctx, bus)
-    await bus.done()
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
     stages = [e.stage for e in events if e.type == StreamEventType.STAGE_START]
@@ -161,13 +159,12 @@ async def test_result_includes_report_and_strategy(capability):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await capability.run(ctx, bus)
-    await bus.done()
+    result = await capability.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    assert len(results) == 1
-    payload = json.loads(results[0].content)
+    assert not [e for e in events if e.type in {StreamEventType.RESULT, StreamEventType.DONE}]
+    payload = result.payload
 
     assert "report" in payload
     assert "strategy" in payload
@@ -195,12 +192,11 @@ async def test_strategy_includes_review_for_low_mastery(capability):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await capability.run(ctx, bus)
-    await bus.done()
+    result = await capability.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    payload = json.loads(results[0].content)
+    payload = result.payload
     actions = payload["strategy"]["actions"]
     action_types = {a["action_type"] for a in actions}
     # Either review (low mastery) or tutoring (weak concept)
@@ -266,12 +262,11 @@ async def test_no_events_produces_empty_report(env_setup):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await cap.run(ctx, bus)
-    await bus.done()
+    result = await cap.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    payload = json.loads(results[0].content)
+    payload = result.payload
     assert payload["report"]["events_analyzed"] == 0
     assert payload["report"]["trajectory"] == "insufficient_data"
 

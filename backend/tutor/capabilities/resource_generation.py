@@ -15,7 +15,7 @@ Pipeline (per idea.md):
     6. quality_review          → per-resource verdict + quality_score
     7. package_assembly        → ResourcePackage
     8. path_integration        → KG PlannedPath attached
-    9. result_emission         → RESULT event + DONE
+    9. result_handoff          → CapabilityResult returned to JobRunner
 
 Each Agent emits its own stage events; the capability emits high-level
 stage_start / stage_end wrappers around each pipeline stage.
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from pathlib import PurePosixPath
 from typing import Any
 
 from loguru import logger
@@ -50,6 +51,7 @@ from tutor.agents.safety.anti_hallucination import (
     OverallVerdict,
 )
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
+from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.knowledge_graph.service import (
@@ -60,6 +62,7 @@ from tutor.services.learner_profile.builder import (
     get_profile_builder,
 )
 from tutor.services.resource_package.schema import (
+    ArtifactRef,
     Resource,
     ResourcePackage,
     ResourceReview,
@@ -126,12 +129,6 @@ class ResourceGenerationCapability(BaseCapability):
         self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
         self.ppt_generator = ppt_generator or PPTGeneratorAgent()
         self.package_store = package_store
-        # **2026-07-08 fix (fdb26152):** strong references to
-        # fire-and-forget video render tasks. Without this, asyncio
-        # GC's the task as soon as ``_start_pending_video_renders``
-        # returns and the manim subprocess gets cancelled mid-encode.
-        self._bg_render_tasks: list[asyncio.Task] = []
-
     @property
     def _builder(self) -> ProfileBuilder:
         if self.builder is None:
@@ -148,7 +145,7 @@ class ResourceGenerationCapability(BaseCapability):
     # Entry point
     # ------------------------------------------------------------------
 
-    async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
         profile_snapshot: dict[str, Any] = {}
         intent: Intent | None = None
         resources: list[Resource] = []
@@ -165,7 +162,7 @@ class ResourceGenerationCapability(BaseCapability):
                 intent = await self.intent_agent.process(context, stream=stream)
             except Exception as exc:  # noqa: BLE001
                 logger.exception(f"IntentUnderstandingAgent failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"意图解析失败 (回退): {exc}", source="resource_capability"
                 )
                 intent = parse_intent_keyword(context.user_message)
@@ -183,7 +180,7 @@ class ResourceGenerationCapability(BaseCapability):
                 context.metadata["learner_profile"] = profile
             except Exception as exc:  # noqa: BLE001
                 logger.exception(f"Profile load failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"画像加载失败: {exc}", source="resource_capability"
                 )
                 profile_snapshot = {}
@@ -226,7 +223,7 @@ class ResourceGenerationCapability(BaseCapability):
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(f"KG query failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"知识图谱查询失败 (回退): {exc}",
                     source="resource_capability",
                 )
@@ -291,7 +288,7 @@ class ResourceGenerationCapability(BaseCapability):
                         logger.debug(f"stream.resource() emission failed: {exc!r}")
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(f"Content/Pedagogy failed: {exc!r}")
-                    await stream.error(
+                    await stream.observation(
                         f"内容生成失败: {exc}", source="resource_capability"
                     )
             else:
@@ -570,49 +567,46 @@ class ResourceGenerationCapability(BaseCapability):
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(f"ResourcePackage persistence failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"资源包持久化失败 (不影响本轮): {exc}",
                     source="resource_capability",
                 )
 
-        # ------------------------------------------------------------------
-        # Stage 12: Video rendering status (2026-06-21 plan, C2)
-        # ------------------------------------------------------------------
-        # The agent already outputs ``VideoResource(render_status="pending")``.
-        # We kick off the actual ``manim`` subprocess via
-        # :meth:`ManimRenderService.render`, which is async + uses
-        # ``loop.run_in_executor`` so the manim subprocess never blocks
-        # the FastAPI event loop. Each render updates the resource's
-        # ``render_status`` in-place and re-saves the package so the UI
-        # can poll/snapshot it without the user reloading.
-        #
-        # **2026-07-08 fix (fdb26152):** rendering is now fire-and-forget.
-        # Before this, ``_render_pending_videos`` was awaited inline, so
-        # a slow Manim render pushed the job past 600s — even though the
-        # resource was already streamable. Now we start the render
-        # background tasks, register them on the running loop (so they
-        # keep going after ``cap.run()`` returns), and IMMEDIATELY emit
-        # ``stream.result()`` so the user gets the package + the final
-        # contract without waiting for video encoding. The render task
-        # keeps streaming ``RESOURCE`` events for each finished video
-        # (with the updated ``render_status`` / ``video_url``) so the
-        # right-pane card updates live as the video comes online.
-        # We also persist a strong reference to the task so it can't be
-        # garbage-collected mid-render.
-        render_bg_tasks = await self._start_pending_video_renders(
-            package, context, stream
+        follow_up_tasks = tuple(
+            FollowUpTaskSpec(
+                kind="video_render",
+                payload={
+                    "package_id": package.package_id,
+                    "resource_id": resource.resource_id,
+                    "user_id": context.user_id,
+                },
+                dedupe_key=f"video:{package.package_id}:{resource.resource_id}",
+            )
+            for resource in package.resources
+            if resource.type == ResourceType.VIDEO
+            and (resource.format_specific or {}).get("render_status") == "pending"
         )
-        # Hold a reference on the capability instance for the lifetime
-        # of the loop. The task is fire-and-forget; if the loop ends
-        # the manim subprocess is torn down anyway.
-        if render_bg_tasks:
-            self._bg_render_tasks.extend(render_bg_tasks)
+        artifact_refs: list[ArtifactRef] = []
+        for resource in package.resources:
+            fs = resource.format_specific or {}
+            artifact_key = fs.get("artifact_key")
+            if artifact_key:
+                artifact_refs.append(
+                    ArtifactRef(
+                        name=PurePosixPath(str(artifact_key)).name,
+                        kind=resource.type.value,
+                        artifact_key=str(artifact_key),
+                    )
+                )
+            for raw in fs.get("artifacts") or []:
+                try:
+                    ref = ArtifactRef.model_validate(raw)
+                except Exception:  # noqa: BLE001
+                    continue
+                if ref.artifact_key:
+                    artifact_refs.append(ref)
 
-        # ------------------------------------------------------------------
-        # Emit final result
-        # ------------------------------------------------------------------
-        await stream.result(
-            {
+        payload = {
                 "package": package.model_dump(mode="json"),
                 "summary": package.summary(),
                 "reviews": [
@@ -625,10 +619,13 @@ class ResourceGenerationCapability(BaseCapability):
                 ],
                 "kg_summary": kg_summary,
                 "next_step": "open_resource_cards",
-            },
-            source="resource_capability",
+            }
+        return CapabilityResult(
+            assistant_message=f"已生成 {len(package.resources)} 项学习资源",
+            payload=payload,
+            artifacts=tuple(artifact_refs),
+            follow_up_tasks=follow_up_tasks,
         )
-        await stream.done(source="resource_capability")
 
 # ---------------------------------------------------------------------------
 # PPT bookkeeping
@@ -824,7 +821,7 @@ class ResourceGenerationCapability(BaseCapability):
             )
             res.format_specific["render_status"] = "failed"
             res.format_specific["render_error"] = f"{type(exc).__name__}: {exc}"
-            await stream.error(
+            await stream.observation(
                 f"视频渲染异常: {res.title} — {exc}",
                 source="resource_capability",
             )
@@ -983,7 +980,7 @@ class ResourceGenerationCapability(BaseCapability):
                 return await coro
             except Exception as exc:  # noqa: BLE001
                 logger.exception(f"{rtype.value} generation failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"{rtype.value} 生成失败: {exc}",
                     source="resource_capability",
                 )
@@ -1014,7 +1011,7 @@ class ResourceGenerationCapability(BaseCapability):
                 return await coro
             except Exception as exc:  # noqa: BLE001
                 logger.exception(f"{rtype.value} generation failed: {exc!r}")
-                await stream.error(
+                await stream.observation(
                     f"{rtype.value} 生成失败: {exc}",
                     source="resource_capability",
                 )

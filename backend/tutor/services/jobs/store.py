@@ -16,8 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +41,7 @@ from sqlalchemy.types import Integer as SqlInteger
 
 from tutor.services.config.settings import get_settings
 from tutor.services.jobs.schema import Job, JobStatus
+from tutor.services.resource_package.schema import ArtifactRef
 
 
 class _Base(DeclarativeBase):
@@ -71,6 +71,7 @@ class JobRow(_Base):
 
     # Lifecycle
     error = Column(String, nullable=True)
+    error_log_ref = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, index=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
@@ -110,6 +111,16 @@ class JobStore:
         engine = self._ensure_engine()
         async with engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
+            columns = {
+                str(row[1])
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA table_info(jobs)")
+                ).fetchall()
+            }
+            if "error_log_ref" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN error_log_ref JSON"
+                )
         logger.info(f"JobStore ready at {self.db_path}")
 
     async def close(self) -> None:
@@ -144,18 +155,18 @@ class JobStore:
         store = self
 
         class _Ctx:
-            async def __aenter__(self_):
-                self_._s = store._sessionmaker()  # type: ignore[union-attr]
-                return self_._s
+            async def __aenter__(self):
+                self._s = store._sessionmaker()  # type: ignore[union-attr]
+                return self._s
 
-            async def __aexit__(self_, exc_type, exc, tb):
+            async def __aexit__(self, exc_type, exc, tb):
                 try:
                     if exc_type is None:
-                        await self_._s.commit()
+                        await self._s.commit()
                     else:
-                        await self_._s.rollback()
+                        await self._s.rollback()
                 finally:
-                    await self_._s.close()
+                    await self._s.close()
 
         return _Ctx()
 
@@ -165,16 +176,15 @@ class JobStore:
         """Insert-or-replace a job row."""
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                existing = await session.execute(
-                    select(JobRow).where(JobRow.job_id == job.job_id)
-                )
-                existing_row = existing.scalar_one_or_none()
-                if existing_row is not None:
-                    await session.delete(existing_row)
-                    await session.flush()
-                session.add(self._to_row(job))
+        async with self._write_lock, self._with_session() as session:
+            existing = await session.execute(
+                select(JobRow).where(JobRow.job_id == job.job_id)
+            )
+            existing_row = existing.scalar_one_or_none()
+            if existing_row is not None:
+                await session.delete(existing_row)
+                await session.flush()
+            session.add(self._to_row(job))
         return job
 
     async def update_status(
@@ -190,24 +200,81 @@ class JobStore:
         """Patch the lifecycle fields of a job."""
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                row = (
-                    await session.execute(
-                        select(JobRow).where(JobRow.job_id == job_id)
-                    )
-                ).scalar_one_or_none()
-                if row is None:
-                    return
-                row.status = status.value
-                if error is not None:
-                    row.error = error
-                if started_at is not None:
-                    row.started_at = started_at
-                if finished_at is not None:
-                    row.finished_at = finished_at
-                if result is not None:
-                    row.result = result
+        async with self._write_lock, self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return
+            row.status = status.value
+            if error is not None:
+                row.error = error
+            if started_at is not None:
+                row.started_at = started_at
+            if finished_at is not None:
+                row.finished_at = finished_at
+            if result is not None:
+                row.result = result
+
+    async def set_terminal(
+        self,
+        job_id: str,
+        *,
+        status: JobStatus,
+        finished_at: datetime | None,
+        result: dict[str, Any],
+        terminal_event: dict[str, Any],
+        error: str | None = None,
+        error_log_ref: ArtifactRef | None = None,
+    ) -> bool:
+        """Atomically persist a job's one terminal transition.
+
+        The replay buffer is the durable idempotency guard.  Status, public
+        result, diagnostic reference and ``job_terminal`` are committed under
+        the same write lock and database transaction, so a retry cannot append
+        a second terminal event or replace the first outcome.
+        """
+        terminal_statuses = {
+            JobStatus.SUCCEEDED,
+            JobStatus.PARTIAL,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }
+        if status not in terminal_statuses:
+            raise ValueError(f"set_terminal requires terminal status, got {status}")
+
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            events: list[dict[str, Any]] = list(row.events or [])
+            if any(event.get("type") == "job_terminal" for event in events):
+                return False
+
+            events.append(terminal_event)
+            if len(events) > self.MAX_EVENTS_PER_JOB:
+                events = events[-self.MAX_EVENTS_PER_JOB :]
+            row.events = events
+            row.event_count = (row.event_count or 0) + 1
+            row.last_seq = int(terminal_event.get("seq") or row.last_seq or 0)
+            row.status = status.value
+            row.finished_at = finished_at
+            row.result = result
+            row.error = error
+            row.error_log_ref = (
+                error_log_ref.model_dump(mode="json")
+                if error_log_ref is not None
+                else None
+            )
+            return True
 
     async def append_event(
         self,
@@ -221,51 +288,48 @@ class JobStore:
         """
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                row = (
-                    await session.execute(
-                        select(JobRow).where(JobRow.job_id == job_id)
-                    )
-                ).scalar_one_or_none()
-                if row is None:
-                    return
-                buf: list[dict[str, Any]] = list(row.events or [])
-                buf.append(event_dict)
-                if len(buf) > self.MAX_EVENTS_PER_JOB:
-                    buf = buf[-self.MAX_EVENTS_PER_JOB :]
-                row.events = buf
-                row.event_count = (row.event_count or 0) + 1
-                row.last_seq = last_seq
+        async with self._write_lock, self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return
+            buf: list[dict[str, Any]] = list(row.events or [])
+            buf.append(event_dict)
+            if len(buf) > self.MAX_EVENTS_PER_JOB:
+                buf = buf[-self.MAX_EVENTS_PER_JOB :]
+            row.events = buf
+            row.event_count = (row.event_count or 0) + 1
+            row.last_seq = last_seq
 
     async def delete(self, job_id: str) -> bool:
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                row = (
-                    await session.execute(
-                        select(JobRow).where(JobRow.job_id == job_id)
-                    )
-                ).scalar_one_or_none()
-                if row is None:
-                    return False
-                await session.delete(row)
+        async with self._write_lock, self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            await session.delete(row)
         return True
 
     async def delete_user(self, user_id: str) -> int:
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                rows = (
-                    await session.execute(
-                        select(JobRow).where(JobRow.user_id == user_id)
-                    )
-                ).scalars().all()
-                count = len(rows)
-                for r in rows:
-                    await session.delete(r)
+        async with self._write_lock, self._with_session() as session:
+            rows = (
+                await session.execute(
+                    select(JobRow).where(JobRow.user_id == user_id)
+                )
+            ).scalars().all()
+            count = len(rows)
+            for r in rows:
+                await session.delete(r)
         return count
 
     # ---- reads ------------------------------------------------------------
@@ -399,6 +463,11 @@ class JobStore:
             language=job.language,
             metadata_json=dict(job.metadata or {}),
             error=job.error,
+            error_log_ref=(
+                job.error_log_ref.model_dump(mode="json")
+                if job.error_log_ref is not None
+                else None
+            ),
             created_at=job.created_at,
             started_at=job.started_at,
             finished_at=job.finished_at,
@@ -429,7 +498,12 @@ class JobStore:
             language=row.language or "zh",
             metadata=dict(row.metadata_json or {}),
             error=row.error,
-            created_at=row.created_at or datetime.now(timezone.utc),
+            error_log_ref=(
+                ArtifactRef.model_validate(row.error_log_ref)
+                if row.error_log_ref
+                else None
+            ),
+            created_at=row.created_at or datetime.now(UTC),
             started_at=row.started_at,
             finished_at=row.finished_at,
             result=dict(row.result) if row.result else None,

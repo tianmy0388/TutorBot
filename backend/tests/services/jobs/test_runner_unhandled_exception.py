@@ -10,7 +10,7 @@ contract is built with ``error_msg=None`` + ``final_result=None`` →
 of what actually went wrong.
 
 The fix: surface the capability's actual exception in the contract
-(``error_code=CAPABILITY_ERROR`` with the exception type + message
+(``error_code=CAPABILITY_FAILED`` with the exception type + message
 in ``diagnostic``) so the operator can see the real cause in the
 logs / error message.
 """
@@ -19,10 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.jobs.runner import JobRunner
@@ -58,7 +56,7 @@ class _CapabilitiesStub:
 async def test_runner_surfaces_capability_exception_as_capability_error(
     tmp_path, monkeypatch
 ) -> None:
-    """An unhandled exception from cap.run() must show up as CAPABILITY_ERROR
+    """An unhandled exception from cap.run() must show up as CAPABILITY_FAILED
     with the exception type + message — NOT as a generic MISSING_RESULT."""
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
     from tutor.services.config.settings import reset_settings_cache
@@ -98,9 +96,9 @@ async def test_runner_surfaces_capability_exception_as_capability_error(
 
     contract = JobResultContract.model_validate(stored.result)
     assert contract.error is not None
-    # The real fix: the contract should be CAPABILITY_ERROR, not MISSING_RESULT.
-    assert contract.error.code == "CAPABILITY_ERROR", (
-        f"expected CAPABILITY_ERROR, got {contract.error.code!r} "
+    # The stable lifecycle code is CAPABILITY_FAILED, not MISSING_RESULT.
+    assert contract.error.code == "CAPABILITY_FAILED", (
+        f"expected CAPABILITY_FAILED, got {contract.error.code!r} "
         f"(message={contract.error.message!r})"
     )
     # The exception details should be in the diagnostic so the operator
@@ -108,6 +106,8 @@ async def test_runner_surfaces_capability_exception_as_capability_error(
     assert contract.error.diagnostic is not None
     assert "quality_review" in contract.error.diagnostic
     assert "RuntimeError" in contract.error.diagnostic
+    assert stored.error_log_ref is not None
+    assert stored.error_log_ref.artifact_key
 
     await store.close()
     reset_job_store()

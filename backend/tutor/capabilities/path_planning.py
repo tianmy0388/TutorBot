@@ -6,6 +6,7 @@ Placeholder for Phase 3.
 from __future__ import annotations
 
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
+from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 
@@ -22,7 +23,7 @@ class PathPlanningCapability(BaseCapability):
         tags=["path", "planning"],
     )
 
-    async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
         async with stream.stage("locate", source="path_capability"):
             await stream.observation(
                 "在知识图谱中定位学生当前位置...",
@@ -52,7 +53,10 @@ class PathPlanningCapability(BaseCapability):
             "(占位) PathPlanningCapability 完整实现将在 Phase 3",
             source="path_capability",
         )
-        await stream.done(source="path_capability")
+        return CapabilityResult(
+            assistant_message="学习路径规划已完成",
+            payload={"status": "placeholder", "next_step": "path_planning_phase_3"},
+        )
 
 
 __all__ = ["PathPlanningCapability"]

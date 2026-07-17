@@ -13,22 +13,24 @@ The tests below cover these three points at the JobRunner boundary.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 import pytest
-
+from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.jobs.contracts import JobResultContract
 from tutor.services.jobs.runner import JobRunner
-from tutor.services.jobs.schema import JobStatus, JobSubmit
-from tutor.services.jobs.store import get_job_store, reset_job_store
+from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
+from tutor.services.jobs.store import JobStore, get_job_store, reset_job_store
+from tutor.services.resource_package.schema import ArtifactRef
 
 
 class _NoopCapability:
-    """A capability that finishes immediately with no events."""
+    """A capability that finishes immediately with a typed result."""
 
-    async def run(self, context: UnifiedContext, bus: StreamBus) -> None:
-        return None
+    async def run(self, context: UnifiedContext, bus: StreamBus) -> CapabilityResult:
+        return CapabilityResult(assistant_message="已就绪")
 
 
 class _CapabilitiesStub:
@@ -122,8 +124,8 @@ async def test_terminal_persisted_exactly_once(fresh_runner) -> None:
         f"expected exactly 1 terminal event, got {terminal_count}"
     )
 
-    # Now simulate a restart: a second _persist_terminal_once call
-    # against the same job must be a no-op.
+    # Now simulate a restart: a second atomic terminal write against the
+    # same job must be a no-op.
     contract = JobResultContract(
         job_id=job.job_id,
         capability="tutoring",
@@ -131,7 +133,13 @@ async def test_terminal_persisted_exactly_once(fresh_runner) -> None:
         assistant_message="已就绪",
     )
     terminal_evt = runner._terminal_event(stored, contract, seq=999)
-    persisted = await runner._persist_terminal_once(job.job_id, terminal_evt)
+    persisted = await store.set_terminal(
+        job.job_id,
+        status=JobStatus.SUCCEEDED,
+        finished_at=stored.finished_at,
+        result=contract.model_dump(mode="json"),
+        terminal_event=terminal_evt,
+    )
     assert persisted is False, "second terminal persist must be a no-op"
 
     stored2 = await store.get(job.job_id)
@@ -139,3 +147,76 @@ async def test_terminal_persisted_exactly_once(fresh_runner) -> None:
         1 for e in (stored2.events or []) if e.get("type") == "job_terminal"
     )
     assert terminal_count2 == 1, "no new terminal event must be appended"
+
+
+@pytest.mark.asyncio
+async def test_store_set_terminal_is_idempotent_across_retries(fresh_runner) -> None:
+    _, store = fresh_runner
+    submit = JobSubmit(
+        user_id="u1",
+        session_id="sess-atomic",
+        capability="tutoring",
+        message="atomic terminal",
+    )
+    job = await JobRunner(
+        job_store=store,
+        capability_registry=_CapabilitiesStub({"tutoring": _NoopCapability()}),  # type: ignore[arg-type]
+    ).submit(submit)
+    await _wait_for_terminal(store, job.job_id)
+    stored = await store.get(job.job_id)
+    assert stored is not None
+
+    duplicate = {
+        "type": "job_terminal",
+        "source": "job_runner",
+        "stage": "terminal",
+        "content": "duplicate",
+        "job_id": job.job_id,
+        "session_id": job.session_id,
+        "turn_id": "",
+        "seq": stored.last_seq + 1,
+        "timestamp": 1.0,
+        "event_id": "duplicate-terminal",
+        "metadata": {"contract": stored.result},
+    }
+    changed = await store.set_terminal(
+        job.job_id,
+        status=JobStatus.FAILED,
+        finished_at=stored.finished_at,
+        result={"should": "not replace"},
+        error="duplicate",
+        error_log_ref=ArtifactRef(
+            name="error.log",
+            kind="text",
+            artifact_key=f"job_logs/{job.job_id}/error.log",
+        ),
+        terminal_event=duplicate,
+    )
+
+    after = await store.get(job.job_id)
+    assert changed is False
+    assert after is not None
+    assert after.status == JobStatus.SUCCEEDED
+    assert after.result == stored.result
+    assert sum(e.get("type") == "job_terminal" for e in after.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_store_migrates_error_log_ref_for_existing_database(tmp_path) -> None:
+    db_path = tmp_path / "legacy-jobs.db"
+    original = JobStore(db_path=db_path)
+    await original.init()
+    await original.close()
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE jobs DROP COLUMN error_log_ref")
+
+    reopened = JobStore(db_path=db_path)
+    await reopened.init()
+    job = Job(user_id="legacy")
+    await reopened.save(job)
+    stored = await reopened.get(job.job_id)
+
+    assert stored is not None
+    assert stored.error_log_ref is None
+    await reopened.close()
