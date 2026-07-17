@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from loguru import logger
 from sqlalchemy import (
@@ -464,11 +465,11 @@ class ResourcePackageStore:
                     PackageRow.package_metadata["session_id"].as_string()
                     == session_id
                 )
-                .order_by(PackageRow.created_at.asc(), PackageRow.id.asc())
+                .order_by(PackageRow.created_at.desc(), PackageRow.id.desc())
                 .limit(limit)
             )
             rows = (await session.execute(stmt)).scalars().all()
-            return [self._row_to_package(row) for row in rows]
+            return [self._row_to_package(row) for row in reversed(rows)]
 
     async def count(self, user_id: str) -> int:
         self._ensure_engine()
@@ -638,10 +639,24 @@ def _portable_format_specific(
             if normalized is not None
         ]
 
-    for legacy_name in ("mp4_path", "pptx_path"):
+    for legacy_name in ("path", "mp4_path", "pptx_path"):
         legacy_value = payload.pop(legacy_name, None)
         if legacy_value and not payload.get("artifact_key"):
             key = _path_value_to_key(str(legacy_value), data_dir)
+            if key is not None:
+                payload["artifact_key"] = key
+            else:
+                payload["artifact_unresolved"] = True
+
+    legacy_url = payload.get("url")
+    if legacy_url and not payload.get("artifact_key"):
+        parsed = urlsplit(str(legacy_url))
+        if parsed.scheme not in {"http", "https"}:
+            raw_url = unquote(parsed.path) if parsed.scheme == "file" else str(legacy_url)
+            if raw_url.startswith("/static/manim/"):
+                raw_url = f"manim_videos/{raw_url.removeprefix('/static/manim/')}"
+            key = _path_value_to_key(raw_url, data_dir)
+            payload.pop("url", None)
             if key is not None:
                 payload["artifact_key"] = key
             else:
@@ -666,15 +681,31 @@ def _portable_artifact_entry(
         for key in ("name", "kind")
         if key in entry and entry[key] is not None
     }
-    raw = entry.get("artifact_key") or entry.get("path")
+    raw = entry.get("artifact_key") or entry.get("path") or entry.get("url")
     if not raw:
         return result or None
+    parsed = urlsplit(str(raw))
+    if parsed.scheme in {"http", "https"}:
+        result["url"] = str(raw)
+        return result
+    if parsed.scheme == "file":
+        raw = unquote(parsed.path)
+    elif "url" in entry and str(raw).startswith("/static/manim/"):
+        raw = f"manim_videos/{str(raw).removeprefix('/static/manim/')}"
     key = _path_value_to_key(str(raw), data_dir, already_key="artifact_key" in entry)
     if key is None:
         result["unresolved"] = True
     else:
         result["artifact_key"] = key
     return result
+
+
+def portable_format_specific(
+    value: dict[str, Any] | None,
+    data_dir: Path,
+) -> dict[str, Any]:
+    """Return a wire-safe resource payload with canonical artifact keys."""
+    return _portable_format_specific(value, data_dir)
 
 
 def _path_value_to_key(
@@ -706,6 +737,7 @@ __all__ = [
     "PackageRow",
     "ResourcePackageStore",
     "ResourceRow",
+    "portable_format_specific",
     "get_resource_package_store",
     "reset_resource_package_store",
 ]

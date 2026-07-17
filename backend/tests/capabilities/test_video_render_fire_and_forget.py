@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
-
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.resource_package.schema import (
@@ -41,9 +41,16 @@ from tutor.services.resource_package.schema import (
 class _FakeRenderService:
     """Stand-in for ``ManimRenderService`` — controllable success/failure."""
 
-    def __init__(self, *, success: bool = True, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        success: bool = True,
+        delay: float = 0.0,
+        video_path: str | Path = "/tmp/v.mp4",
+    ) -> None:
         self.success = success
         self.delay = delay
+        self.video_path = video_path
         self.calls: list[tuple[str, str]] = []
 
     async def render(self, *, code: str, scene_class: str):  # type: ignore[no-untyped-def]
@@ -57,7 +64,7 @@ class _FakeRenderService:
         r = _R()
         r.success = self.success
         r.public_url = "https://cdn.example.com/v.mp4" if self.success else None
-        r.video_path = "/tmp/v.mp4" if self.success else None
+        r.video_path = self.video_path if self.success else None
         r.duration_seconds = 30.0 if self.success else None
         r.error = None if self.success else "manim exit 1"
         r.attempts = 1
@@ -180,6 +187,43 @@ async def test_render_success_emits_resource_event_with_ready_status() -> None:
     )
     assert payload["format_specific"]["render_status"] == "ready"
     assert payload["format_specific"]["video_url"] == "https://cdn.example.com/v.mp4"
+
+
+@pytest.mark.asyncio
+async def test_render_success_streams_portable_artifact_key(
+    tmp_path, monkeypatch
+) -> None:
+    from tutor.services import manim_render as mr_module
+    from tutor.services.config.settings import get_settings
+
+    data_dir = tmp_path / "data"
+    video_path = data_dir / "manim_videos" / "v.mp4"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+
+    cap = _cap()
+    fake = _FakeRenderService(success=True, video_path=video_path)
+    module_patch = monkeypatch_for_module(mr_module, fake)
+    bus = StreamBus()
+    queue = bus.subscribe()
+    resource = _video_resource()
+    package = ResourcePackage(topic="t", resources=[resource])
+
+    await cap._render_one_video(
+        resource, package, UnifiedContext(language="zh"), bus
+    )
+    module_patch.undo()
+
+    while True:
+        event = await asyncio.wait_for(queue.get(), timeout=2.0)
+        if event.type.value == "resource":
+            break
+    streamed = event.metadata["resource"]["format_specific"]
+    assert resource.format_specific["artifact_key"] == "manim_videos/v.mp4"
+    assert streamed["artifact_key"] == "manim_videos/v.mp4"
+    assert "mp4_path" not in resource.format_specific
+    assert "mp4_path" not in streamed
 
 
 @pytest.mark.asyncio

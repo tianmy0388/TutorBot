@@ -156,6 +156,149 @@ def _client(tmp_path, monkeypatch, *, multi_user_enabled: bool = True) -> httpx.
 
 
 @pytest.mark.asyncio
+async def test_aggregate_removes_legacy_absolute_paths_from_response(
+    tmp_path, monkeypatch
+) -> None:
+    from sqlalchemy import select
+    from tutor.services.jobs import Job, get_job_store, reset_job_store
+    from tutor.services.jobs.schema import JobStatus
+    from tutor.services.learner_profile import get_profile_store
+    from tutor.services.resource_package import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+        get_resource_package_store,
+        reset_resource_package_store,
+    )
+    from tutor.services.resource_package.store import ResourceRow
+
+    reset_resource_package_store()
+    reset_job_store()
+    async with _client(tmp_path, monkeypatch) as client:
+        response = await client.post(
+            "/api/v1/conversations",
+            json={"session_id": "legacy-path-session", "user_id": "owner"},
+        )
+        assert response.status_code == 201
+
+        data_dir = tmp_path / "data"
+        safe_path = data_dir / "legacy" / "figure.png"
+        safe_path.parent.mkdir(parents=True)
+        safe_path.write_bytes(b"png")
+        outside_path = tmp_path / "private" / "secret.png"
+
+        store = get_resource_package_store()
+        await store.init()
+        job_store = get_job_store()
+        await job_store.init()
+        await job_store.save(
+            Job(
+                job_id="succeeded-parent-job",
+                user_id="owner",
+                session_id="legacy-path-session",
+                capability="resource_generation",
+                status=JobStatus.SUCCEEDED,
+                message="generate",
+                language="zh",
+                metadata={"selected_resource_types": ["code"]},
+                result={
+                    "job_id": "succeeded-parent-job",
+                    "capability": "resource_generation",
+                    "status": "succeeded",
+                    "assistant_message": "done",
+                    "artifacts": [{"resource_type": "code", "status": "succeeded"}],
+                },
+            )
+        )
+        package = ResourcePackage(
+            package_id="legacy-path-package",
+            topic="legacy",
+            metadata={
+                "session_id": "legacy-path-session",
+                "job_id": "succeeded-parent-job",
+            },
+            resources=[
+                Resource(
+                    resource_id="safe-legacy-resource",
+                    type=ResourceType.CODE,
+                    title="safe",
+                ),
+                Resource(
+                    resource_id="unsafe-legacy-resource",
+                    type=ResourceType.CODE,
+                    title="unsafe",
+                ),
+            ],
+        )
+        await store.save(package, user_id="owner")
+        async with store._with_session() as session:  # noqa: SLF001
+            safe_row = (
+                await session.execute(
+                    select(ResourceRow).where(
+                        ResourceRow.resource_id == "safe-legacy-resource"
+                    )
+                )
+            ).scalar_one()
+            safe_row.format_specific = {
+                "artifacts": [
+                    {"name": "figure.png", "path": str(safe_path), "kind": "png"}
+                ],
+                "mp4_path": str(safe_path),
+            }
+            unsafe_row = (
+                await session.execute(
+                    select(ResourceRow).where(
+                        ResourceRow.resource_id == "unsafe-legacy-resource"
+                    )
+                )
+            ).scalar_one()
+            unsafe_row.format_specific = {
+                "artifacts": [
+                    {"name": "secret.png", "path": str(outside_path), "kind": "png"}
+                ],
+                "pptx_path": str(outside_path),
+            }
+        await get_profile_store().init()
+
+        response = await client.get(
+            "/api/v1/conversations/legacy-path-session/aggregate?user_id=owner"
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        serialized = response.text
+        assert str(safe_path) not in serialized
+        assert str(outside_path) not in serialized
+        by_id = {
+            resource["resource_id"]: resource
+            for resource in body["packages"][0]["resources"]
+        }
+        safe_fs = by_id["safe-legacy-resource"]["format_specific"]
+        assert safe_fs["artifacts"][0]["artifact_key"] == "legacy/figure.png"
+        assert safe_fs["artifact_key"] == "legacy/figure.png"
+        assert "path" not in safe_fs["artifacts"][0]
+        assert "mp4_path" not in safe_fs
+        unsafe_fs = by_id["unsafe-legacy-resource"]["format_specific"]
+        assert "pptx_path" not in unsafe_fs
+        assert "path" not in unsafe_fs["artifacts"][0]
+        assert any(
+            warning["code"] == "missing_artifact"
+            and warning["resource_id"] == "unsafe-legacy-resource"
+            and warning["artifact_key"] is None
+            for warning in body["recovery_warnings"]
+        )
+        assert safe_fs["artifacts"][0]["artifact_key"] == "legacy/figure.png"
+        unsafe_metadata = by_id["unsafe-legacy-resource"]["metadata"]
+        assert unsafe_metadata["recovery_contract"] == {
+            "job_id": "succeeded-parent-job",
+            "resource_types": ["code"],
+        }
+
+    reset_resource_package_store()
+    reset_job_store()
+
+
+@pytest.mark.asyncio
 async def test_local_mode_stale_browser_identity_reads_canonical_conversation(tmp_path, monkeypatch) -> None:
     async with _client(tmp_path, monkeypatch, multi_user_enabled=False) as client:
         created = await client.post(

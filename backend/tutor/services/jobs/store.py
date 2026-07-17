@@ -316,11 +316,11 @@ class JobStore:
             stmt = (
                 select(JobRow)
                 .where(JobRow.session_id == session_id)
-                .order_by(JobRow.created_at.asc(), JobRow.id.asc())
+                .order_by(JobRow.created_at.desc(), JobRow.id.desc())
                 .limit(limit)
             )
             rows = (await session.execute(stmt)).scalars().all()
-            return [self._row_to_job(row).to_summary() for row in rows]
+            return [self._row_to_job(row).to_summary() for row in reversed(rows)]
 
     async def count(
         self,

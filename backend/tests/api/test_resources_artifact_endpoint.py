@@ -38,9 +38,9 @@ resources_router = _resources_module.router
 _resources_module_pkg = _resources_module
 
 
-def _make_client() -> TestClient:
+def _make_client(*, multi_user_enabled: bool = True) -> TestClient:
     app = FastAPI()
-    app.state.settings = SimpleNamespace(multi_user_enabled=True)
+    app.state.settings = SimpleNamespace(multi_user_enabled=multi_user_enabled)
     app.include_router(resources_router, prefix="/api/v1")
     return TestClient(app)
 
@@ -338,6 +338,133 @@ async def test_artifact_endpoint_package_less_404_wrong_user(
     client = _make_client()
     resp = client.get(f"/api/v1/resources/u-WRONG/resources/{resource.resource_id}/artifacts/figure_1.png")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_local_mode_serves_historical_owner_artifacts_from_both_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+
+    data_dir = tmp_path / "data"
+    artifact = data_dir / "legacy" / "figure.png"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"legacy")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        type=ResourceType.CODE,
+        title="legacy",
+        format_specific={
+            "artifacts": [{"name": "figure.png", "path": str(artifact), "kind": "png"}]
+        },
+    )
+    package = ResourcePackage(topic="legacy", resources=[resource])
+    await isolated_store.save(package, user_id="historical-owner")
+    client = _make_client(multi_user_enabled=False)
+
+    scoped = client.get(
+        f"/api/v1/resources/packages/stale-browser/{package.package_id}/resources/"
+        f"{resource.resource_id}/artifacts/figure.png"
+    )
+    package_less = client.get(
+        f"/api/v1/resources/stale-browser/resources/{resource.resource_id}/artifacts/figure.png"
+    )
+
+    assert scoped.status_code == 200, scoped.text
+    assert package_less.status_code == 200, package_less.text
+    assert scoped.content == package_less.content == b"legacy"
+
+
+@pytest.mark.asyncio
+async def test_multi_user_mode_denies_historical_owner_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+
+    data_dir = tmp_path / "data"
+    artifact = data_dir / "legacy" / "figure.png"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"legacy")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        type=ResourceType.CODE,
+        title="legacy",
+        format_specific={"artifacts": [{"name": "figure.png", "path": str(artifact)}]},
+    )
+    package = ResourcePackage(topic="legacy", resources=[resource])
+    await isolated_store.save(package, user_id="owner-a")
+    attacker_package = ResourcePackage(topic="attacker", resources=[])
+    await isolated_store.save(attacker_package, user_id="owner-b")
+    client = _make_client(multi_user_enabled=True)
+
+    scoped = client.get(
+        f"/api/v1/resources/packages/owner-b/{package.package_id}/resources/"
+        f"{resource.resource_id}/artifacts/figure.png"
+    )
+    package_less = client.get(
+        f"/api/v1/resources/owner-b/resources/{resource.resource_id}/artifacts/figure.png"
+    )
+    mismatched_join = client.get(
+        f"/api/v1/resources/packages/owner-b/{attacker_package.package_id}/resources/"
+        f"{resource.resource_id}/artifacts/figure.png"
+    )
+
+    assert scoped.status_code == 404
+    assert package_less.status_code == 404
+    assert mismatched_join.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_legacy_url_normalizes_local_but_preserves_external(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+
+    data_dir = tmp_path / "data"
+    local = data_dir / "code_runs" / "run" / "figure.png"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"local")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        type=ResourceType.CODE,
+        title="urls",
+        format_specific={
+            "artifacts": [
+                {"name": "figure.png", "url": "code_runs/run/figure.png"},
+                {"name": "external.png", "url": "https://cdn.example.com/external.png"},
+            ]
+        },
+    )
+    package = ResourcePackage(topic="urls", resources=[resource])
+    await isolated_store.save(package, user_id="owner")
+
+    loaded = await isolated_store.get_resource(resource.resource_id)
+    assert loaded is not None
+    local_entry, external_entry = loaded.format_specific["artifacts"]
+    assert local_entry["artifact_key"] == "code_runs/run/figure.png"
+    assert "url" not in local_entry
+    assert external_entry["url"] == "https://cdn.example.com/external.png"
+    assert "artifact_key" not in external_entry
+
+    client = _make_client()
+    local_response = client.get(
+        f"/api/v1/resources/owner/resources/{resource.resource_id}/artifacts/figure.png"
+    )
+    external_response = client.get(
+        f"/api/v1/resources/owner/resources/{resource.resource_id}/artifacts/external.png"
+    )
+    assert local_response.status_code == 200
+    assert local_response.content == b"local"
+    assert external_response.status_code == 404
 
 
 if __name__ == "__main__":

@@ -291,12 +291,14 @@ async def get_resource_artifact(
     path is constrained to ``settings.data_dir`` so a tampered
     manifest cannot serve arbitrary files.
     """
-    user_id = identity_policy_for(request).resolve(user_id)
+    policy = identity_policy_for(request)
+    user_id = policy.resolve(user_id)
     return await _serve_resource_artifact(
         user_id=user_id,
         package_id=package_id,
         resource_id=resource_id,
         artifact_name=artifact_name,
+        allow_historical_owner=not policy.multi_user_enabled,
     )
 
 
@@ -316,12 +318,14 @@ async def get_resource_artifact_by_id_only(
     Resource id is globally unique, so we resolve it directly and
     only check that it belongs to ``user_id``.
     """
-    user_id = identity_policy_for(request).resolve(user_id)
+    policy = identity_policy_for(request)
+    user_id = policy.resolve(user_id)
     return await _serve_resource_artifact(
         user_id=user_id,
         package_id=None,
         resource_id=resource_id,
         artifact_name=artifact_name,
+        allow_historical_owner=not policy.multi_user_enabled,
     )
 
 
@@ -331,35 +335,49 @@ async def _serve_resource_artifact(
     package_id: str | None,
     resource_id: str,
     artifact_name: str,
+    allow_historical_owner: bool = False,
 ) -> FileResponse:
     """Shared implementation for the package-scoped and
     package-less artifact endpoints."""
-    from tutor.services.config.settings import get_settings
-
     store = get_resource_package_store()
     res = await store.get_resource(resource_id)
     if res is None:
         raise HTTPException(status_code=404, detail="resource not found")
 
+    from sqlalchemy import select
+
+    from tutor.services.resource_package.store import ResourceRow
+
+    store._ensure_engine()  # noqa: SLF001
+    async with store._with_session() as session:  # noqa: SLF001
+        row = (
+            await session.execute(
+                select(ResourceRow).where(ResourceRow.resource_id == resource_id)
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="resource not found")
+
     if package_id is not None:
         pkg = await store.get(package_id)
-        if pkg is None or (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
+        if (
+            pkg is None
+            or row.package_id != package_id
+            or (
+                not allow_historical_owner
+                and (
+                    (pkg.metadata or {}).get("user_id", "anonymous") != user_id
+                    or row.user_id != user_id
+                )
+            )
+        ):
             raise HTTPException(status_code=404, detail="resource not found")
     else:
         # Without package_id, cross-validate that this resource
         # actually belongs to user_id. The ResourceRow carries
         # user_id directly.
-        from sqlalchemy import select
-
-        from tutor.services.resource_package.store import ResourceRow
-
-        engine = store._ensure_engine()  # noqa: F841, SLF001
-        async with store._with_session() as session:  # noqa: SLF001
-            row = (
-                await session.execute(select(ResourceRow).where(ResourceRow.resource_id == resource_id))
-            ).scalar_one_or_none()
-            if row is None or row.user_id != user_id:
-                raise HTTPException(status_code=404, detail="resource not found")
+        if not allow_historical_owner and row.user_id != user_id:
+            raise HTTPException(status_code=404, detail="resource not found")
 
     artifacts = (res.format_specific or {}).get("artifacts") or []
     if not isinstance(artifacts, list):
@@ -383,7 +401,10 @@ async def _serve_resource_artifact(
 
     artifact_key = match.get("artifact_key")
     path_str = match.get("path")
-    raw = artifact_key or path_str
+    url_str = match.get("url")
+    if isinstance(url_str, str) and url_str.startswith(("http://", "https://")):
+        raise HTTPException(status_code=404, detail="external artifact is not stored locally")
+    raw = artifact_key or path_str or url_str
     if not raw:
         raise HTTPException(status_code=404, detail="artifact has no artifact_key")
 

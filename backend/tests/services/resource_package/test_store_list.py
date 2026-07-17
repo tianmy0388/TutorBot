@@ -9,11 +9,10 @@ even for header-only listings.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from tutor.services.resource_package.schema import (
     Resource,
     ResourcePackage,
@@ -141,3 +140,24 @@ async def test_list_respects_limit_and_topic_filter(fresh_store) -> None:
     for p in items:
         assert "Transformer" in p["topic"]
         assert p["types"] == ["document"]
+
+
+@pytest.mark.asyncio
+async def test_list_for_session_keeps_newest_window_in_chronological_order(
+    fresh_store,
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    for index in range(25):
+        pkg = _build_pkg(
+            "u1", topic=f"topic-{index:02d}", types=[ResourceType.DOCUMENT]
+        )
+        pkg.package_id = f"package-{index:02d}"
+        pkg.metadata["session_id"] = "window-session"
+        pkg.created_at = base + timedelta(minutes=index)
+        await fresh_store.save(pkg, user_id="u1")
+
+    packages = await fresh_store.list_for_session("window-session", limit=20)
+
+    assert [package.package_id for package in packages] == [
+        f"package-{index:02d}" for index in range(5, 25)
+    ]

@@ -178,14 +178,12 @@ async def get_conversation_aggregate(
 
 def _mark_missing_artifacts(packages, jobs):
     """Annotate missing resources without failing the aggregate request."""
-    from pathlib import Path
-
     from tutor.services.artifacts import (
         UnsafeArtifactKey,
         resolve_artifact_key,
-        to_artifact_key,
     )
     from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.store import portable_format_specific
 
     data_dir = get_settings().data_dir
     recovered = []
@@ -194,37 +192,27 @@ def _mark_missing_artifacts(packages, jobs):
         resources = []
         for resource in package.resources:
             missing: list[str] = []
-            fs = resource.format_specific or {}
-            references: list[tuple[str, str]] = []
+            fs = portable_format_specific(resource.format_specific, data_dir)
+            references: list[str] = []
+            unresolved_count = int(bool(fs.get("artifact_unresolved")))
             artifacts = fs.get("artifacts")
             if isinstance(artifacts, list):
                 for entry in artifacts:
                     if not isinstance(entry, dict):
                         continue
-                    raw = entry.get("artifact_key") or entry.get("path")
-                    if raw:
-                        references.append((str(raw), "artifact_key" if entry.get("artifact_key") else "path"))
+                    if entry.get("unresolved"):
+                        unresolved_count += 1
+                    key = entry.get("artifact_key")
+                    if key:
+                        references.append(str(key))
             root_ref = fs.get("artifact_key")
             if root_ref:
-                references.append((str(root_ref), "artifact_key"))
-            for legacy_name in ("mp4_path", "pptx_path"):
-                if fs.get(legacy_name):
-                    references.append((str(fs[legacy_name]), "path"))
+                references.append(str(root_ref))
 
-            for raw, shape in references:
+            for key in dict.fromkeys(references):
                 try:
-                    if shape == "artifact_key":
-                        artifact_path = resolve_artifact_key(raw, data_dir)
-                        key = raw
-                    else:
-                        legacy_path = Path(raw)
-                        if legacy_path.is_absolute():
-                            key = to_artifact_key(legacy_path, data_dir)
-                        else:
-                            key = raw.replace("\\", "/")
-                        artifact_path = resolve_artifact_key(key, data_dir)
+                    artifact_path = resolve_artifact_key(key, data_dir)
                 except UnsafeArtifactKey:
-                    key = raw if shape == "artifact_key" else ""
                     artifact_path = None
                 if artifact_path is None or not artifact_path.is_file():
                     missing.append(key)
@@ -238,26 +226,57 @@ def _mark_missing_artifacts(packages, jobs):
                         )
                     )
 
-            if missing:
+            for _ in range(unresolved_count):
+                warnings.append(
+                    RecoveryWarning(
+                        code="missing_artifact",
+                        message="A generated resource file is missing and can be regenerated.",
+                        package_id=package.package_id,
+                        resource_id=resource.resource_id,
+                        artifact_key=None,
+                    )
+                )
+
+            if missing or unresolved_count:
                 metadata = dict(resource.metadata or {})
                 metadata["artifact_missing"] = True
                 metadata["missing_artifact_keys"] = missing
                 if not metadata.get("recovery_contract"):
+                    preferred_job_id = (package.metadata or {}).get("job_id")
                     retry_parent = next(
                         (
                             job
                             for job in reversed(jobs)
                             if job.get("capability") == "resource_generation"
-                            and job.get("status") in {"failed", "partial"}
+                            and job.get("status") in {"succeeded", "failed", "partial"}
+                            and (
+                                not preferred_job_id
+                                or job.get("job_id") == preferred_job_id
+                            )
                         ),
                         None,
                     )
+                    if retry_parent is None:
+                        retry_parent = next(
+                            (
+                                job
+                                for job in reversed(jobs)
+                                if job.get("capability") == "resource_generation"
+                                and job.get("status")
+                                in {"succeeded", "failed", "partial"}
+                            ),
+                            None,
+                        )
                     if retry_parent:
                         metadata["recovery_contract"] = {
                             "job_id": retry_parent.get("job_id"),
                             "resource_types": [resource.type.value],
                         }
-                resource = resource.model_copy(update={"metadata": metadata})
+                resource = resource.model_copy(
+                    update={"format_specific": fs, "metadata": metadata}
+                )
+            else:
+                resource = resource.model_copy(update={"format_specific": fs})
             resources.append(resource)
         recovered.append(package.model_copy(update={"resources": resources}))
     return recovered, warnings

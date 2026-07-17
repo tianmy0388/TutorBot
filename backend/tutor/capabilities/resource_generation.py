@@ -760,7 +760,24 @@ class ResourceGenerationCapability(BaseCapability):
                 if render_result.public_url:
                     res.format_specific["video_url"] = render_result.public_url
                 if render_result.video_path:
-                    res.format_specific["mp4_path"] = str(render_result.video_path)
+                    from pathlib import Path
+
+                    from tutor.services.artifacts import (
+                        UnsafeArtifactKey,
+                        to_artifact_key,
+                    )
+                    from tutor.services.config.settings import get_settings
+
+                    res.format_specific.pop("mp4_path", None)
+                    try:
+                        res.format_specific["artifact_key"] = to_artifact_key(
+                            Path(render_result.video_path),
+                            get_settings().data_dir,
+                        )
+                        res.format_specific.pop("artifact_unresolved", None)
+                    except UnsafeArtifactKey:
+                        res.format_specific.pop("artifact_key", None)
+                        res.format_specific["artifact_unresolved"] = True
                 if render_result.duration_seconds:
                     res.format_specific["duration_seconds"] = (
                         render_result.duration_seconds

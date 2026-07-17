@@ -125,15 +125,21 @@ async def retry_job(user_id: str, job_id: str, req: RetryRequest, request: Reque
     already succeeded — a downstream re-package step uses that list to
     reassemble the full package.
     """
-    user_id = identity_policy_for(request).resolve(user_id)
+    policy = identity_policy_for(request)
+    user_id = policy.resolve(user_id)
     store = get_job_store()
     parent = await store.get(job_id)
-    if parent is None or parent.user_id != user_id:
+    if parent is None or (
+        policy.multi_user_enabled and parent.user_id != user_id
+    ):
         raise HTTPException(status_code=404, detail="job not found")
-    if parent.status not in (JobStatus.PARTIAL, JobStatus.FAILED):
+    if parent.status not in (JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus.FAILED):
         raise HTTPException(
             status_code=409,
-            detail=f"job is {parent.status.value!r}; only partial/failed jobs can be retried",
+            detail=(
+                f"job is {parent.status.value!r}; only succeeded/partial/failed "
+                "jobs can be retried"
+            ),
         )
 
     # Validate types are supported and actually failed in the parent.
@@ -160,21 +166,32 @@ async def retry_job(user_id: str, job_id: str, req: RetryRequest, request: Reque
             elif art.status == "succeeded":
                 parent_succeeded.add(art.resource_type)
 
-    not_failed = [t for t in req.resource_types if t not in parent_failed]
-    if not_failed:
+    retryable_types = set(parent_failed)
+    if parent.status == JobStatus.SUCCEEDED:
+        retryable_types.update(parent_succeeded)
+        retryable_types.update(
+            str(value)
+            for value in (parent.metadata or {}).get("selected_resource_types", [])
+        )
+    not_retryable = [t for t in req.resource_types if t not in retryable_types]
+    if not_retryable:
         raise HTTPException(
             status_code=422,
-            detail=(f"cannot retry types that did not fail in the parent: {not_failed}"),
+            detail=(
+                "cannot retry types absent from the parent recovery contract: "
+                f"{not_retryable}"
+            ),
         )
 
     # Build the child job metadata.
+    preserved_artifacts = parent_succeeded.difference(req.resource_types)
     child_meta: dict[str, Any] = {
         **dict(parent.metadata or {}),
         "selected_resource_types": list(req.resource_types),
         "parent_job_id": parent.job_id,
         "plan_id": (parent.metadata or {}).get("plan_id", ""),
         "topic": (parent.metadata or {}).get("topic", ""),
-        "preserved_artifacts": sorted(parent_succeeded),
+        "preserved_artifacts": sorted(preserved_artifacts),
     }
 
     runner = get_job_runner()
@@ -184,6 +201,7 @@ async def retry_job(user_id: str, job_id: str, req: RetryRequest, request: Reque
             message=parent.message,
             capability=parent.capability,
             language=parent.language,
+            session_id=parent.session_id,
             metadata=child_meta,
         )
     )
@@ -191,7 +209,7 @@ async def retry_job(user_id: str, job_id: str, req: RetryRequest, request: Reque
         "job_id": child.job_id,
         "parent_job_id": parent.job_id,
         "selected_types": list(req.resource_types),
-        "preserved_artifacts": sorted(parent_succeeded),
+        "preserved_artifacts": sorted(preserved_artifacts),
         "topic": (parent.metadata or {}).get("topic", ""),
         "status": child.status.value,
     }

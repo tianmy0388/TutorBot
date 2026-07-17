@@ -186,6 +186,11 @@ describe("conversation recovery hydration", () => {
         },
       ],
     };
+    aggregate.packages.push({
+      ...aggregate.packages[0],
+      package_id: "package-2",
+      created_at: "2026-07-17T00:01:00Z",
+    });
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify(aggregate), {
         status: 200,
@@ -211,7 +216,7 @@ describe("conversation recovery hydration", () => {
     const state = useTutorStore.getState();
     expect(state.sessionId).toBe("session-recovery");
     expect(state.messages.map((message) => message.content)).toEqual(["hello"]);
-    expect(state.latestPackage?.package_id).toBe("package-1");
+    expect(state.latestPackage?.package_id).toBe("package-2");
     expect(state.profileSummary).toEqual({ user_id: "local-user", version: 3 });
     expect(state.pathSummary).toEqual({ path_id: "path-1", current_index: 2 });
     expect(state.recoveryWarnings).toEqual(aggregate.recovery_warnings);
