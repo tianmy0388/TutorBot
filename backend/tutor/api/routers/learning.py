@@ -59,6 +59,18 @@ def _resolve_user(request: Request, requested: str | None) -> str:
         ) from exc
 
 
+def _store_unavailable(code: str, message: str, exc: Exception) -> HTTPException:
+    logger.error(
+        "learning persistence unavailable code={code} kind={kind}",
+        code=code,
+        kind=type(exc).__name__,
+    )
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"code": code, "message": message},
+    )
+
+
 @router.post("/learning/events", status_code=status.HTTP_202_ACCEPTED)
 async def append_learning_event(
     body: LearningEventRequest,
@@ -70,6 +82,7 @@ async def append_learning_event(
         event_id=body.event_id,
         user_id=user_id,
         session_id=body.session_id,
+        course=body.course,
         event_type=body.event_type,
         target_id=body.target_id,
         concept_id=body.concept_id,
@@ -87,6 +100,12 @@ async def append_learning_event(
                 "code": exc.code,
                 "message": "The event id is already used by different evidence",
             },
+        ) from exc
+    except Exception as exc:
+        raise _store_unavailable(
+            "LEARNING_EVENT_STORE_UNAVAILABLE",
+            "Learning event service is unavailable",
+            exc,
         ) from exc
 
     children = []
@@ -132,7 +151,14 @@ def _profile_projection(profile) -> dict[str, Any]:
 @router.get("/learning/profile/{user_id}")
 async def get_learning_profile(user_id: str, request: Request) -> dict[str, Any]:
     canonical = _resolve_user(request, user_id)
-    profile = await _workflow_for(request).profile_store.get(canonical)
+    try:
+        profile = await _workflow_for(request).profile_store.get(canonical)
+    except Exception as exc:
+        raise _store_unavailable(
+            "LEARNING_PROFILE_UNAVAILABLE",
+            "Learner profile service is unavailable",
+            exc,
+        ) from exc
     if profile is None:
         raise HTTPException(
             status_code=404,
@@ -149,11 +175,18 @@ async def get_learning_path(
 ) -> dict[str, Any]:
     canonical = _resolve_user(request, user_id)
     store = _workflow_for(request).profile_store
-    path = (
-        await store.get_path(canonical, profile_version)
-        if profile_version is not None
-        else await store.get_latest_path(canonical)
-    )
+    try:
+        path = (
+            await store.get_path(canonical, profile_version)
+            if profile_version is not None
+            else await store.get_latest_path(canonical)
+        )
+    except Exception as exc:
+        raise _store_unavailable(
+            "LEARNING_PATH_UNAVAILABLE",
+            "Learning path service is unavailable",
+            exc,
+        ) from exc
     if path is None:
         raise HTTPException(
             status_code=404,

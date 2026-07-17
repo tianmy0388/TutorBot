@@ -100,6 +100,7 @@ export interface TutorState {
 
   // Profile
   profile: LearnerProfileDetail | null;
+  profileOwnerId: string | null;
   profileLoaded: boolean;
 
   // Resources
@@ -112,6 +113,8 @@ export interface TutorState {
   // Knowledge graph
   currentCourse: string;
   plannedPath: PlannedPath | null;
+  plannedPathOwnerId: string | null;
+  plannedPathLoaded: boolean;
 
   // Knowledge base (Task 9)
   activeKnowledgeBaseId: string;
@@ -157,11 +160,11 @@ export interface TutorState {
   /** Generate a client-side session id post-hydration (SSR-safe). */
   hydrateSessionId: () => void;
   setSettingsOpen: (open: boolean) => void;
-  setProfile: (p: LearnerProfileDetail | null) => void;
+  setProfile: (p: LearnerProfileDetail | null, ownerId?: string) => void;
   setLatestPackage: (pkg: ResourcePackage | null) => void;
   selectResource: (resourceId: string | null) => void;
   dismissRecoveryWarning: (index: number) => void;
-  setPlannedPath: (p: PlannedPath | null) => void;
+  setPlannedPath: (p: PlannedPath | null, ownerId?: string) => void;
   setActiveKnowledgeBaseId: (id: string) => void;
   // 2026-06-21 plan (D10): RAG scope setters.
   setRagEnabled: (enabled: boolean) => void;
@@ -260,6 +263,7 @@ export const useTutorStore = create<TutorState>()(
     jobOrder: [],
 
     profile: null,
+    profileOwnerId: null,
     profileLoaded: false,
 
     latestPackage: null,
@@ -270,6 +274,8 @@ export const useTutorStore = create<TutorState>()(
 
     currentCourse: "ai_introduction",
     plannedPath: null,
+    plannedPathOwnerId: null,
+    plannedPathLoaded: false,
     activeKnowledgeBaseId: "ai_introduction",
     // 2026-06-21 plan (D10): default to RAG enabled, scope = all.
     // The chat composer renders a scope picker that overrides
@@ -327,7 +333,12 @@ export const useTutorStore = create<TutorState>()(
       set({ theme });
     },
     setSettingsOpen: (open) => set({ settingsOpen: open }),
-    setProfile: (p) => set({ profile: p, profileLoaded: true }),
+    setProfile: (p, ownerId) =>
+      set((state) => ({
+        profile: p,
+        profileOwnerId: ownerId ?? state.userId,
+        profileLoaded: true,
+      })),
     setLatestPackage: (pkg) =>
       set((state) => ({
         latestPackage: pkg,
@@ -346,7 +357,12 @@ export const useTutorStore = create<TutorState>()(
           selectedResourceId: resourceId,
         },
       })),
-    setPlannedPath: (p) => set({ plannedPath: p }),
+    setPlannedPath: (p, ownerId) =>
+      set((state) => ({
+        plannedPath: p,
+        plannedPathOwnerId: ownerId ?? state.userId,
+        plannedPathLoaded: true,
+      })),
     setActiveKnowledgeBaseId: (id) => set({ activeKnowledgeBaseId: id }),
     setRagEnabled: (enabled) => set({ ragEnabled: enabled }),
     setRetrievalScope: (scope) => set({ retrievalScope: scope }),
@@ -484,6 +500,8 @@ export const useTutorStore = create<TutorState>()(
         pathSummary: {},
         recoveryWarnings: [],
         plannedPath: null,
+        plannedPathOwnerId: null,
+        plannedPathLoaded: false,
         latestAssessment: null,
         latestStrategy: null,
         latestUnderstanding: null,
@@ -566,6 +584,8 @@ export const useTutorStore = create<TutorState>()(
         pathSummary: {},
         recoveryWarnings: [],
         plannedPath: null,
+        plannedPathOwnerId: null,
+        plannedPathLoaded: false,
         latestAssessment: null,
         latestStrategy: null,
         latestUnderstanding: null,
@@ -670,6 +690,8 @@ export const useTutorStore = create<TutorState>()(
         pathSummary: agg.path_summary ?? {},
         recoveryWarnings: agg.recovery_warnings ?? [],
         plannedPath: null,
+        plannedPathOwnerId: null,
+        plannedPathLoaded: false,
         latestAssessment: null,
         latestStrategy: null,
         latestUnderstanding: null,

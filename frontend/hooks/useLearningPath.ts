@@ -7,30 +7,57 @@ import { useTutorStore } from "@/lib/store";
 
 export function useLearningPath(userId?: string) {
   const fallbackUserId = useTutorStore((state) => state.userId);
-  const path = useTutorStore((state) => state.plannedPath);
+  const cachedPath = useTutorStore((state) => state.plannedPath);
+  const cacheOwner = useTutorStore((state) => state.plannedPathOwnerId);
+  const cacheLoaded = useTutorStore((state) => state.plannedPathLoaded);
+  const profile = useTutorStore((state) => state.profile);
+  const profileOwner = useTutorStore((state) => state.profileOwnerId);
   const setPath = useTutorStore((state) => state.setPlannedPath);
   const target = userId ?? fallbackUserId;
   const generation = useRef(0);
-  const [loaded, setLoaded] = useState(path !== null);
-  const [loading, setLoading] = useState(path === null);
-  const [error, setError] = useState<string | null>(null);
+  const [requestState, setRequestState] = useState<{
+    target: string | null;
+    loading: boolean;
+    error: string | null;
+  }>({ target: null, loading: false, error: null });
+
+  const ownsCache = Boolean(target) && cacheOwner === target;
+  const path = ownsCache ? cachedPath : null;
+  const loaded = ownsCache && cacheLoaded;
+  const requestIsCurrent = requestState.target === target;
+  const error = requestIsCurrent ? requestState.error : null;
+  const loading = Boolean(target) && (
+    (requestIsCurrent && requestState.loading) || (!loaded && !requestIsCurrent)
+  );
+  const stale = Boolean(
+    path &&
+    profile &&
+    profileOwner === target &&
+    typeof path.profile_version === "number" &&
+    path.profile_version < profile.version,
+  );
 
   const refresh = useCallback(async () => {
     if (!target) return;
     const request = ++generation.current;
-    setLoading(true);
-    setError(null);
+    setRequestState({ target, loading: true, error: null });
     try {
       const next = await getLearningPath(target);
       if (request !== generation.current) return;
-      setPath(next);
-      setLoaded(true);
+      setPath(next, target);
     } catch (reason) {
       if (request !== generation.current) return;
-      setError(reason instanceof Error ? reason.message : String(reason));
-      setLoaded(true);
+      setRequestState({
+        target,
+        loading: true,
+        error: reason instanceof Error ? reason.message : String(reason),
+      });
     } finally {
-      if (request === generation.current) setLoading(false);
+      if (request === generation.current) {
+        setRequestState((state) =>
+          state.target === target ? { ...state, loading: false } : state,
+        );
+      }
     }
   }, [setPath, target]);
 
@@ -41,15 +68,19 @@ export function useLearningPath(userId?: string) {
   }, [target]);
 
   useEffect(() => {
-    if (!path) void refresh();
-  }, [path, refresh]);
+    if (!loaded && target) void refresh();
+  }, [loaded, refresh, target]);
 
-  const status = error
-    ? "failed"
-    : path
-      ? "success"
-      : loaded
-        ? "empty"
-        : "loading";
-  return { path, status, loading, error, refresh } as const;
+  const status = loading
+    ? "loading"
+    : error
+      ? "failed"
+      : stale
+        ? "stale"
+        : path
+          ? "success"
+          : loaded
+            ? "empty"
+            : "loading";
+  return { path, status, stale, loading, error, refresh } as const;
 }

@@ -149,3 +149,108 @@ async def test_multi_user_mode_requires_identity_and_rejects_cross_user_event_id
     assert missing.json()["detail"]["code"] == "IDENTITY_REQUIRED"
     assert alice.status_code == 202
     assert bob.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_course_changes_are_part_of_event_id_conflict(client):
+    api, _, _, _ = client
+    payload = {
+        "event_id": "course-sensitive-event",
+        "event_type": "exercise_scored",
+        "concept_id": "attention",
+        "score": 0.7,
+        "course": "course-a",
+    }
+
+    first = await api.post("/api/learning/events", json=payload)
+    conflict = await api.post(
+        "/api/learning/events", json={**payload, "course": "course-b"}
+    )
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "LEARNING_EVENT_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_all_recovers_course_from_durable_event(
+    client,
+    monkeypatch,
+):
+    api, events, profiles, jobs = client
+    workflow = api._transport.app.state.learning_workflow
+
+    async def crash_after_event(*args, **kwargs):
+        raise RuntimeError("private database crash detail")
+
+    monkeypatch.setattr(workflow, "reconcile_user", crash_after_event)
+    for index, course in enumerate(
+        ("course-old", "", "course-middle", "", "course-recovered")
+    ):
+        response = await api.post(
+            "/api/learning/events",
+            json={
+                "event_id": f"course-crash-event-{index}",
+                "event_type": "exercise_scored",
+                "concept_id": "attention",
+                "score": 0.8,
+                "course": course,
+            },
+        )
+        assert response.status_code == 202
+    persisted = await events.query("local-user")
+    assert persisted[0].to_dict()["course"] == "course-recovered"
+
+    repaired = LearningWorkflow(
+        event_store=events,
+        profile_store=profiles,
+        job_store=jobs,
+    )
+    assert await repaired.reconcile_all() == 1
+    root = await jobs.get(repaired.root_job_id("local-user"))
+    child = (await jobs.get_children(root.job_id))[0]
+    assert child.metadata["course"] == "course-recovered"
+
+
+@pytest.mark.asyncio
+async def test_post_store_failure_is_stable_and_redacted(client, monkeypatch):
+    api, events, _, _ = client
+
+    async def fail_append(event):
+        raise RuntimeError("sqlite C:/private/learning.db secret-token")
+
+    monkeypatch.setattr(events, "append", fail_append)
+    response = await api.post(
+        "/api/learning/events",
+        json={"event_type": "resource_viewed"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "LEARNING_EVENT_STORE_UNAVAILABLE",
+        "message": "Learning event service is unavailable",
+    }
+    assert "private" not in response.text.lower()
+    assert "secret-token" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_profile_and_path_store_failures_are_stable_and_redacted(
+    client,
+    monkeypatch,
+):
+    api, _, profiles, _ = client
+
+    async def fail_read(*args, **kwargs):
+        raise RuntimeError("sqlite C:/private/profile.db secret-token")
+
+    monkeypatch.setattr(profiles, "get", fail_read)
+    profile = await api.get("/api/learning/profile/local-user")
+    monkeypatch.setattr(profiles, "get_latest_path", fail_read)
+    path = await api.get("/api/learning/path/local-user")
+
+    assert profile.status_code == path.status_code == 503
+    assert profile.json()["detail"]["code"] == "LEARNING_PROFILE_UNAVAILABLE"
+    assert path.json()["detail"]["code"] == "LEARNING_PATH_UNAVAILABLE"
+    assert "private" not in profile.text.lower() + path.text.lower()
+    assert "secret-token" not in profile.text + path.text

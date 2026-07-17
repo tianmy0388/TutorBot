@@ -71,8 +71,12 @@ export function ProfilePanel() {
         </button>
       </div>
 
-      {!profile ? (
-        <EmptyProfile loading={loading || status === "loading"} error={error} onRefresh={refresh} />
+      {status === "loading" ? (
+        <ProfileLoading />
+      ) : status === "failed" ? (
+        <ProfileFailure error={error} onRefresh={refresh} />
+      ) : !profile ? (
+        <EmptyProfile loading={false} error={null} onRefresh={refresh} />
       ) : (
         <>
           <div className="flex gap-1 mb-3 text-xs shrink-0">
@@ -123,7 +127,7 @@ function EmptyProfile({
       <Brain className="w-8 h-8 opacity-30" />
       <p>暂无画像数据</p>
       <p className="text-fg-subtle leading-relaxed">
-        完成一次"生成资源"或"即时答疑"后会建立画像
+        积累 5 条已评分学习事件，或完成一次效果评估后会建立画像
       </p>
       {error && <p className="text-red-400">{error}</p>}
       <button
@@ -133,6 +137,31 @@ function EmptyProfile({
       >
         {loading ? "加载中…" : "重试"}
       </button>
+    </div>
+  );
+}
+
+function ProfileLoading() {
+  return (
+    <div className="flex-1 flex items-center justify-center text-xs text-fg-muted">
+      画像加载中…
+    </div>
+  );
+}
+
+function ProfileFailure({
+  error,
+  onRefresh,
+}: {
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center text-center text-xs space-y-2 px-2">
+      <AlertCircle className="w-8 h-8 text-red-400 opacity-70" />
+      <p className="text-red-400">画像加载失败</p>
+      {error && <p className="text-fg-muted">{error}</p>}
+      <button onClick={onRefresh} className="btn-ghost text-xs">重试</button>
     </div>
   );
 }

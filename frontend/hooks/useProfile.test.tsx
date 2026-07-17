@@ -36,7 +36,12 @@ const profile = (user_id: string) => ({
 
 beforeEach(() => {
   mockedGetProfile.mockReset();
-  useTutorStore.setState({ userId: "local-user", profile: null, profileLoaded: false });
+  useTutorStore.setState({
+    userId: "local-user",
+    profile: null,
+    profileOwnerId: null,
+    profileLoaded: false,
+  } as any);
 });
 afterEach(cleanup);
 
@@ -76,5 +81,42 @@ describe("useProfile states", () => {
     await waitFor(() => expect(result.current.profile?.user_id).toBe("b"));
     await act(async () => resolveA(profile("a")));
     expect(result.current.profile?.user_id).toBe("b");
+  });
+
+  it("hides a completed user's cached profile immediately when the user changes", async () => {
+    let resolveB!: (value: null) => void;
+    mockedGetProfile
+      .mockResolvedValueOnce(profile("a"))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveB = resolve; }));
+    const { result, rerender } = renderHook(
+      ({ userId }) => useProfile(userId),
+      { initialProps: { userId: "a" } },
+    );
+    await waitFor(() => expect(result.current.status).toBe("success"));
+
+    rerender({ userId: "b" });
+
+    expect(result.current.profile).toBeNull();
+    expect(result.current.status).toBe("loading");
+    expect(mockedGetProfile).toHaveBeenLastCalledWith("b");
+    await act(async () => resolveB(null));
+    await waitFor(() => expect(result.current.status).toBe("empty"));
+  });
+
+  it("reports loading and then failed when refreshing a cached profile fails", async () => {
+    let rejectRefresh!: (reason: Error) => void;
+    mockedGetProfile
+      .mockResolvedValueOnce(profile("local-user"))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRefresh = reject; }));
+    const { result } = renderHook(() => useProfile());
+    await waitFor(() => expect(result.current.status).toBe("success"));
+
+    act(() => { void result.current.refresh(); });
+
+    expect(result.current.status).toBe("loading");
+    await act(async () => rejectRefresh(new Error("refresh offline")));
+    await waitFor(() => expect(result.current.status).toBe("failed"));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe("refresh offline");
   });
 });

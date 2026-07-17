@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from tutor.core.context import UnifiedContext
+from tutor.core.stream_bus import StreamBus
+from tutor.services.jobs.follow_up import ProfileUpdateFollowUpCapability
 from tutor.services.jobs.schema import JobStatus
 from tutor.services.jobs.store import JobStore
 from tutor.services.learner_profile.store import ProfileStore
@@ -159,3 +162,80 @@ async def test_path_child_is_globally_deduped_by_user_and_profile_version(workfl
     second = (await FollowUpScheduler(jobs).enqueue(parents[1].job_id, (spec,)))[0]
 
     assert first.job_id == second.job_id
+
+
+@pytest.mark.asyncio
+async def test_early_concurrent_reconcile_uses_latest_threshold_window(workflow):
+    service, events, _, jobs = workflow
+    sequences = []
+    for index in range(5):
+        appended = await events.append(
+            LearningEvent(
+                event_id=f"concurrent-{index}",
+                user_id="local-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.5,
+            )
+        )
+        sequences.append(appended.event.sequence)
+
+    await service.reconcile_user(
+        "local-user",
+        through_sequence=sequences[0],
+    )
+
+    root = await jobs.get(service.root_job_id("local-user"))
+    child = (await jobs.get_children(root.job_id))[0]
+    assert child.metadata["through_sequence"] == sequences[-1]
+
+
+@pytest.mark.asyncio
+async def test_profile_child_chains_next_fixed_window_without_eleventh_event(workflow):
+    service, events, profiles, jobs = workflow
+    for index in range(5):
+        appended = await events.append(
+            LearningEvent(
+                event_id=f"first-window-{index}",
+                user_id="local-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.4,
+            )
+        )
+        await service.reconcile_user(
+            "local-user", through_sequence=appended.event.sequence
+        )
+    root = await jobs.get(service.root_job_id("local-user"))
+    first_child = (await jobs.get_children(root.job_id))[0]
+
+    for index in range(5, 10):
+        appended = await events.append(
+            LearningEvent(
+                event_id=f"second-window-{index}",
+                user_id="local-user",
+                event_type=EventType.EXERCISE_SCORED,
+                concept_id="attention",
+                score=0.8,
+            )
+        )
+        duplicate = await service.reconcile_user(
+            "local-user", through_sequence=appended.event.sequence
+        )
+        assert duplicate[0].job_id == first_child.job_id
+
+    result = await ProfileUpdateFollowUpCapability(
+        event_store=events,
+        profile_store=profiles,
+    ).run(
+        UnifiedContext(user_id="local-user", metadata=dict(first_child.metadata)),
+        StreamBus(),
+    )
+
+    next_profiles = [
+        spec for spec in result.follow_up_tasks if spec.kind == "profile_update"
+    ]
+    assert len(next_profiles) == 1
+    assert next_profiles[0].dedupe_key == "profile_update:5"
+    assert next_profiles[0].payload["from_watermark"] == 5
+    assert next_profiles[0].payload["through_sequence"] == 10

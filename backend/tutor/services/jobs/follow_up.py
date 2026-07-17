@@ -171,40 +171,49 @@ class ProfileUpdateFollowUpCapability(BaseCapability):
         if through <= start:
             raise ValueError("profile event window must advance")
         await _require_current_claim(context)
+        events = await event_store.list_since(
+            context.user_id, start, through_sequence=through
+        )
+        window_course = next(
+            (event.course for event in reversed(events) if event.course),
+            str(context.metadata.get("course") or ""),
+        )
         current = await profile_store.get(context.user_id)
         current = current or empty_profile(context.user_id)
         if current.event_watermark < through:
             if current.event_watermark != start:
                 raise RuntimeError("profile watermark is stale")
-            events = await event_store.list_since(
-                context.user_id, start, through_sequence=through
-            )
-            candidate = builder.aggregate_events(
-                current, events, through_sequence=through
-            )
-            outcome = None
-
-            async def persist_profile() -> None:
-                nonlocal outcome
-                outcome = await profile_store.save_event_profile(
-                    candidate, expected_watermark=start
+            for _attempt in range(3):
+                candidate = builder.aggregate_events(
+                    current, events, through_sequence=through
                 )
+                outcome = None
 
-            guard = context.metadata.get("_claim_guard")
-            if callable(guard):
-                if not await guard(persist_profile):
-                    raise PermissionError("follow-up claim is no longer current")
+                async def persist_profile(candidate_to_save=candidate) -> None:
+                    nonlocal outcome
+                    outcome = await profile_store.save_event_profile(
+                        candidate_to_save, expected_watermark=start
+                    )
+
+                guard = context.metadata.get("_claim_guard")
+                if callable(guard):
+                    if not await guard(persist_profile):
+                        raise PermissionError("follow-up claim is no longer current")
+                else:
+                    await persist_profile()
+                if outcome is None:
+                    raise RuntimeError("profile persistence failed")
+                current = outcome.profile
+                if current.event_watermark >= through:
+                    break
+                if current.event_watermark != start:
+                    raise RuntimeError("profile watermark is stale")
             else:
-                await persist_profile()
-            if outcome is None:
-                raise RuntimeError("profile persistence failed")
-            current = outcome.profile
-            if current.event_watermark < through:
-                raise RuntimeError("profile watermark did not advance")
+                raise RuntimeError("profile changed repeatedly during event aggregation")
 
-        follow_ups: tuple[FollowUpTaskSpec, ...] = ()
+        follow_ups: list[FollowUpTaskSpec] = []
         if await profile_store.get_path(context.user_id, current.version) is None:
-            follow_ups = (
+            follow_ups.append(
                 FollowUpTaskSpec(
                     kind="path_rebuild",
                     dedupe_key=f"path_rebuild:{current.version}",
@@ -212,9 +221,38 @@ class ProfileUpdateFollowUpCapability(BaseCapability):
                         "user_id": context.user_id,
                         "profile_version": current.version,
                         "profile": current.model_dump(mode="json"),
-                        "course": str(context.metadata.get("course") or ""),
+                        "course": window_course,
                     },
-                ),
+                )
+            )
+        pending_scored = await event_store.count_scored_since(
+            context.user_id, current.event_watermark
+        )
+        pending_assessment = await event_store.has_assessment_since(
+            context.user_id, current.event_watermark
+        )
+        if pending_scored >= 5 or pending_assessment:
+            next_through = await event_store.latest_sequence(context.user_id)
+            pending_events = await event_store.list_since(
+                context.user_id,
+                current.event_watermark,
+                through_sequence=next_through,
+            )
+            next_course = next(
+                (event.course for event in reversed(pending_events) if event.course),
+                window_course,
+            )
+            follow_ups.append(
+                FollowUpTaskSpec(
+                    kind="profile_update",
+                    dedupe_key=f"profile_update:{current.event_watermark}",
+                    payload={
+                        "user_id": context.user_id,
+                        "from_watermark": current.event_watermark,
+                        "through_sequence": next_through,
+                        "course": next_course,
+                    },
+                )
             )
         return CapabilityResult(
             assistant_message="学习者画像已更新",
@@ -223,7 +261,7 @@ class ProfileUpdateFollowUpCapability(BaseCapability):
                 "event_watermark": current.event_watermark,
                 "knowledge_scores": dict(current.knowledge_map.scores),
             },
-            follow_up_tasks=follow_ups,
+            follow_up_tasks=tuple(follow_ups),
         )
 
 
@@ -244,6 +282,7 @@ class PathRebuildFollowUpCapability(BaseCapability):
 
     async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
         from tutor.services.knowledge_graph import get_knowledge_graph_service
+        from tutor.services.knowledge_graph.planner import KGPathPlanner
         from tutor.services.learner_profile.schema import (
             LearnerProfile,
             PersistedLearningPath,
@@ -275,8 +314,17 @@ class PathRebuildFollowUpCapability(BaseCapability):
         available_count = 0
         locked_count = 0
         if course and service.has_course(course):
-            model, _ = service.get_graph(course)
+            model, graph = service.get_graph(course)
             planned = service.plan_for_learner(course, profile)
+            if model.nodes and not any(
+                node.node_id in model.node_ids() for node in planned.nodes
+            ):
+                planned = KGPathPlanner().plan(
+                    model,
+                    graph,
+                    profile,
+                    path_id="__automatic_graph_fallback__",
+                )
             selected = {node.node_id for node in planned.nodes}
             nodes = [
                 {

@@ -36,6 +36,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
@@ -47,6 +48,103 @@ from sqlalchemy.types import Integer as SqlInteger
 from tutor.services.config.settings import get_settings
 from tutor.services.jobs.schema import Job, JobStatus
 from tutor.services.resource_package.schema import ArtifactRef
+
+_MIGRATION_STATUS_PRIORITY = {
+    JobStatus.SUCCEEDED.value: 0,
+    JobStatus.PARTIAL.value: 1,
+    JobStatus.RUNNING.value: 2,
+    JobStatus.PENDING.value: 3,
+    JobStatus.FAILED.value: 4,
+    JobStatus.CANCELLED.value: 5,
+}
+
+
+def _migration_job_key(row: Any) -> tuple[int, int]:
+    return (
+        _MIGRATION_STATUS_PRIORITY.get(str(row["status"]), 99),
+        int(row["id"]),
+    )
+
+
+async def _merge_duplicate_job_tree(
+    conn: AsyncConnection,
+    *,
+    canonical_job_id: str,
+    duplicate_job_id: str,
+) -> None:
+    """Move/merge every child before deleting a legacy duplicate job."""
+    children = (
+        await conn.exec_driver_sql(
+            "SELECT id, job_id, status, dedupe_key FROM jobs "
+            "WHERE parent_job_id = ? ORDER BY id",
+            (duplicate_job_id,),
+        )
+    ).mappings().all()
+    for child in children:
+        dedupe_key = child["dedupe_key"]
+        if dedupe_key is None:
+            await conn.exec_driver_sql(
+                "UPDATE jobs SET parent_job_id = ? WHERE job_id = ?",
+                (canonical_job_id, child["job_id"]),
+            )
+            continue
+        existing = (
+            await conn.exec_driver_sql(
+                "SELECT id, job_id, status, dedupe_key FROM jobs "
+                "WHERE parent_job_id = ? AND dedupe_key = ? AND job_id <> ?",
+                (canonical_job_id, dedupe_key, child["job_id"]),
+            )
+        ).mappings().first()
+        if existing is None:
+            await conn.exec_driver_sql(
+                "UPDATE jobs SET parent_job_id = ? WHERE job_id = ?",
+                (canonical_job_id, child["job_id"]),
+            )
+            continue
+
+        winner, loser = sorted((existing, child), key=_migration_job_key)
+        await _merge_duplicate_job_tree(
+            conn,
+            canonical_job_id=str(winner["job_id"]),
+            duplicate_job_id=str(loser["job_id"]),
+        )
+        await conn.exec_driver_sql(
+            "DELETE FROM jobs WHERE job_id = ?",
+            (loser["job_id"],),
+        )
+        if winner["job_id"] == child["job_id"]:
+            await conn.exec_driver_sql(
+                "UPDATE jobs SET parent_job_id = ? WHERE job_id = ?",
+                (canonical_job_id, winner["job_id"]),
+            )
+
+
+async def _migrate_learning_child_duplicates(conn: AsyncConnection) -> None:
+    rows = (
+        await conn.exec_driver_sql(
+            "SELECT id, job_id, user_id, task_kind, dedupe_key, status "
+            "FROM jobs WHERE task_kind IN ('profile_update', 'path_rebuild') "
+            "AND dedupe_key IS NOT NULL ORDER BY id"
+        )
+    ).mappings().all()
+    grouped: dict[tuple[str, str, str], list[Any]] = {}
+    for row in rows:
+        key = (str(row["user_id"]), str(row["task_kind"]), str(row["dedupe_key"]))
+        grouped.setdefault(key, []).append(row)
+    for duplicates in grouped.values():
+        if len(duplicates) < 2:
+            continue
+        canonical, *discarded = sorted(duplicates, key=_migration_job_key)
+        for duplicate in discarded:
+            await _merge_duplicate_job_tree(
+                conn,
+                canonical_job_id=str(canonical["job_id"]),
+                duplicate_job_id=str(duplicate["job_id"]),
+            )
+            await conn.exec_driver_sql(
+                "DELETE FROM jobs WHERE job_id = ?",
+                (duplicate["job_id"],),
+            )
 
 
 class _Base(DeclarativeBase):
@@ -176,6 +274,9 @@ class JobStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_parent_dedupe "
                 "ON jobs (parent_job_id, dedupe_key)"
             )
+            # Preserve the best durable job and recursively re-parent/merge
+            # descendants before enforcing the new cross-parent uniqueness.
+            await _migrate_learning_child_duplicates(conn)
             await conn.exec_driver_sql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_learning_follow_up_dedupe "
                 "ON jobs (user_id, task_kind, dedupe_key) "

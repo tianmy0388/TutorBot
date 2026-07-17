@@ -25,4 +25,16 @@ describe("PathVisualizer terminal UI states", () => {
     }} />);
     expect(screen.getByText("Attention")).toBeInTheDocument();
   });
+
+  it("warns when the path was generated from an older profile", () => {
+    render(<PathVisualizer path={{
+      path_id: "p", course: "course", name: "Path", description: "",
+      profile_version: 2, edges: [], rationale: "topological",
+      nodes: [{ id: "attention", name: "Attention", category: "core", difficulty: 2, estimated_hours: 1, prerequisites: [], status: "available" }],
+      total_estimated_hours: 1, completed_count: 0, available_count: 1,
+      locked_count: 0, generated_at: new Date().toISOString(),
+    }} stale />);
+
+    expect(screen.getByText("画像已更新，此学习路径可能已过期")).toBeInTheDocument();
+  });
 });

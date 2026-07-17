@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -171,6 +172,129 @@ async def test_follow_up_is_persisted_and_idempotent_by_parent_and_dedupe_key(
         first[0].job_id
     ]
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_init_migrates_legacy_cross_parent_learning_child_duplicates(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy-learning-children.db"
+    store = JobStore(db_path)
+    await store.init()
+    parents = [
+        Job(
+            job_id=f"legacy-parent-{index}",
+            user_id="local-user",
+            status=JobStatus.SUCCEEDED,
+        )
+        for index in (1, 2)
+    ]
+    for parent in parents:
+        await store.save(parent)
+    canonical = (
+        await FollowUpScheduler(store).enqueue(
+            parents[0].job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="path_rebuild",
+                    dedupe_key="path_rebuild:2",
+                    payload={
+                        "user_id": "local-user",
+                        "profile_version": 2,
+                        "profile": {"user_id": "local-user", "version": 2},
+                    },
+                ),
+            ),
+        )
+    )[0]
+    canonical_grandchild = (
+        await FollowUpScheduler(store).enqueue(
+            canonical.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="video_render",
+                    dedupe_key="video:shared",
+                    payload={"package_id": "pkg", "resource_id": "video"},
+                ),
+            ),
+        )
+    )[0]
+    await store.close()
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("DROP INDEX uq_learning_follow_up_dedupe")
+        row = dict(
+            connection.execute(
+                "SELECT * FROM jobs WHERE job_id = ?", (canonical.job_id,)
+            ).fetchone()
+        )
+        row.pop("id")
+        row["job_id"] = "legacy-duplicate-child"
+        row["parent_job_id"] = parents[1].job_id
+        columns = list(row)
+        connection.execute(
+            f"INSERT INTO jobs ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            tuple(row[column] for column in columns),
+        )
+        grandchild = dict(
+            connection.execute(
+                "SELECT * FROM jobs WHERE job_id = ?",
+                (canonical_grandchild.job_id,),
+            ).fetchone()
+        )
+        grandchild.pop("id")
+        grandchild["job_id"] = "legacy-duplicate-grandchild"
+        grandchild["parent_job_id"] = "legacy-duplicate-child"
+        grandchild["status"] = JobStatus.SUCCEEDED.value
+        grandchild_columns = list(grandchild)
+        connection.execute(
+            f"INSERT INTO jobs ({', '.join(grandchild_columns)}) "
+            f"VALUES ({', '.join('?' for _ in grandchild_columns)})",
+            tuple(grandchild[column] for column in grandchild_columns),
+        )
+
+    reopened = JobStore(db_path)
+    await reopened.init()
+
+    children = [
+        *await reopened.get_children(parents[0].job_id),
+        *await reopened.get_children(parents[1].job_id),
+    ]
+    assert [child.job_id for child in children] == [canonical.job_id]
+    grandchildren = await reopened.get_children(canonical.job_id)
+    assert [child.job_id for child in grandchildren] == [
+        "legacy-duplicate-grandchild"
+    ]
+    assert grandchildren[0].status == JobStatus.SUCCEEDED
+    assert await reopened.get(canonical_grandchild.job_id) is None
+    returned = (
+        await FollowUpScheduler(reopened).enqueue(
+            parents[1].job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="path_rebuild",
+                    dedupe_key="path_rebuild:2",
+                    payload={
+                        "user_id": "local-user",
+                        "profile_version": 2,
+                        "profile": {"user_id": "local-user", "version": 2},
+                    },
+                ),
+            ),
+        )
+    )[0]
+    assert returned.job_id == canonical.job_id
+    await reopened.close()
+
+    with sqlite3.connect(db_path) as connection:
+        orphan_count = connection.execute(
+            "SELECT COUNT(*) FROM jobs AS child "
+            "LEFT JOIN jobs AS parent ON parent.job_id = child.parent_job_id "
+            "WHERE child.parent_job_id IS NOT NULL AND parent.job_id IS NULL"
+        ).fetchone()[0]
+    assert orphan_count == 0
 
 
 @pytest.mark.asyncio

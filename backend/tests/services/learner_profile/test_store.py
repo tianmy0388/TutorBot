@@ -166,6 +166,29 @@ async def test_event_profile_cas_advances_watermark_once(store: ProfileStore):
 
 
 @pytest.mark.asyncio
+async def test_event_profile_cas_rejects_same_watermark_newer_profile_version(
+    store: ProfileStore,
+):
+    base = await store.get_or_create("u-version-fence")
+    candidate = base.model_copy(deep=True)
+    candidate.event_watermark = 5
+    candidate.knowledge_map.set("attention", 0.7)
+    concurrent = await store.apply_diff(
+        "u-version-fence",
+        ProfileDiff(metadata_merge={"concurrent_marker": "preserve-me"}),
+        source="concurrent-profile-writer",
+    )
+    assert concurrent.event_watermark == base.event_watermark
+    assert concurrent.version > base.version
+
+    stale = await store.save_event_profile(candidate, expected_watermark=0)
+
+    assert stale.applied is False
+    assert stale.profile.version == concurrent.version
+    assert stale.profile.metadata["concurrent_marker"] == "preserve-me"
+
+
+@pytest.mark.asyncio
 async def test_path_is_unique_per_profile_version_and_latest_is_durable(
     store: ProfileStore,
 ):

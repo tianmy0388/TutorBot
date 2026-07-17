@@ -58,10 +58,12 @@ export function PathVisualizer({
   path,
   loading = false,
   error = null,
+  stale = false,
 }: {
   path: PlannedPath | null;
   loading?: boolean;
   error?: string | null;
+  stale?: boolean;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -95,6 +97,11 @@ export function PathVisualizer({
 
   return (
     <div className="p-4 border-t border-fg/10">
+      {stale && (
+        <div className="mb-3 rounded-md border border-amber-700/40 bg-amber-950/25 p-2 text-xs text-amber-200">
+          画像已更新，此学习路径可能已过期
+        </div>
+      )}
       <div className="flex items-center gap-2 mb-3">
         <TrendingUp className="w-4 h-4 text-brand-400" />
         <h3 className="font-semibold text-sm">学习路径</h3>

@@ -378,7 +378,10 @@ async def _save_event_profile(
                 if row is not None
                 else empty_profile(candidate.user_id)
             )
-            if current.event_watermark != expected_watermark:
+            if (
+                current.event_watermark != expected_watermark
+                or current.version != candidate.version
+            ):
                 await session.rollback()
                 return ProfileCasResult(profile=current, applied=False)
             saved = candidate.model_copy(deep=True)

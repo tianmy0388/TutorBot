@@ -6,7 +6,13 @@ from tutor.capabilities.path_planning import PathPlanningCapability
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.knowledge_graph.planner import KGPathPlanner
-from tutor.services.knowledge_graph.schema import KGNode, KnowledgeGraph
+from tutor.services.knowledge_graph.schema import (
+    KGNode,
+    KnowledgeGraph,
+)
+from tutor.services.knowledge_graph.schema import (
+    PlannedPath as KGPlannedPath,
+)
 from tutor.services.learner_profile.schema import LearnerProfile
 from tutor.services.learner_profile.store import ProfileStore
 
@@ -89,4 +95,42 @@ async def test_path_business_write_is_rejected_after_claim_loss(tmp_path):
             StreamBus(),
         )
     assert await store.get_latest_path("local-user") is None
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_nonempty_kg_falls_back_when_declared_plan_is_empty(tmp_path):
+    store = ProfileStore(tmp_path / "profiles.db")
+    await store.init()
+    profile = LearnerProfile(user_id="local-user", version=2)
+    await store.replace(profile, source="test")
+    model = KnowledgeGraph(
+        course="course",
+        nodes=[
+            KGNode(id="foundation", name="Foundation"),
+            KGNode(id="advanced", name="Advanced", prerequisites=["foundation"]),
+        ],
+    )
+    graph = nx.DiGraph([("foundation", "advanced")])
+
+    class EmptyDeclaredPathKG:
+        def default_course(self): return "course"
+        def has_course(self, course): return course == "course"
+        def get_graph(self, course): return model, graph
+        def plan_for_learner(self, course, p):
+            return KGPlannedPath(path_id="declared-empty", course=course)
+
+    result = await PathPlanningCapability(
+        profile_store=store,
+        kg_service=EmptyDeclaredPathKG(),
+    ).run(
+        UnifiedContext(user_id="local-user", metadata={"course": "course"}),
+        StreamBus(),
+    )
+
+    assert [node["id"] for node in result.payload["nodes"]] == [
+        "foundation",
+        "advanced",
+    ]
+    assert all(node["id"] in model.node_ids() for node in result.payload["nodes"])
     await store.close()

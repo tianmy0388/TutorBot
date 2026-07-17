@@ -72,6 +72,7 @@ class LearningEvent:
     sequence: int = 0
     user_id: str = ""
     session_id: str = ""
+    course: str = ""
     event_type: EventType = EventType.RESOURCE_VIEWED
     target_id: str = ""  # resource_id, exercise_id, package_id, etc.
     concept_id: str = ""  # optional concept this event relates to
@@ -96,6 +97,7 @@ class LearningEvent:
             "sequence": self.sequence,
             "user_id": self.user_id,
             "session_id": self.session_id,
+            "course": self.course,
             "event_type": self.event_type.value,
             "target_id": self.target_id,
             "concept_id": self.concept_id,
@@ -113,6 +115,7 @@ class LearningEvent:
             sequence=int(data.get("sequence", 0)),
             user_id=data.get("user_id", ""),
             session_id=data.get("session_id", ""),
+            course=data.get("course", ""),
             event_type=EventType(data["event_type"]) if "event_type" in data else EventType.RESOURCE_VIEWED,
             target_id=data.get("target_id", ""),
             concept_id=data.get("concept_id", ""),

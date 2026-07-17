@@ -33,7 +33,7 @@ import threading
 import traceback
 import uuid
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -110,9 +110,11 @@ class JobRunner:
         *,
         job_store: JobStore | None = None,
         capability_registry: CapabilityRegistry | None = None,
+        follow_up_builder: Callable[[str], Any] | None = None,
     ) -> None:
         self.store = job_store or get_job_store()
         self.capabilities = capability_registry or get_capability_registry()
+        self._follow_up_builder = follow_up_builder
         self._runner_id = uuid.uuid4().hex
 
         # job_id → asyncio.Task executing _run()
@@ -371,9 +373,12 @@ class JobRunner:
 
         cap = None
         if job.task_kind is not None:
-            from tutor.services.jobs.follow_up import build_follow_up_capability
+            if self._follow_up_builder is not None:
+                cap = self._follow_up_builder(job.task_kind)
+            else:
+                from tutor.services.jobs.follow_up import build_follow_up_capability
 
-            cap = build_follow_up_capability(job.task_kind)
+                cap = build_follow_up_capability(job.task_kind)
         else:
             cap = self.capabilities.get(job.capability)
         if job.parent_job_id is None:

@@ -51,7 +51,17 @@ class LearningWorkflow:
         assessment = await self.event_store.has_assessment_since(user_id, watermark)
         if scored < PROFILE_EVENT_THRESHOLD and not assessment:
             return []
-        through = through_sequence or await self.event_store.latest_sequence(user_id)
+        latest = await self.event_store.latest_sequence(user_id)
+        through = max(int(through_sequence or 0), latest)
+        window = await self.event_store.list_since(
+            user_id,
+            watermark,
+            through_sequence=through,
+        )
+        durable_course = next(
+            (event.course for event in reversed(window) if event.course),
+            course,
+        )
         root = await self.job_store.ensure_parent(
             Job(
                 job_id=self.root_job_id(user_id),
@@ -73,7 +83,7 @@ class LearningWorkflow:
                         "user_id": user_id,
                         "from_watermark": watermark,
                         "through_sequence": through,
-                        "course": course,
+                        "course": durable_course,
                     },
                 ),
             ),

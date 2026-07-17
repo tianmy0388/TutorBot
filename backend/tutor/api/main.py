@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from tutor import __version__
-from tutor.runtime import get_capability_registry, get_orchestrator, get_tool_registry
+from tutor.runtime import CapabilityRegistry, MainOrchestrator, get_tool_registry
 from tutor.services.config.settings import Settings, get_settings
 
 
@@ -45,12 +45,35 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"load_dotenv skipped: {exc!r}")
 
-    settings = get_settings()
+    settings = app.state.settings
 
-    # Eager-load singletons
-    capabilities = get_capability_registry()
+    workflow = app.state.learning_workflow
+    resource_store = app.state.resource_package_store
+    from tutor.capabilities.assessment import AssessmentCapability
+    from tutor.capabilities.path_planning import PathPlanningCapability
+    from tutor.capabilities.profile import LearnerProfileCapability
+    from tutor.capabilities.resource_generation import ResourceGenerationCapability
+    from tutor.capabilities.tutoring import TutoringCapability
+    from tutor.services.learner_profile.builder import ProfileBuilder
+
+    profile_builder = ProfileBuilder(store=workflow.profile_store)
+    capabilities = CapabilityRegistry()
+    for capability in (
+        LearnerProfileCapability(builder=profile_builder),
+        ResourceGenerationCapability(
+            builder=profile_builder,
+            package_store=resource_store,
+        ),
+        PathPlanningCapability(profile_store=workflow.profile_store),
+        TutoringCapability(builder=profile_builder),
+        AssessmentCapability(
+            builder=profile_builder,
+            event_store=workflow.event_store,
+        ),
+    ):
+        capabilities.register(capability)
     tools = get_tool_registry()
-    orchestrator = get_orchestrator()
+    orchestrator = MainOrchestrator(capability_registry=capabilities)
 
     logger.info(f"Tutor v{__version__} starting up")
     logger.info(f"  environment: {settings.env}")
@@ -60,83 +83,56 @@ async def lifespan(app: FastAPI):
     logger.info(f"  tools:        {tools.list_tools()}")
 
     # Stash on app.state for easy access from endpoints
-    app.state.settings = settings
     app.state.capabilities = capabilities
     app.state.tools = tools
     app.state.orchestrator = orchestrator
 
-    # Initialise persistent services (create SQLite tables, etc.)
-    try:
-        from tutor.services.learner_profile.builder import get_profile_builder
+    # The application owns this persistence graph. In particular, a
+    # ``create_app(custom_settings)`` instance must never fall back to
+    # process singletons bound to another data directory.
+    await workflow.profile_store.init()
+    await workflow.event_store.init()
+    await workflow.job_store.init()
+    await resource_store.init()
 
-        await get_profile_builder().initialize()
-        logger.info("ProfileStore initialised")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"ProfileStore init failed: {exc!r}")
+    from tutor.services.jobs.follow_up import (
+        PathRebuildFollowUpCapability,
+        ProfileUpdateFollowUpCapability,
+        VideoRenderFollowUpCapability,
+        build_follow_up_capability,
+    )
+    from tutor.services.jobs.runner import JobRunner
 
-    try:
-        from tutor.services.learning_events import get_learning_event_store
+    def build_owned_follow_up(task_kind: str):
+        if task_kind == "profile_update":
+            return ProfileUpdateFollowUpCapability(
+                event_store=workflow.event_store,
+                profile_store=workflow.profile_store,
+            )
+        if task_kind == "path_rebuild":
+            return PathRebuildFollowUpCapability(
+                profile_store=workflow.profile_store,
+            )
+        if task_kind == "video_render":
+            return VideoRenderFollowUpCapability(package_store=resource_store)
+        return build_follow_up_capability(task_kind)
 
-        await get_learning_event_store().init()
-        logger.info("LearningEventStore initialised")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"LearningEventStore init failed: {exc!r}")
-
-    try:
-        from tutor.services.resource_package.store import get_resource_package_store
-
-        await get_resource_package_store().init()
-        logger.info("ResourcePackageStore initialised")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"ResourcePackageStore init failed: {exc!r}")
-
-    try:
-        from tutor.services.jobs import get_job_runner, get_job_store
-
-        await get_job_store().init()
-        logger.info("JobStore initialised")
-
-        from tutor.services.learning_events.workflow import get_learning_workflow
-
-        await get_learning_workflow().reconcile_all()
-
-        # On restart, mark any in-flight jobs as failed so they don't
-        # block the UI (the asyncio tasks are gone).
-        await get_job_runner().resume_active_jobs()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"JobStore init failed: {exc!r}")
-
-    # 2026-06-21 plan: persistent KB and Course stores. The KB
-    # store walks the on-disk layout on first init() to migrate any
-    # orphan files the in-memory store had been tracking; the
-    # course store then re-binds the seeded AI 导论 course.
-    # We do this lazily — the kb router's module-level
-    # ``KnowledgeBaseService()`` constructor already triggers the
-    # first init, and the courses store opens on first call to
-    # ``get_course_service()``. Wrapping that work here is just a
-    # chance to log a clean "ready" message.
-    try:
-        from tutor.services.courses import (
-            get_course_service,
-        )
-        from tutor.services.knowledge_base.sqlite_store import (
-            get_kb_store,
-        )
-
-        get_kb_store()
-        get_course_service()
-        logger.info("KBStore + CourseStore initialised")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"KB/Course store init failed: {exc!r}")
+    runner = JobRunner(
+        job_store=workflow.job_store,
+        capability_registry=capabilities,
+        follow_up_builder=build_owned_follow_up,
+    )
+    app.state.learning_runner = runner
+    await workflow.reconcile_all()
+    await runner.resume_active_jobs()
+    logger.info("Application-owned learning stores initialised")
 
     try:
         yield
     finally:
         logger.info("Tutor shutting down")
         try:
-            from tutor.services.jobs import shutdown_job_runner
-
-            await shutdown_job_runner()
+            await app.state.learning_runner.shutdown()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"JobRunner shutdown failed (non-fatal): {exc!r}")
         # Tear down MCP subprocesses (started lazily by MCPRegistry on
@@ -149,11 +145,10 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"MCP shutdown failed (non-fatal): {exc!r}")
         try:
-            from tutor.services.learner_profile import get_profile_store
-            from tutor.services.learning_events import get_learning_event_store
-
-            await get_learning_event_store().close()
-            await get_profile_store().close()
+            await workflow.event_store.close()
+            await workflow.profile_store.close()
+            await workflow.job_store.close()
+            await resource_store.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Learning stores shutdown failed (non-fatal): {exc!r}")
 
@@ -174,6 +169,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Available before lifespan startup as well (notably to ASGI test
     # transports and identity dependencies).
     app.state.settings = settings
+    from tutor.services.jobs.store import JobStore
+    from tutor.services.learner_profile.store import ProfileStore
+    from tutor.services.learning_events.store import LearningEventStore
+    from tutor.services.learning_events.workflow import LearningWorkflow
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    event_store = LearningEventStore(settings.data_dir / "learning_events.db")
+    profile_store = ProfileStore(settings.data_dir / "profiles.db")
+    job_store = JobStore(settings.data_dir / "jobs.db")
+    app.state.learning_workflow = LearningWorkflow(
+        event_store=event_store,
+        profile_store=profile_store,
+        job_store=job_store,
+    )
+    app.state.resource_package_store = ResourcePackageStore(
+        settings.data_dir / "resource_packages.db"
+    )
+    app.state.learning_runner = None
 
     # CORS — development friendly; restrict in production
     app.add_middleware(

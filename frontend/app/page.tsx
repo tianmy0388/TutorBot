@@ -374,7 +374,7 @@ function TabButton({
 // ---------------------------------------------------------------------------
 
 function PathPane() {
-  const { path: plannedPath, status, error } = useLearningPath();
+  const { path: plannedPath, status, stale, error } = useLearningPath();
   const latestPackage = useTutorStore((s) => s.latestPackage);
 
   return (
@@ -383,6 +383,7 @@ function PathPane() {
         path={plannedPath}
         loading={status === "loading"}
         error={status === "failed" ? error : null}
+        stale={stale}
       />
       {latestPackage && latestPackage.resources.length > 0 && (
         <div
