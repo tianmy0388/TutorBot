@@ -21,6 +21,7 @@ from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.resource_package.schema import (
+    MindMapOutlineItem,
     MindMapResource,
     Resource,
     ResourceType,
@@ -102,18 +103,21 @@ class MultimediaAgent(BaseAgent):
         # unbalanced parens / brackets that crash the Mermaid
         # parser. We quote-wrap offending node labels so the
         # frontend renders them correctly.
+        outline: list[MindMapOutlineItem] = []
         if mermaid_dsl:
-            mermaid_dsl = _sanitize_mermaid_dsl(mermaid_dsl)
+            mermaid_dsl, outline = normalise_mindmap_dsl(mermaid_dsl)
         central_topic = str(data.get("central_topic") or topic)
         branch_count = int(data.get("branch_count") or _count_branches(mermaid_dsl))
 
         if not mermaid_dsl:
             mermaid_dsl = _build_minimal_mindmap(central_topic)
+            mermaid_dsl, outline = normalise_mindmap_dsl(mermaid_dsl)
 
         payload = MindMapResource(
             mermaid_dsl=mermaid_dsl,
             central_topic=central_topic,
             branch_count=branch_count,
+            outline=outline,
         )
 
         markdown = (
@@ -169,6 +173,64 @@ _FENCE_RE = re.compile(r"^```(?:mermaid)?\s*\n(.*?)\n```\s*$", re.DOTALL)
 # need to escape them.
 _SANITIZE_BAD_LINE_PATTERN = re.compile(r"^(\s*)(.*)$", re.MULTILINE)
 _SANITIZE_DANGEROUS_CHARS = re.compile(r"[-=]{3,}")
+_LEGAL_ROUND_NODE_RE = re.compile(r"^[A-Za-z_][\w-]*\(\(.*\)\)$")
+_LEGAL_BOX_NODE_RE = re.compile(r'^\s*[A-Za-z_][\w-]*\["(?:\\.|[^"\\])*"\]$')
+
+
+def normalise_mindmap_dsl(dsl: str) -> tuple[str, list[MindMapOutlineItem]]:
+    """Return valid Mermaid mindmap DSL plus an accessible text outline.
+
+    Mermaid mindmaps accept shaped nodes such as ``root((topic))`` and
+    ``node[\"label\"]`` but reject a bare quoted sibling. Every other label is
+    emitted as a deterministic shaped node using its original source line.
+    """
+    lines = dsl.splitlines()
+    header_index = next(
+        (index for index, line in enumerate(lines) if line.strip().lower() == "mindmap"),
+        None,
+    )
+    if header_index is None:
+        return _sanitize_mermaid_dsl(dsl), []
+
+    entries: list[tuple[int, int, str, str]] = []
+    for index, raw_line in enumerate(lines[header_index + 1 :], start=header_index + 2):
+        if not raw_line.strip():
+            continue
+        whitespace = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+        indent_width = sum(2 if char == "\t" else 1 for char in whitespace)
+        text = raw_line[len(whitespace) :].strip()
+        entries.append((index, indent_width, text, _mindmap_label(text)))
+
+    if not entries:
+        return "mindmap", []
+
+    base_indent = min(indent for _, indent, _, _ in entries)
+    output = ["mindmap"]
+    outline: list[MindMapOutlineItem] = []
+    for line_number, indent_width, text, label in entries:
+        depth = max(0, round((indent_width - base_indent) / 2))
+        indent = "  " * (depth + 1)
+        if _LEGAL_ROUND_NODE_RE.fullmatch(text) or _LEGAL_BOX_NODE_RE.fullmatch(text):
+            node = text
+        else:
+            escaped = label.replace("\\", "\\\\").replace('"', '\\"')
+            node = f'node_{line_number}["{escaped}"]'
+        output.append(indent + node)
+        outline.append(MindMapOutlineItem(depth=depth, label=label))
+    return "\n".join(output), outline
+
+
+def _mindmap_label(text: str) -> str:
+    """Extract readable label text without altering legal Mermaid nodes."""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1]
+    round_match = re.fullmatch(r"[A-Za-z_][\w-]*\(\((.*)\)\)", text)
+    if round_match:
+        return round_match.group(1)
+    box_match = re.fullmatch(r'\s*[A-Za-z_][\w-]*\["((?:\\.|[^"\\])*)"\]', text)
+    if box_match:
+        return box_match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+    return text
 
 
 def _sanitize_mermaid_dsl(dsl: str) -> str:
@@ -276,4 +338,4 @@ def _build_minimal_mindmap(central: str) -> str:
     )
 
 
-__all__ = ["MultimediaAgent", "MINDMAP_OUTPUT_SCHEMA"]
+__all__ = ["MultimediaAgent", "MINDMAP_OUTPUT_SCHEMA", "normalise_mindmap_dsl"]

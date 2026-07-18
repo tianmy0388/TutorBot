@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -577,6 +578,26 @@ async def test_code_sandbox_returns_failed_resource_when_empty():
 # ---------------------------------------------------------------------------
 # Multimedia — Task 8 (Mermaid DSL sanitize)
 # ---------------------------------------------------------------------------
+
+
+def test_mindmap_normaliser_rewrites_bare_quoted_siblings():
+    """Bare quoted labels are invalid mindmap siblings in Mermaid 11."""
+    from tutor.agents.resource.multimedia import normalise_mindmap_dsl
+
+    reported_dsl = (
+        "mindmap\n"
+        "  root((反向传播))\n"
+        "    前向传播\n"
+        '    "激活函数 a=σ(z)"\n'
+        '    "计算损失 C"\n'
+    )
+
+    fixed, outline = normalise_mindmap_dsl(reported_dsl)
+
+    assert "root((反向传播))" in fixed
+    assert 'node_4["激活函数 a=σ(z)"]' in fixed
+    assert not re.search(r'^\s*"', fixed, re.MULTILINE)
+    assert [item.label for item in outline][-2:] == ["激活函数 a=σ(z)", "计算损失 C"]
 
 
 def test_sanitize_mermaid_dsl_does_not_wrap_parens():

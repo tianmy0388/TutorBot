@@ -965,6 +965,8 @@ class ResourceGenerationCapability(BaseCapability):
                 source="resource_capability",
                 stage="persistence",
             )
+        for resource in package.resources:
+            self._replace_unowned_markdown_images(resource)
         async with stream.stage("persistence", source="resource_capability"):
             try:
                 for resource in package.resources:
@@ -1102,6 +1104,31 @@ class ResourceGenerationCapability(BaseCapability):
             resource.format_specific,
             get_settings().data_dir,
         )
+
+    @staticmethod
+    def _replace_unowned_markdown_images(resource: Resource) -> None:
+        """Keep relative Markdown images only when this resource owns them."""
+        from tutor.services.resource_package.markdown_media import (
+            replace_unowned_markdown_images,
+        )
+
+        artifact_names: set[str] = set()
+        format_specific = resource.format_specific or {}
+        artifact_key = format_specific.get("artifact_key")
+        if artifact_key:
+            artifact_names.add(PurePosixPath(str(artifact_key)).name)
+        for raw in format_specific.get("artifacts") or []:
+            if isinstance(raw, dict) and raw.get("name"):
+                artifact_names.add(PurePosixPath(str(raw["name"])).name)
+        resource.content = replace_unowned_markdown_images(resource.content, artifact_names)
+        sections = format_specific.get("sections")
+        if isinstance(sections, list):
+            for section in sections:
+                if isinstance(section, dict) and isinstance(section.get("content"), str):
+                    section["content"] = replace_unowned_markdown_images(
+                        section["content"],
+                        artifact_names,
+                    )
 
     # ------------------------------------------------------------------
     # Video rendering (2026-06-21 plan, C2)

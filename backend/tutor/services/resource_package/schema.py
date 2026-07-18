@@ -109,6 +109,16 @@ class MindMapResource(BaseModel):
     mermaid_dsl: str = ""  # raw ```mermaid ...``` block (without fences)
     central_topic: str = ""
     branch_count: int = 0
+    outline: list[MindMapOutlineItem] = Field(default_factory=list)
+
+
+class MindMapOutlineItem(BaseModel):
+    """One accessible, indentation-derived item in a Mermaid mind map."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    depth: int = Field(ge=0)
+    label: str
 
 
 class ExerciseOption(BaseModel):
@@ -646,6 +656,7 @@ __all__ = [
     "ExerciseOption",
     "ExerciseQuestion",
     "ExerciseResource",
+    "MindMapOutlineItem",
     "MindMapResource",
     "PPTResource",
     "ReadingResource",
