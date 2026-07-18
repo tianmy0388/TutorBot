@@ -246,6 +246,29 @@ def test_public_resource_projection_redacts_embedded_unix_paths_without_root_all
     assert projected["metadata"]["prose"] == "The / symbol separates path-like notation in prose."
 
 
+def test_public_resource_projection_uses_context_aware_unix_path_detection() -> None:
+    event = exercise_resource_event(options=[{"label": "A", "text": "梯度"}])
+    metadata = event["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["usr"] = "failed: /usr"
+    metadata["tmp"] = "cwd=/tmp"
+    metadata["etc"] = "path=/etc/"
+    metadata["markdown"] = "See [setup](/docs/setup)"
+    metadata["route"] = "Call /api/v1"
+    metadata["url"] = "https://example.com/docs/setup"
+    metadata["prose"] = "Use a slash / only when discussing notation."
+
+    projected = project_public_event(event)
+
+    assert projected["metadata"]["usr"] == REDACTED
+    assert projected["metadata"]["tmp"] == REDACTED
+    assert projected["metadata"]["etc"] == REDACTED
+    assert projected["metadata"]["markdown"] == "See [setup](/docs/setup)"
+    assert projected["metadata"]["route"] == "Call /api/v1"
+    assert projected["metadata"]["url"] == "https://example.com/docs/setup"
+    assert projected["metadata"]["prose"] == "Use a slash / only when discussing notation."
+
+
 def test_public_event_handles_deep_acyclic_unknown_containers_without_recursion_error() -> None:
     nested: dict[str, object] = {}
     current = nested

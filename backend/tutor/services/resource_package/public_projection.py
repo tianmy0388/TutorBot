@@ -27,12 +27,44 @@ _MAX_STRING_CHARS = 32_000
 _MAX_CONTAINER_ITEMS = 256
 _MAX_TOTAL_NODES = 10_000
 _MAX_CONTAINER_DEPTH = 128
-_HOST_PATH_RE = re.compile(
+_WINDOWS_OR_UNC_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"[A-Za-z]:[\\/]"
     r"|\\\\[^\\/\s]+[\\/]"
-    r"|(?<![A-Za-z0-9_.:/-])/(?:[^/\s]+/)+[^/\s]+"
     r")"
+)
+_UNIX_PATH_CANDIDATE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.:/-])/(?P<path>[A-Za-z0-9._~+@%:=,-]+(?:/[A-Za-z0-9._~+@%:=,-]+)*/?)"
+)
+_DIAGNOSTIC_PATH_CONTEXT_RE = re.compile(
+    r"(?:\bfile\b|\btraceback\b|\bfailed(?:\s+at)?\b|\bexecute(?:d|ing)?\b|\bcwd\b|\bpath\b)\s*(?:[:=]\s*|at\s+)?$",
+    re.IGNORECASE,
+)
+_HOST_SYSTEM_ROOTS = frozenset(
+    {
+        "bin",
+        "boot",
+        "data",
+        "dev",
+        "etc",
+        "home",
+        "lib",
+        "lib64",
+        "mnt",
+        "opt",
+        "private",
+        "proc",
+        "root",
+        "run",
+        "sbin",
+        "srv",
+        "sys",
+        "tmp",
+        "usr",
+        "var",
+        "workspace",
+        "workspaces",
+    }
 )
 
 
@@ -240,8 +272,24 @@ def _is_host_path_key(key: str) -> bool:
 
 
 def _is_host_path(value: str) -> bool:
-    """Detect embedded local paths while retaining ordinary URLs and prose."""
-    return bool(_HOST_PATH_RE.search(value) or "file://" in value)
+    """Detect host paths without mistaking routes and Markdown links for paths."""
+    if _WINDOWS_OR_UNC_PATH_RE.search(value) or "file://" in value:
+        return True
+    for match in _UNIX_PATH_CANDIDATE_RE.finditer(value):
+        if _is_markdown_link_destination(value, match.start()):
+            continue
+        root = match.group("path").split("/", 1)[0]
+        if root in _HOST_SYSTEM_ROOTS:
+            return True
+        context = value[:match.start()].rstrip(" \t\"'")
+        if _DIAGNOSTIC_PATH_CONTEXT_RE.search(context):
+            return True
+    return False
+
+
+def _is_markdown_link_destination(value: str, path_start: int) -> bool:
+    """Keep a relative Markdown destination public even when it resembles a path."""
+    return path_start > 1 and value[path_start - 1] == "(" and "](" in value[:path_start]
 
 
 __all__ = ["project_public_event", "project_public_payload"]
