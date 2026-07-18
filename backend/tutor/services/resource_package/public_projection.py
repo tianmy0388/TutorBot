@@ -27,10 +27,12 @@ _MAX_STRING_CHARS = 32_000
 _MAX_CONTAINER_ITEMS = 256
 _MAX_TOTAL_NODES = 10_000
 _MAX_CONTAINER_DEPTH = 128
-_WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
-_UNC_PATH_RE = re.compile(r"^\\\\[^\\/]+[\\/]")
-_POSIX_HOST_PATH_RE = re.compile(
-    r"^/(?:home|Users|var|tmp|private|etc|opt|root|mnt|srv)(?:/|$)"
+_HOST_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"[A-Za-z]:[\\/]"
+    r"|\\\\[^\\/\s]+[\\/]"
+    r"|/(?:workspace|workspaces|data|proc|sys|dev|run|home|Users|var|tmp|private|etc|opt|root|mnt|srv)(?:[\\/]|$)"
+    r")"
 )
 
 
@@ -238,13 +240,8 @@ def _is_host_path_key(key: str) -> bool:
 
 
 def _is_host_path(value: str) -> bool:
-    """Detect local absolute paths while retaining relative portable keys."""
-    return bool(
-        _WINDOWS_PATH_RE.match(value)
-        or _UNC_PATH_RE.match(value)
-        or _POSIX_HOST_PATH_RE.match(value)
-        or value.startswith("file://")
-    )
+    """Detect embedded local paths while retaining ordinary URLs and prose."""
+    return bool(_HOST_PATH_RE.search(value) or "file://" in value)
 
 
 __all__ = ["project_public_event", "project_public_payload"]

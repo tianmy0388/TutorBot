@@ -208,6 +208,25 @@ def test_public_resource_projection_redacts_host_path_shaped_values() -> None:
     assert projected["metadata"]["portable_artifact"] == "artifacts/trace.log"
 
 
+def test_public_resource_projection_redacts_embedded_host_paths_without_redacting_urls() -> None:
+    event = exercise_resource_event(options=[{"label": "A", "text": "梯度"}])
+    metadata = event["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["unix_traceback"] = 'traceback: File "/workspace/app/private.py", line 4'
+    metadata["windows_traceback"] = "failed at C:\\workspace\\app\\private.py"
+    metadata["system_path"] = "failed at /proc/1234/status"
+    metadata["url"] = "https://example.com/resources/gradient"
+    metadata["prose"] = "The learner completed the gradient exercise."
+
+    projected = project_public_event(event)
+
+    assert projected["metadata"]["unix_traceback"] == REDACTED
+    assert projected["metadata"]["windows_traceback"] == REDACTED
+    assert projected["metadata"]["system_path"] == REDACTED
+    assert projected["metadata"]["url"] == "https://example.com/resources/gradient"
+    assert projected["metadata"]["prose"] == "The learner completed the gradient exercise."
+
+
 def test_public_event_handles_deep_acyclic_unknown_containers_without_recursion_error() -> None:
     nested: dict[str, object] = {}
     current = nested
