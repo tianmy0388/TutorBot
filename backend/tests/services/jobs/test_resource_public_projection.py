@@ -145,3 +145,100 @@ def test_public_terminal_payload_bounds_cyclic_unknown_data() -> None:
     projected = project_public_payload({"unknown": cyclic})
 
     assert projected["unknown"]["cycle"] == {"[TRUNCATED]": "[TRUNCATED]"}
+
+
+def test_invalid_event_resource_fails_closed_without_exposing_code_answers() -> None:
+    event = exercise_resource_event(options=[])
+    resource = event["metadata"]["resource"]
+    assert isinstance(resource, dict)
+    resource["forbidden_field"] = "forces schema validation failure"
+    format_specific = resource["format_specific"]
+    assert isinstance(format_specific, dict)
+    format_specific["questions"] = [
+        {
+            "id": "code-1",
+            "type": "code",
+            "question": "实现梯度下降",
+            "answer": "private reference solution",
+            "code_spec": {"tests": [{"name": "hidden", "call": "f()", "expected_json": 1}]},
+        }
+    ]
+
+    projected = project_public_event(event)
+
+    assert projected["metadata"]["resource"] == REDACTED
+    assert "private reference solution" not in json.dumps(projected, ensure_ascii=False)
+
+
+def test_invalid_terminal_package_fails_closed_without_exposing_code_answers() -> None:
+    payload = exercise_package_payload(options=[])
+    package = payload["package"]
+    assert isinstance(package, dict)
+    package["forbidden_field"] = "forces schema validation failure"
+    resource = package["resources"][0]
+    assert isinstance(resource, dict)
+    format_specific = resource["format_specific"]
+    assert isinstance(format_specific, dict)
+    format_specific["questions"] = [
+        {
+            "id": "code-1",
+            "type": "code",
+            "question": "实现梯度下降",
+            "answer": "private package solution",
+            "code_spec": {"tests": [{"name": "hidden", "call": "f()", "expected_json": 1}]},
+        }
+    ]
+
+    projected = project_public_payload(payload)
+
+    assert projected["package"] == REDACTED
+    assert "private package solution" not in json.dumps(projected, ensure_ascii=False)
+
+
+def test_public_resource_projection_redacts_host_path_shaped_values() -> None:
+    event = exercise_resource_event(options=[{"label": "A", "text": "梯度"}])
+    metadata = event["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["diagnostic"] = "E:\\private\\build\\trace.log"
+    metadata["portable_artifact"] = "artifacts/trace.log"
+
+    projected = project_public_event(event)
+
+    assert projected["metadata"]["diagnostic"] == REDACTED
+    assert projected["metadata"]["portable_artifact"] == "artifacts/trace.log"
+
+
+def test_public_event_handles_deep_acyclic_unknown_containers_without_recursion_error() -> None:
+    nested: dict[str, object] = {}
+    current = nested
+    for _ in range(2_000):
+        child: dict[str, object] = {}
+        current["next"] = child
+        current = child
+    event = {"type": "progress", "metadata": {"diagnostic": nested}}
+
+    projected = project_public_event(event)
+
+    assert isinstance(projected["metadata"]["diagnostic"], dict)
+    assert "[TRUNCATED]" in json.dumps(projected, ensure_ascii=False)
+
+
+def test_public_event_handles_deep_acyclic_lists_without_recursion_error() -> None:
+    nested: list[object] = []
+    current = nested
+    for _ in range(2_000):
+        child: list[object] = []
+        current.append(child)
+        current = child
+    event = {"type": "progress", "metadata": {"diagnostic": nested}}
+
+    projected = project_public_event(event)
+
+    assert isinstance(projected["metadata"]["diagnostic"], list)
+    assert "[TRUNCATED]" in json.dumps(projected, ensure_ascii=False)
+
+
+def test_public_payload_marks_items_beyond_the_container_bound() -> None:
+    projected = project_public_payload({"unknown": list(range(257))})
+
+    assert projected["unknown"][-1] == "[TRUNCATED]"
