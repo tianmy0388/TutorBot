@@ -58,6 +58,8 @@ def _parse_markdown_image(markdown: str, start: int) -> tuple[int, str, str | No
         return None
     end = _find_closing_parenthesis(markdown, alt_end + 2, limit)
     if end < 0:
+        if limit == len(markdown):
+            return None
         # Do not retain the beginning of an oversized candidate: it could be
         # an unsafe absolute URI. The bounded prefix is replaced visibly.
         return limit, markdown[start + 2 : alt_end], None

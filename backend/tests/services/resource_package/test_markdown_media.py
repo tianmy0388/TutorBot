@@ -92,3 +92,13 @@ def test_balanced_parentheses_are_part_of_an_ordinary_image_destination():
     assert "![owned](images/owned(1).png)" in replaced
     assert "[missing：图片未提供]" in replaced
     assert "images/missing(1).png" not in replaced
+
+
+def test_short_unterminated_image_markup_preserves_following_document_text():
+    from tutor.services.resource_package.markdown_media import (
+        replace_unowned_markdown_images,
+    )
+
+    markdown = "开始 ![oops](unterminated\n正常后续文本"
+
+    assert replace_unowned_markdown_images(markdown, set()) == markdown
