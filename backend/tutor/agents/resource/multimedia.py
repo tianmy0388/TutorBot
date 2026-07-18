@@ -173,8 +173,15 @@ _FENCE_RE = re.compile(r"^```(?:mermaid)?\s*\n(.*?)\n```\s*$", re.DOTALL)
 # need to escape them.
 _SANITIZE_BAD_LINE_PATTERN = re.compile(r"^(\s*)(.*)$", re.MULTILINE)
 _SANITIZE_DANGEROUS_CHARS = re.compile(r"[-=]{3,}")
-_LEGAL_ROUND_NODE_RE = re.compile(r"^[A-Za-z_][\w-]*\(\(.*\)\)$")
-_LEGAL_BOX_NODE_RE = re.compile(r'^\s*[A-Za-z_][\w-]*\["(?:\\.|[^"\\])*"\]$')
+_MINDMAP_ID = r"[A-Za-z_][\w-]*"
+_LEGAL_SHAPED_NODE_PATTERNS = (
+    re.compile(rf"^(?P<id>{_MINDMAP_ID})\(\((?P<label>.*)\)\)$"),
+    re.compile(rf"^(?P<id>{_MINDMAP_ID})\)\)(?P<label>.*)\(\($"),
+    re.compile(rf"^(?P<id>{_MINDMAP_ID})\)(?P<label>.*)\($"),
+    re.compile(rf"^(?P<id>{_MINDMAP_ID})\{{\{{(?P<label>.*)\}}\}}$"),
+    re.compile(rf"^(?P<id>{_MINDMAP_ID})\[(?P<label>.*)\]$"),
+    re.compile(rf"^(?P<id>{_MINDMAP_ID})\((?P<label>.*)\)$"),
+)
 
 
 def normalise_mindmap_dsl(dsl: str) -> tuple[str, list[MindMapOutlineItem]]:
@@ -192,44 +199,76 @@ def normalise_mindmap_dsl(dsl: str) -> tuple[str, list[MindMapOutlineItem]]:
     if header_index is None:
         return _sanitize_mermaid_dsl(dsl), []
 
-    entries: list[tuple[int, int, str, str]] = []
+    entries: list[tuple[int, int, str, str, tuple[str, str] | None]] = []
     for index, raw_line in enumerate(lines[header_index + 1 :], start=header_index + 2):
         if not raw_line.strip():
             continue
         whitespace = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
         indent_width = sum(2 if char == "\t" else 1 for char in whitespace)
         text = raw_line[len(whitespace) :].strip()
-        entries.append((index, indent_width, text, _mindmap_label(text)))
+        legal_node = _parse_legal_mindmap_node(text)
+        entries.append((index, indent_width, text, _mindmap_label(text, legal_node), legal_node))
 
     if not entries:
         return "mindmap", []
 
-    base_indent = min(indent for _, indent, _, _ in entries)
     output = ["mindmap"]
     outline: list[MindMapOutlineItem] = []
-    for line_number, indent_width, text, label in entries:
-        depth = max(0, round((indent_width - base_indent) / 2))
+    used_ids = {legal[0] for _, _, _, _, legal in entries if legal is not None}
+    indentation_stack: list[tuple[int, int]] = []
+    for line_number, indent_width, text, label, legal_node in entries:
+        while indentation_stack and indent_width < indentation_stack[-1][0]:
+            indentation_stack.pop()
+        if not indentation_stack:
+            depth = 0
+        elif indent_width == indentation_stack[-1][0]:
+            depth = indentation_stack[-1][1]
+        else:
+            depth = indentation_stack[-1][1] + 1
+        if not indentation_stack or indent_width != indentation_stack[-1][0]:
+            indentation_stack.append((indent_width, depth))
         indent = "  " * (depth + 1)
-        if _LEGAL_ROUND_NODE_RE.fullmatch(text) or _LEGAL_BOX_NODE_RE.fullmatch(text):
+        if legal_node:
             node = text
         else:
             escaped = label.replace("\\", "\\\\").replace('"', '\\"')
-            node = f'node_{line_number}["{escaped}"]'
+            node_id = f"node_{line_number}"
+            if node_id in used_ids:
+                node_id = f"{node_id}_{line_number}"
+                suffix = 2
+                while node_id in used_ids:
+                    node_id = f"node_{line_number}_{line_number}_{suffix}"
+                    suffix += 1
+            used_ids.add(node_id)
+            node = f'{node_id}["{escaped}"]'
         output.append(indent + node)
         outline.append(MindMapOutlineItem(depth=depth, label=label))
     return "\n".join(output), outline
 
 
-def _mindmap_label(text: str) -> str:
+def _parse_legal_mindmap_node(text: str) -> tuple[str, str] | None:
+    """Recognize supported mindmap node forms, not arbitrary Mermaid DSL.
+
+    The supported grammar is ``id`` followed by square, rounded, circle,
+    bang, cloud, or hexagon shape delimiters. Edges and directives are plain
+    labels by design, so the normalizer never attempts to interpret them.
+    """
+    for pattern in _LEGAL_SHAPED_NODE_PATTERNS:
+        match = pattern.fullmatch(text)
+        if match:
+            return match.group("id"), match.group("label")
+    return None
+
+
+def _mindmap_label(text: str, legal_node: tuple[str, str] | None = None) -> str:
     """Extract readable label text without altering legal Mermaid nodes."""
     if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
-        return text[1:-1]
-    round_match = re.fullmatch(r"[A-Za-z_][\w-]*\(\((.*)\)\)", text)
-    if round_match:
-        return round_match.group(1)
-    box_match = re.fullmatch(r'\s*[A-Za-z_][\w-]*\["((?:\\.|[^"\\])*)"\]', text)
-    if box_match:
-        return box_match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+        return text[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    if legal_node:
+        label = legal_node[1]
+        if len(label) >= 2 and label[0] == label[-1] and label[0] in {'"', "'"}:
+            label = label[1:-1]
+        return label.replace('\\"', '"').replace("\\\\", "\\")
     return text
 
 

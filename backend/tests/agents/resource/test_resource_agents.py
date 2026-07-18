@@ -600,6 +600,62 @@ def test_mindmap_normaliser_rewrites_bare_quoted_siblings():
     assert [item.label for item in outline][-2:] == ["激活函数 a=σ(z)", "计算损失 C"]
 
 
+def test_mindmap_normaliser_derives_hierarchy_from_indent_transitions():
+    from tutor.agents.resource.multimedia import normalise_mindmap_dsl
+
+    fixed, outline = normalise_mindmap_dsl(
+        "mindmap\n"
+        "    root((Topic))\n"
+        "        Four-space child\n"
+        "            Wide grandchild\n"
+        "        Sibling\n"
+    )
+
+    assert fixed.splitlines() == [
+        "mindmap",
+        "  root((Topic))",
+        '    node_3["Four-space child"]',
+        '      node_4["Wide grandchild"]',
+        '    node_5["Sibling"]',
+    ]
+    assert [(item.depth, item.label) for item in outline] == [
+        (0, "Topic"),
+        (1, "Four-space child"),
+        (2, "Wide grandchild"),
+        (1, "Sibling"),
+    ]
+
+
+def test_mindmap_normaliser_preserves_supported_shapes_and_disambiguates_ids():
+    from tutor.agents.resource.multimedia import normalise_mindmap_dsl
+
+    fixed, outline = normalise_mindmap_dsl(
+        "mindmap\n"
+        "  root((Topic))\n"
+        '    node_9["Existing"]\n'
+        "    rounded(Rounded)\n"
+        "    circle((Circle))\n"
+        "    bang))Bang((\n"
+        "    cloud)Cloud(\n"
+        "    hex{{Hexagon}}\n"
+        '    "Quoted \\"label\\" and \\\\ slash"\n'
+        "    arbitrary --> expression\n"
+    )
+
+    assert "node_9[\"Existing\"]" in fixed
+    assert "rounded(Rounded)" in fixed
+    assert "circle((Circle))" in fixed
+    assert "bang))Bang((" in fixed
+    assert "cloud)Cloud(" in fixed
+    assert "hex{{Hexagon}}" in fixed
+    assert 'node_9_9["Quoted \\\"label\\\" and \\\\ slash"]' in fixed
+    assert 'node_10["arbitrary --> expression"]' in fixed
+    assert [item.label for item in outline][-2:] == [
+        'Quoted "label" and \\ slash',
+        "arbitrary --> expression",
+    ]
+
+
 def test_sanitize_mermaid_dsl_does_not_wrap_parens():
     """2026-06-22 fix (Task 8): the previous sanitizer over-wrapped
     any line containing parens — including valid mindmap root nodes

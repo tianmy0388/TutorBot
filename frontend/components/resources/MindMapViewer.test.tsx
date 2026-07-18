@@ -54,4 +54,26 @@ describe("MindMapViewer", () => {
 
     await waitFor(() => expect(screen.queryByText("思维导图暂时无法显示。")).not.toBeInTheDocument());
   });
+
+  it("ignores a delayed failure from a superseded render", async () => {
+    let rejectFirst: (error: Error) => void = () => undefined;
+    renderMermaid.mockImplementationOnce(() => new Promise((_, reject) => {
+      rejectFirst = reject;
+    }));
+    const view = render(<MindMapViewer resource={resource("mindmap\n  root((old))")} />);
+
+    renderMermaid.mockResolvedValueOnce({
+      svg: "<svg>new</svg>",
+      bindFunctions: undefined,
+      diagramType: "mindmap",
+    });
+    view.rerender(<MindMapViewer resource={resource("mindmap\n  root((new))")} />);
+    await waitFor(() => expect(renderMermaid).toHaveBeenCalledTimes(2));
+
+    rejectFirst(new Error("stale parser details"));
+    await Promise.resolve();
+
+    expect(screen.queryByText("思维导图暂时无法显示。")).not.toBeInTheDocument();
+    expect(screen.queryByText("激活函数")).not.toBeInTheDocument();
+  });
 });
