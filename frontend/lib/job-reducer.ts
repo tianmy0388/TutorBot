@@ -644,7 +644,8 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
     }
     messages = upsertWorkflowMessage(
       messages,
-      workflowMessage(next, next.status as JobTerminalStatus),
+      existingWorkflowTimeline(messages, incoming.job_id) ??
+        workflowMessage(next, next.status as JobTerminalStatus),
     );
   }
 

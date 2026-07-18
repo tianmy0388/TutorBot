@@ -68,6 +68,9 @@ interface InactiveStageHistory {
 }
 
 const inactiveStageHistory = new Map<string, InactiveStageHistory>();
+const finalizedInactiveWorkflows = new Map<string, number>();
+const MAX_INACTIVE_STAGE_HISTORIES = 256;
+const MAX_INACTIVE_WORKFLOW_RECORDS = 256;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -148,22 +151,29 @@ export function dispatchStreamEvent(
       const contract = (
         streamEv.metadata as Record<string, unknown> | undefined
       )?.contract as Record<string, unknown> | undefined;
-      persistTerminalAssistant(
-        contract,
-        inactiveJobId,
-        context.userId || stateAtDispatch.userId,
-        authoritativeSessionId,
-        context.appendConversationMessage,
-      );
-      persistTerminalWorkflow(
-        contract,
-        inactiveJobId,
-        context.userId || stateAtDispatch.userId,
-        authoritativeSessionId,
-        streamEv,
-        takeInactiveStageHistory(authoritativeSessionId, inactiveJobId),
-        context.appendConversationMessage,
-      );
+      const inactiveUserId = context.userId || stateAtDispatch.userId;
+      if (
+        inactiveUserId &&
+        hasTerminalWorkflowStatus(contract) &&
+        markInactiveWorkflowFinalized(authoritativeSessionId, inactiveJobId)
+      ) {
+        persistTerminalAssistant(
+          contract,
+          inactiveJobId,
+          inactiveUserId,
+          authoritativeSessionId,
+          context.appendConversationMessage,
+        );
+        persistTerminalWorkflow(
+          contract,
+          inactiveJobId,
+          inactiveUserId,
+          authoritativeSessionId,
+          streamEv,
+          takeInactiveStageHistory(authoritativeSessionId, inactiveJobId),
+          context.appendConversationMessage,
+        );
+      }
     }
     return;
   }
@@ -372,11 +382,7 @@ function persistTerminalWorkflow(
   appendConversationMessage?: ConversationMessageAppender,
 ): void {
   const status = contract?.status;
-  if (
-    !userId ||
-    !sessionId ||
-    !["succeeded", "partial", "failed", "cancelled"].includes(status as string)
-  ) return;
+  if (!userId || !sessionId || !hasTerminalWorkflowStatus(contract)) return;
   const job: ClientJob = {
     job_id: jobId,
     capability: typeof contract?.capability === "string" ? contract.capability : "",
@@ -412,6 +418,10 @@ function persistTerminalWorkflow(
   );
 }
 
+function hasTerminalWorkflowStatus(contract: Record<string, unknown> | undefined): boolean {
+  return ["succeeded", "partial", "failed", "cancelled"].includes(contract?.status as string);
+}
+
 function stageHistoryKey(sessionId: string, jobId: string): string {
   return `${sessionId}:${jobId}`;
 }
@@ -431,6 +441,11 @@ function recordInactiveStage(sessionId: string, jobId: string, event: StreamEven
     }
   }
   inactiveStageHistory.set(key, { events, openStages });
+  while (inactiveStageHistory.size > MAX_INACTIVE_STAGE_HISTORIES) {
+    const oldest = inactiveStageHistory.keys().next().value;
+    if (oldest === undefined) break;
+    inactiveStageHistory.delete(oldest);
+  }
 }
 
 function takeInactiveStageHistory(
@@ -441,6 +456,18 @@ function takeInactiveStageHistory(
   const history = inactiveStageHistory.get(key);
   inactiveStageHistory.delete(key);
   return history;
+}
+
+function markInactiveWorkflowFinalized(sessionId: string, jobId: string): boolean {
+  const key = stageHistoryKey(sessionId, jobId);
+  if (finalizedInactiveWorkflows.has(key)) return false;
+  finalizedInactiveWorkflows.set(key, Date.now());
+  while (finalizedInactiveWorkflows.size > MAX_INACTIVE_WORKFLOW_RECORDS) {
+    const oldest = finalizedInactiveWorkflows.keys().next().value;
+    if (oldest === undefined) break;
+    finalizedInactiveWorkflows.delete(oldest);
+  }
+  return true;
 }
 
 function persistConversationMessage(

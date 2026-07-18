@@ -327,6 +327,51 @@ describe("job-reducer", () => {
     expect(assistantCount).toBe(1);
   });
 
+  it("preserves a rich stable workflow timeline on terminal snapshot replay", () => {
+    const started = reduceJobEvent(
+      createJobState("job-snapshot-workflow", "tutoring"),
+      streamEvent("job-snapshot-workflow", { stage: "plan", event_id: "snapshot-plan-start" }),
+    );
+    const completed = reduceJobEvent(
+      started,
+      streamEvent("job-snapshot-workflow", {
+        type: "stage_end",
+        stage: "plan",
+        event_id: "snapshot-plan-end",
+      }),
+    );
+    const open = reduceJobEvent(
+      completed,
+      streamEvent("job-snapshot-workflow", {
+        stage: "execute",
+        event_id: "snapshot-execute-start",
+      }),
+    );
+    const terminal = reduceJobEvent(open, terminalEvent("job-snapshot-workflow", "done"));
+    const beforeSnapshot = terminal.messages.find(
+      (message) => message.id === "workflow:job-snapshot-workflow",
+    );
+    const replayed = reduceJobEvent(terminal, {
+      type: "snapshot",
+      job: {
+        job_id: "job-snapshot-workflow",
+        capability: "tutoring",
+        status: "succeeded",
+        message_preview: "done",
+        finished_at: new Date(terminal.jobsById["job-snapshot-workflow"].finished_at ?? 0)
+          .toISOString(),
+        last_seq: 99,
+        events: [],
+        result: terminal.jobsById["job-snapshot-workflow"].result,
+        event_count: 99,
+      },
+    });
+
+    expect(replayed.messages.find(
+      (message) => message.id === "workflow:job-snapshot-workflow",
+    )).toEqual(beforeSnapshot);
+  });
+
   it("snapshot inserts a terminal message for a job we never saw running", () => {
     const state = emptyJobsState();
     const next = reduceJobEvent(state, {

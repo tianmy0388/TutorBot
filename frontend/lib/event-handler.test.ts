@@ -412,7 +412,7 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     mockStoreState.sessionId = "session-b";
     const persist = vi.fn().mockResolvedValue(undefined);
     const context = {
-      sessionId: "session-a",
+      sessionId: "session-history-a",
       userId: "u-test",
       appendConversationMessage: persist,
     };
@@ -430,6 +430,43 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
       ([, , message]) => message.metadata?.kind === "workflow_timeline",
     )?.[2];
     expect(workflow?.metadata?.workflow).toEqual({
+      status: "failed",
+      stages: [
+        { name: "plan", status: "completed" },
+        { name: "execute", status: "incomplete" },
+      ],
+    });
+  });
+
+  it("persists a rich inactive workflow only once across duplicate terminal replay", async () => {
+    mockStoreState.sessionId = "session-b";
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const context = {
+      sessionId: "session-replay-a",
+      userId: "u-test",
+      appendConversationMessage: persist,
+    };
+    const stage = (type: "stage_start" | "stage_end", name: string, id: string) => ({
+      ...inactiveStageEvent(type, name, id),
+      session_id: "session-replay-a",
+      metadata: { job_id: "job-bbf6ddbf", session_id: "session-replay-a" },
+    });
+    dispatchStreamEvent(stage("stage_start", "plan", "replay-plan-start"), context);
+    dispatchStreamEvent(stage("stage_end", "plan", "replay-plan-end"), context);
+    dispatchStreamEvent(stage("stage_start", "execute", "replay-execute-start"), context);
+    const terminal = jobTerminalEvent([]);
+    terminal.session_id = "session-replay-a";
+    terminal.metadata = { ...terminal.metadata, session_id: "session-replay-a" };
+    dispatchStreamEvent(terminal, context);
+    dispatchStreamEvent(terminal, context);
+
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(2));
+    expect(persist.mock.calls.filter(
+      ([, , message]) => message.metadata?.kind === "workflow_timeline",
+    )).toHaveLength(1);
+    expect(persist.mock.calls.find(
+      ([, , message]) => message.metadata?.kind === "workflow_timeline",
+    )?.[2].metadata?.workflow).toEqual({
       status: "failed",
       stages: [
         { name: "plan", status: "completed" },
