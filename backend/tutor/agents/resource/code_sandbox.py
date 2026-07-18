@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -57,9 +58,14 @@ from tutor.core.redaction import public_failure, redact_sensitive, redact_text
 from tutor.core.stream_bus import StreamBus
 from tutor.services.artifacts import to_artifact_key
 from tutor.services.config.settings import Settings, get_settings
+from tutor.services.exercise_attempts.schema import (
+    AttemptStatus,
+    SubmissionExecutionResult,
+)
 from tutor.services.resource_package.schema import (
     ArtifactRef,
     CodeResource,
+    CodeSpec,
     Resource,
     ResourceType,
     build_resource,
@@ -635,7 +641,272 @@ def _probe_dependency_versions(
         }
 
 
-__all__ = ["CodeSandboxAgent", "CODE_OUTPUT_SCHEMA"]
+_SUBMISSION_OUTPUT_LIMIT_BYTES = 16 * 1024
+_POLICY_TIMEOUT_SECONDS = 3
+_ALLOWED_ALGORITHM_IMPORTS = (
+    "bisect",
+    "collections",
+    "decimal",
+    "fractions",
+    "functools",
+    "heapq",
+    "itertools",
+    "json",
+    "math",
+    "random",
+    "re",
+    "statistics",
+)
+
+
+def run_code_submission(
+    source_code: str,
+    *,
+    code_spec: CodeSpec,
+    interpreter: str,
+) -> SubmissionExecutionResult:
+    """Execute a package-owned Python exercise in a fresh local subprocess.
+
+    The AST policy is deliberately a *best-effort* guard for TutorBot's local,
+    single-user learning workflow. It is not a multi-tenant security sandbox;
+    an untrusted deployment must replace this boundary with OS/container
+    isolation. Policy checking itself runs in a dedicated subprocess so parsing
+    adversarial source cannot mutate API-process state.
+    """
+    started = time.monotonic()
+    total = len(code_spec.tests)
+    policy = _run_submission_policy(source_code, interpreter=interpreter)
+    if policy == "interpreter_unavailable":
+        return _submission_terminal(
+            AttemptStatus.ERROR,
+            total=total,
+            started=started,
+            error_code="CODE_INTERPRETER_UNAVAILABLE",
+        )
+    if policy == "syntax_error":
+        return _submission_terminal(
+            AttemptStatus.SYNTAX_ERROR,
+            total=total,
+            started=started,
+            error_code="CODE_SYNTAX_ERROR",
+        )
+    if policy != "ok":
+        return _submission_terminal(
+            AttemptStatus.POLICY_REJECTED,
+            total=total,
+            started=started,
+            error_code="CODE_POLICY_VIOLATION",
+        )
+    test_policy_source = "\n".join(
+        f"_tutor_test_result_{index} = ({test.call})"
+        for index, test in enumerate(code_spec.tests)
+    )
+    if _run_submission_policy(test_policy_source, interpreter=interpreter) != "ok":
+        return _submission_terminal(
+            AttemptStatus.POLICY_REJECTED,
+            total=total,
+            started=started,
+            error_code="CODE_POLICY_VIOLATION",
+        )
+
+    token = uuid.uuid4().hex
+    sentinel = f"__TUTOR_RESULT_{token}__="
+    wrapper = _submission_wrapper(source_code, code_spec, sentinel=sentinel)
+    try:
+        with tempfile.TemporaryDirectory(prefix="tutor-attempt-") as scratch:
+            wrapper_path = Path(scratch) / "runner.py"
+            wrapper_path.write_text(wrapper, encoding="utf-8", newline="\n")
+            proc = subprocess.run(
+                [interpreter, "-I", str(wrapper_path)],
+                cwd=scratch,
+                env=_submission_environment(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=code_spec.time_limit_seconds,
+                check=False,
+            )
+    except FileNotFoundError:
+        return _submission_terminal(
+            AttemptStatus.ERROR,
+            total=total,
+            started=started,
+            error_code="CODE_INTERPRETER_UNAVAILABLE",
+        )
+    except subprocess.TimeoutExpired:
+        return _submission_terminal(
+            AttemptStatus.TIMEOUT,
+            total=total,
+            started=started,
+            error_code="CODE_TIMEOUT",
+        )
+    except Exception:  # noqa: BLE001 - stable public terminal contract
+        return _submission_terminal(
+            AttemptStatus.ERROR,
+            total=total,
+            started=started,
+            error_code="CODE_EXECUTION_ERROR",
+        )
+
+    payload = None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith(sentinel):
+            try:
+                payload = json.loads(line[len(sentinel) :])
+            except (TypeError, ValueError):
+                payload = None
+    if not isinstance(payload, dict):
+        return _submission_terminal(
+            AttemptStatus.ERROR,
+            total=total,
+            started=started,
+            error_code="CODE_RESULT_INVALID",
+        )
+
+    try:
+        return SubmissionExecutionResult.model_validate(
+            {
+                "status": payload["status"],
+                "passed_tests": payload.get("passed_tests", 0),
+                "total_tests": total,
+                "test_results": payload.get("test_results", []),
+                "stdout": _bounded_utf8(str(payload.get("stdout", ""))),
+                "stderr": _bounded_utf8(str(payload.get("stderr", ""))),
+                "duration_seconds": max(0.0, time.monotonic() - started),
+                "error_code": payload.get("error_code"),
+            }
+        )
+    except Exception:  # noqa: BLE001 - child output is untrusted
+        return _submission_terminal(
+            AttemptStatus.ERROR,
+            total=total,
+            started=started,
+            error_code="CODE_RESULT_INVALID",
+        )
+
+
+def _run_submission_policy(source_code: str, *, interpreter: str) -> str:
+    policy_script = (
+        "import ast, json, sys\n"
+        f"allowed = {repr(_ALLOWED_ALGORITHM_IMPORTS)}\n"
+        "blocked_calls = {'open','exec','eval','compile','input','__import__',"
+        "'globals','locals','vars','breakpoint','help'}\n"
+        "try:\n"
+        " tree = ast.parse(sys.stdin.read(), mode='exec')\n"
+        "except SyntaxError:\n"
+        " print(json.dumps({'status':'syntax_error'})); raise SystemExit\n"
+        "bad = False\n"
+        "for node in ast.walk(tree):\n"
+        " if isinstance(node, (ast.Import, ast.ImportFrom)):\n"
+        "  names = [a.name.split('.')[0] for a in node.names] if isinstance(node, ast.Import) else [(node.module or '').split('.')[0]]\n"
+        "  if any(name not in allowed for name in names): bad = True\n"
+        " if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in blocked_calls: bad = True\n"
+        " if isinstance(node, ast.Attribute) and node.attr.startswith('__'): bad = True\n"
+        " if isinstance(node, ast.Name) and node.id.startswith('__'): bad = True\n"
+        "print(json.dumps({'status':'policy_rejected' if bad else 'ok'}))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [interpreter, "-I", "-c", policy_script],
+            input=source_code,
+            env=_submission_environment(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_POLICY_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except FileNotFoundError:
+        return "interpreter_unavailable"
+    except Exception:  # noqa: BLE001
+        return "policy_rejected"
+    try:
+        data = json.loads((proc.stdout or "").splitlines()[-1])
+        status = data.get("status")
+        return status if status in {"ok", "syntax_error", "policy_rejected"} else "policy_rejected"
+    except (IndexError, TypeError, ValueError):
+        return "policy_rejected"
+
+
+def _submission_wrapper(source_code: str, code_spec: CodeSpec, *, sentinel: str) -> str:
+    tests_json = json.dumps(
+        [item.model_dump(mode="json") for item in code_spec.tests],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        "import contextlib as _ctx, io as _io, json as _json\n"
+        f"_CAP={_SUBMISSION_OUTPUT_LIMIT_BYTES}\n"
+        "class _Bounded(_io.StringIO):\n"
+        " def write(self, value):\n"
+        "  value=str(value); remaining=max(0,_CAP-len(self.getvalue().encode('utf-8')))\n"
+        "  if remaining:\n"
+        "   chunk=value.encode('utf-8')[:remaining].decode('utf-8','ignore'); super().write(chunk)\n"
+        "  return len(value)\n"
+        "_out=_Bounded(); _err=_Bounded(); _globals={}; _results=[]; _status='failed'; _error=None\n"
+        f"_tests=_json.loads({tests_json!r})\n"
+        "with _ctx.redirect_stdout(_out), _ctx.redirect_stderr(_err):\n"
+        " try:\n"
+        f"  exec(compile({source_code!r}, '<submission>', 'exec'), _globals)\n"
+        " except SyntaxError:\n"
+        "  _status='syntax_error'; _error='CODE_SYNTAX_ERROR'\n"
+        " except BaseException:\n"
+        "  _status='error'; _error='CODE_RUNTIME_ERROR'\n"
+        " else:\n"
+        "  for _test in _tests:\n"
+        "   try:\n"
+        "    _actual=eval(compile(_test['call'], '<test>', 'eval'), _globals)\n"
+        "    try: _actual_encoded=_json.dumps(_actual, ensure_ascii=False, allow_nan=False)\n"
+        "    except (TypeError, ValueError):\n"
+        "     _results.append({'name':_test['name'],'passed':False,'error_code':'CODE_RESULT_NOT_JSON'}); continue\n"
+        "    if len(_actual_encoded.encode('utf-8')) > _CAP:\n"
+        "     _results.append({'name':_test['name'],'passed':False,'error_code':'CODE_RESULT_TOO_LARGE'}); continue\n"
+        "    _passed=(_actual == _test['expected_json']) and (type(_actual) is type(_test['expected_json']) or not isinstance(_actual,(bool,int,float)))\n"
+        "    _results.append({'name':_test['name'],'passed':bool(_passed),'actual_json':_actual})\n"
+        "   except BaseException:\n"
+        "    _results.append({'name':_test['name'],'passed':False,'error_code':'CODE_RUNTIME_ERROR'})\n"
+        "  _status='passed' if _results and all(x['passed'] for x in _results) else 'failed'\n"
+        "_payload={'status':_status,'passed_tests':sum(1 for x in _results if x['passed']),'test_results':_results,'stdout':_out.getvalue(),'stderr':_err.getvalue(),'error_code':_error}\n"
+        f"print({sentinel!r}+_json.dumps(_payload,ensure_ascii=False,separators=(',',':'),allow_nan=False))\n"
+    )
+
+
+def _submission_environment() -> dict[str, str]:
+    """Return a small deterministic environment without inherited secrets."""
+    env = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    for key in ("SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
+
+
+def _bounded_utf8(value: str) -> str:
+    return value.encode("utf-8")[:_SUBMISSION_OUTPUT_LIMIT_BYTES].decode("utf-8", "ignore")
+
+
+def _submission_terminal(
+    status: AttemptStatus,
+    *,
+    total: int,
+    started: float,
+    error_code: str,
+) -> SubmissionExecutionResult:
+    return SubmissionExecutionResult(
+        status=status,
+        passed_tests=0,
+        total_tests=total,
+        test_results=[],
+        stdout="",
+        stderr="",
+        duration_seconds=max(0.0, time.monotonic() - started),
+        error_code=error_code,
+    )
+
+
+__all__ = ["CodeSandboxAgent", "CODE_OUTPUT_SCHEMA", "run_code_submission"]
 
 
 def _wrap_user_code(code: str, scratch: Path) -> str:

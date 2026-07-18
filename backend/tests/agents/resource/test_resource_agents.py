@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.agents.resource.code_sandbox import CodeSandboxAgent
 from tutor.agents.resource.content_expert import ContentExpertAgent
 from tutor.agents.resource.exercise_generator import ExerciseGeneratorAgent
@@ -162,10 +161,20 @@ async def test_exercise_generator_produces_tiered_questions():
              "explanation": "f_t = σ(W_f · [h_{t-1}, x_t] + b_f)",
              "estimated_seconds": 120},
             {"id": "q3", "tier": "challenge", "type": "code",
-             "difficulty": 4, "question": "用 PyTorch 实现一个 LSTM 层",
-             "answer": "nn.LSTM(input_size, hidden_size)",
-             "explanation": "PyTorch 提供 nn.LSTM",
-             "estimated_seconds": 300},
+             "difficulty": 4, "question": "实现函数返回 LSTM 的门数量",
+             "answer": "def lstm_gate_count(): return 3",
+             "explanation": "遗忘门、输入门和输出门共三个门",
+             "estimated_seconds": 300,
+             "code_spec": {
+                 "language": "python",
+                 "starter_code": "def lstm_gate_count():\n    pass",
+                 "tests": [{
+                     "name": "返回三个门",
+                     "call": "lstm_gate_count()",
+                     "expected_json": 3,
+                 }],
+                 "time_limit_seconds": 5,
+             }},
         ]
     }, ensure_ascii=False))
     agent = ExerciseGeneratorAgent(llm=llm)
@@ -178,6 +187,8 @@ async def test_exercise_generator_produces_tiered_questions():
     assert breakdown.get("basic") == 1
     assert breakdown.get("advanced") == 1
     assert breakdown.get("challenge") == 1
+    code_question = resource.format_specific["questions"][2]
+    assert code_question["code_spec"]["tests"][0]["expected_json"] == 3
 
 
 @pytest.mark.asyncio

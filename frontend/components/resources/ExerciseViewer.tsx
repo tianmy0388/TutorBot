@@ -23,7 +23,9 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Resource } from "@/lib/types";
+import { useTutorStore } from "@/lib/store";
+import type { CodeExerciseQuestion, PublicCodeSpec, Resource } from "@/lib/types";
+import { CodeExerciseEditor } from "./CodeExerciseEditor";
 
 interface ParsedQuestion {
   id: string;
@@ -32,8 +34,9 @@ interface ParsedQuestion {
   knowledge_point: string;
   question: string;
   options: Array<{ label: string; text: string }>;
-  answer: string | string[] | boolean;
+  answer?: string | string[] | boolean;
   explanation: string;
+  code_spec: PublicCodeSpec | null;
 }
 
 function parseQuestions(resource: Resource): ParsedQuestion[] {
@@ -52,6 +55,10 @@ function parseQuestions(resource: Resource): ParsedQuestion[] {
       : [],
     answer: q.answer,
     explanation: String(q.explanation || ""),
+    code_spec:
+      q.code_spec && typeof q.code_spec === "object"
+        ? (q.code_spec as PublicCodeSpec)
+        : null,
   }));
 }
 
@@ -61,10 +68,19 @@ const TYPE_LABELS: Record<string, string> = {
   true_false: "判断",
   fill_blank: "填空",
   short_answer: "简答",
+  code: "代码",
 };
 
 export function ExerciseViewer({ resource }: { resource: Resource }) {
-  const questions = parseQuestions(resource);
+  const questions = useMemo(() => parseQuestions(resource), [resource]);
+  const localQuestions = useMemo(
+    () => questions.filter((question) => question.type !== "code"),
+    [questions],
+  );
+  const userId = useTutorStore((state) => state.userId);
+  const sessionId = useTutorStore((state) => state.sessionId);
+  const latestPackage = useTutorStore((state) => state.latestPackage);
+  const packageId = resolveDurablePackageId(resource, latestPackage);
   const [answers, setAnswers] = useState<Record<string, any>>({});
   const [submitted, setSubmitted] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState<string>("all");
@@ -78,14 +94,14 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
   const stats = useMemo(() => {
     let correct = 0;
     let answered = 0;
-    questions.forEach((q) => {
+    localQuestions.forEach((q) => {
       if (submitted[q.id]) {
         answered += 1;
         if (isCorrect(q, answers[q.id])) correct += 1;
       }
     });
-    return { correct, answered, total: questions.length };
-  }, [questions, answers, submitted]);
+    return { correct, answered, total: localQuestions.length };
+  }, [localQuestions, answers, submitted]);
 
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = { all: questions.length };
@@ -126,7 +142,7 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
 
   const submitAll = () => {
     const next: Record<string, boolean> = {};
-    questions.forEach((q) => {
+    localQuestions.forEach((q) => {
       if (answers[q.id] !== undefined) next[q.id] = true;
     });
     setSubmitted(next);
@@ -242,6 +258,18 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
       {/* Questions */}
       <div className="space-y-4">
         {filteredQuestions.map((q, idx) => {
+          if (q.type === "code") {
+            return (
+              <CodeQuestionCard
+                key={q.id}
+                index={questions.indexOf(q) + 1}
+                question={q}
+                packageId={packageId}
+                userId={userId}
+                sessionId={sessionId}
+              />
+            );
+          }
           const isSub = !!submitted[q.id];
           const correct = isSub && isCorrect(q, answers[q.id]);
           return (
@@ -615,6 +643,70 @@ function FillBlankInput({
           </span>
         );
       })}
+    </div>
+  );
+}
+
+function resolveDurablePackageId(
+  resource: Resource,
+  latestPackage: { package_id: string; resources: Resource[] } | null,
+) {
+  const metadataId =
+    typeof resource.metadata?.package_id === "string"
+      ? resource.metadata.package_id
+      : "";
+  if (metadataId && !isPendingPackage(metadataId)) return metadataId;
+  if (
+    latestPackage &&
+    !isPendingPackage(latestPackage.package_id) &&
+    latestPackage.resources.some((item) => item.resource_id === resource.resource_id)
+  ) {
+    return latestPackage.package_id;
+  }
+  return null;
+}
+
+function isPendingPackage(packageId: string) {
+  return packageId.startsWith("pending-") || packageId.startsWith("partial-");
+}
+
+function CodeQuestionCard({
+  index,
+  question,
+  packageId,
+  userId,
+  sessionId,
+}: {
+  index: number;
+  question: ParsedQuestion;
+  packageId: string | null;
+  userId: string;
+  sessionId: string;
+}) {
+  const codeQuestion: CodeExerciseQuestion = {
+    id: question.id,
+    type: "code",
+    difficulty: question.difficulty,
+    knowledge_point: question.knowledge_point,
+    question: question.question,
+    options: question.options,
+    explanation: question.explanation,
+    code_spec: question.code_spec,
+  };
+  return (
+    <div className="rounded-lg border border-fg/10 bg-bg-card p-4">
+      <div className="mb-2 flex items-center gap-2 text-xs text-fg-muted">
+        <span className="font-mono text-fg-subtle">#{index}</span>
+        <span>难度 {"★".repeat(question.difficulty)}</span>
+        <span className="rounded border border-fg/10 bg-bg-panel px-1.5 py-0.5 text-[10px]">代码</span>
+      </div>
+      <p className="text-sm leading-relaxed text-fg">{question.question}</p>
+      <CodeExerciseEditor
+        question={codeQuestion}
+        packageId={packageId}
+        userId={userId}
+        sessionId={sessionId}
+      />
     </div>
   );
 }

@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
 
     workflow = app.state.learning_workflow
     resource_store = app.state.resource_package_store
+    attempt_store = app.state.exercise_attempt_store
     kg_service = app.state.knowledge_graph_service
     from tutor.capabilities.assessment import AssessmentCapability
     from tutor.capabilities.path_planning import PathPlanningCapability
@@ -132,6 +133,16 @@ async def lifespan(app: FastAPI):
         await workflow.event_store.init()
         await workflow.job_store.init()
         await resource_store.init()
+        await attempt_store.init()
+        await attempt_store.reap_orphaned_claims()
+        from tutor.services.exercise_attempts.publisher import (
+            repair_unpublished_attempt_events,
+        )
+
+        await repair_unpublished_attempt_events(
+            attempt_store=attempt_store,
+            workflow=workflow,
+        )
         await workflow.reconcile_all()
         await runner.resume_active_jobs()
         logger.info("Application-owned learning stores initialised")
@@ -162,6 +173,7 @@ async def lifespan(app: FastAPI):
             ("PROFILE_STORE_CLOSE_FAILED", workflow.profile_store.close),
             ("JOB_STORE_CLOSE_FAILED", workflow.job_store.close),
             ("RESOURCE_STORE_CLOSE_FAILED", resource_store.close),
+            ("EXERCISE_ATTEMPT_STORE_CLOSE_FAILED", attempt_store.close),
         ):
             try:
                 await close()
@@ -185,6 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Available before lifespan startup as well (notably to ASGI test
     # transports and identity dependencies).
     app.state.settings = settings
+    from tutor.services.exercise_attempts.store import ExerciseAttemptStore
     from tutor.services.jobs.store import JobStore
     from tutor.services.knowledge_graph.loader import KnowledgeGraphLoader
     from tutor.services.knowledge_graph.service import KnowledgeGraphService
@@ -203,6 +216,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.resource_package_store = ResourcePackageStore(
         settings.data_dir / "resource_packages.db"
+    )
+    app.state.exercise_attempt_store = ExerciseAttemptStore(
+        settings.data_dir / "exercise_attempts.db"
     )
     app.state.knowledge_graph_service = KnowledgeGraphService(
         loader=KnowledgeGraphLoader(settings.kb_dir),
@@ -248,6 +264,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from tutor.api.routers.config import router as config_router
     from tutor.api.routers.conversations import router as conversations_router
     from tutor.api.routers.courses import router as courses_router
+    from tutor.api.routers.exercises import router as exercises_router
     from tutor.api.routers.health import router as health_router
     from tutor.api.routers.jobs import router as jobs_router
     from tutor.api.routers.knowledge_bases import router as kb_router
@@ -267,11 +284,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(config_router, prefix="/api/v1", tags=["config"])
     app.include_router(conversations_router, prefix="/api/v1", tags=["conversations"])
     app.include_router(learning_router, prefix="/api/v1", tags=["learning"])
+    app.include_router(exercises_router, prefix="/api/v1", tags=["exercises"])
     # Compatibility alias for the documented non-versioned learning API.
     app.include_router(
         learning_router,
         prefix="/api",
         tags=["learning"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        exercises_router,
+        prefix="/api",
+        tags=["exercises"],
         include_in_schema=False,
     )
     app.include_router(ws_router, prefix="/api/v1", tags=["websocket"])

@@ -87,6 +87,7 @@ from tutor.services.resource_package.schema import (
     ResourceReview,
     ResourceType,
     ReviewVerdict,
+    public_package_dump,
 )
 from tutor.services.resource_package.store import (
     ResourcePackageStore,
@@ -962,7 +963,7 @@ class ResourceGenerationCapability(BaseCapability):
         return CapabilityResult(
             assistant_message=f"已生成 {len(package.resources)} 项学习资源",
             payload={
-                "package": package.model_dump(mode="json"),
+                "package": public_package_dump(package),
                 "summary": package.summary(),
                 "reviews": [
                     {

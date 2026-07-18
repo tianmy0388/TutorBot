@@ -120,7 +120,10 @@ async def get_conversation_aggregate(
     from tutor.services.resource_package import get_resource_package_store
 
     job_store = get_job_store()
-    pkg_store = get_resource_package_store()
+    pkg_store = (
+        getattr(request.app.state, "resource_package_store", None)
+        or get_resource_package_store()
+    )
 
     # The conversation is the authorization boundary. Rows imported from an
     # older local browser identity are joined by session_id without applying a
@@ -174,7 +177,11 @@ async def get_conversation_aggregate(
         path_summary=path_summary,
         recovery_warnings=warnings,
     )
-    return aggregate.model_dump(mode="json")
+    response = aggregate.model_dump(mode="json")
+    from tutor.services.resource_package.schema import public_package_dump
+
+    response["packages"] = [public_package_dump(package) for package in packages]
+    return response
 
 
 def _mark_missing_artifacts(packages, jobs):

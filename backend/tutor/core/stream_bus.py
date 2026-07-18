@@ -508,6 +508,13 @@ def _serialise_resource(resource: Any) -> Any:
     # Pydantic v2: prefer ``model_dump(mode="json")``.
     if hasattr(resource, "model_dump") and callable(resource.model_dump):
         try:
+            from tutor.services.resource_package.schema import (
+                Resource,
+                public_resource_dump,
+            )
+
+            if isinstance(resource, Resource):
+                return public_resource_dump(resource)
             return resource.model_dump(mode="json")
         except Exception:  # noqa: BLE001
             pass

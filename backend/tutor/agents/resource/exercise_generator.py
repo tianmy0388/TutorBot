@@ -72,6 +72,35 @@ EXERCISE_OUTPUT_SCHEMA: dict[str, Any] = {
                     "answer": {},
                     "explanation": {"type": "string"},
                     "estimated_seconds": {"type": "integer"},
+                    "code_spec": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "language": {"const": "python"},
+                            "starter_code": {"type": "string"},
+                            "tests": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 50,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "call": {"type": "string"},
+                                        "expected_json": {},
+                                    },
+                                    "required": ["name", "call", "expected_json"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "time_limit_seconds": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 10,
+                            },
+                        },
+                        "required": ["language", "starter_code", "tests"],
+                        "additionalProperties": False,
+                    },
                 },
                 "required": ["id", "type", "question", "answer"],
             },
@@ -166,7 +195,10 @@ class ExerciseGeneratorAgent(BaseAgent):
                     answer=q.get("answer"),
                     explanation=str(q.get("explanation") or ""),
                     estimated_seconds=int(q.get("estimated_seconds") or 60),
+                    code_spec=q.get("code_spec"),
                 )
+                if eq.type == "code" and eq.code_spec is None:
+                    raise ValueError("generated code question requires code_spec")
                 questions.append(eq)
             except Exception:
                 logger.warning("EXERCISE_ITEM_INVALID skipped=true")

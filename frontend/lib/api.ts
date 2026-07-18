@@ -12,6 +12,8 @@ import type {
   CourseGraph,
   CourseListResponse,
   EmbeddingSectionPatch,
+  ExerciseAttempt,
+  ExerciseAttemptListResponse,
   HealthResponse,
   JobDetail,
   JobListResponse,
@@ -275,6 +277,35 @@ export const deleteResourcePackage = (userId: string, packageId: string) =>
   request<{ deleted: boolean; package_id: string }>(
     `/resources/packages/${encodeURIComponent(userId)}/${encodeURIComponent(packageId)}`,
     { method: "DELETE" },
+  );
+
+export const listExerciseAttempts = (
+  packageId: string,
+  questionId: string,
+  userId: string,
+  signal?: AbortSignal,
+) => {
+  const params = new URLSearchParams({ user_id: userId, limit: "20", offset: "0" });
+  return request<ExerciseAttemptListResponse>(
+    `/exercises/${encodeURIComponent(packageId)}/${encodeURIComponent(questionId)}/attempts?${params}`,
+    { signal },
+  );
+};
+
+export const submitExerciseAttempt = (
+  packageId: string,
+  questionId: string,
+  payload: {
+    user_id: string;
+    session_id: string;
+    source_code: string;
+    client_attempt_id?: string;
+  },
+  signal?: AbortSignal,
+) =>
+  request<ExerciseAttempt>(
+    `/exercises/${encodeURIComponent(packageId)}/${encodeURIComponent(questionId)}/attempts`,
+    { method: "POST", body: JSON.stringify(payload), signal },
   );
 
 // ---------------------------------------------------------------------------

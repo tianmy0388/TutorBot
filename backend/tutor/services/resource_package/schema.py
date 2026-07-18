@@ -119,6 +119,27 @@ class ExerciseOption(BaseModel):
     text: str
 
 
+class CodeTestCase(BaseModel):
+    """One server-owned test for a generated Python code question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    call: str = Field(min_length=1, max_length=2000)
+    expected_json: Any
+
+
+class CodeSpec(BaseModel):
+    """Executable contract persisted with a Python code question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    language: Literal["python"] = "python"
+    starter_code: str = Field(max_length=131072)
+    tests: list[CodeTestCase] = Field(min_length=1, max_length=50)
+    time_limit_seconds: int = Field(default=5, ge=1, le=10)
+
+
 class ExerciseQuestion(BaseModel):
     """One question in a quiz/exercise set."""
 
@@ -133,6 +154,9 @@ class ExerciseQuestion(BaseModel):
     answer: Any = None  # string, list[str], bool, or code string
     explanation: str = ""
     estimated_seconds: int = 60
+    # Optional keeps legacy packages readable. Submission validates the
+    # executable contract and returns CODE_SPEC_UNAVAILABLE when absent.
+    code_spec: CodeSpec | None = None
 
     @field_validator("difficulty")
     @classmethod
@@ -478,9 +502,60 @@ def build_resource(
     )
 
 
+def public_resource_dump(resource: Resource) -> dict[str, Any]:
+    """Return the browser-safe projection of one resource.
+
+    Persisted code specs remain complete for server-side judging. Browser
+    projections intentionally omit reference answers, test expressions and
+    expected values while retaining enough metadata to render the editor.
+    """
+    data = resource.model_dump(mode="json")
+    if resource.type != ResourceType.EXERCISE:
+        return data
+    format_specific = dict(data.get("format_specific") or {})
+    questions = format_specific.get("questions")
+    if not isinstance(questions, list):
+        return data
+    public_questions: list[Any] = []
+    has_code = False
+    for raw in questions:
+        if not isinstance(raw, dict) or raw.get("type") != "code":
+            public_questions.append(raw)
+            continue
+        has_code = True
+        question = dict(raw)
+        question.pop("answer", None)
+        spec = question.get("code_spec")
+        if isinstance(spec, dict):
+            tests = spec.get("tests")
+            question["code_spec"] = {
+                "language": spec.get("language", "python"),
+                "starter_code": spec.get("starter_code", ""),
+                "time_limit_seconds": spec.get("time_limit_seconds", 5),
+                "test_count": len(tests) if isinstance(tests, list) else 0,
+            }
+        public_questions.append(question)
+    format_specific["questions"] = public_questions
+    data["format_specific"] = format_specific
+    if has_code:
+        # Generator content historically embeds every answer, including code
+        # reference solutions. The structured viewer does not need this copy.
+        data["content"] = ""
+    return data
+
+
+def public_package_dump(package: ResourcePackage) -> dict[str, Any]:
+    """Return a package with every child passed through public projection."""
+    data = package.model_dump(mode="json", exclude={"resources"})
+    data["resources"] = [public_resource_dump(resource) for resource in package.resources]
+    return data
+
+
 __all__ = [
     "ArtifactRef",
     "CodeResource",
+    "CodeSpec",
+    "CodeTestCase",
     "DocumentResource",
     "ExerciseOption",
     "ExerciseQuestion",
@@ -495,4 +570,6 @@ __all__ = [
     "ReviewVerdict",
     "VideoResource",
     "build_resource",
+    "public_package_dump",
+    "public_resource_dump",
 ]

@@ -440,6 +440,65 @@ export interface JobSummary {
   background_status?: JobStatus | null;
 }
 
+export interface PublicCodeSpec {
+  language: "python";
+  starter_code: string;
+  time_limit_seconds: number;
+  test_count: number;
+}
+
+export interface CodeExerciseQuestion {
+  id: string;
+  type: "code";
+  difficulty: number;
+  knowledge_point: string;
+  question: string;
+  options: Array<{ label: string; text: string }>;
+  explanation: string;
+  code_spec: PublicCodeSpec | null;
+}
+
+export type ExerciseAttemptStatus =
+  | "passed"
+  | "failed"
+  | "syntax_error"
+  | "timeout"
+  | "policy_rejected"
+  | "error";
+
+export interface ExerciseTestResult {
+  name: string;
+  passed: boolean;
+  actual_json?: unknown;
+  error_code?: string | null;
+}
+
+export interface ExerciseAttempt {
+  attempt_id: string;
+  client_attempt_id?: string | null;
+  user_id: string;
+  session_id: string;
+  package_id: string;
+  question_id: string;
+  source_code: string;
+  status: ExerciseAttemptStatus;
+  passed_tests: number;
+  total_tests: number;
+  test_results: ExerciseTestResult[];
+  stdout: string;
+  stderr: string;
+  duration_seconds: number;
+  created_at: string;
+  error_code?: string | null;
+}
+
+export interface ExerciseAttemptListResponse {
+  items: ExerciseAttempt[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface JobChildSummary {
   job_id: string;
   capability: string;

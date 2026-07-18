@@ -34,10 +34,22 @@ from tutor.services.artifacts import (
 )
 from tutor.services.config.settings import get_settings
 from tutor.services.identity import identity_policy_for
-from tutor.services.resource_package.schema import Resource, ResourceType
+from tutor.services.resource_package.schema import (
+    Resource,
+    ResourceType,
+    public_package_dump,
+    public_resource_dump,
+)
 from tutor.services.resource_package.store import get_resource_package_store
 
 router = APIRouter()
+
+
+def _resource_store(request: Request):
+    return (
+        getattr(request.app.state, "resource_package_store", None)
+        or get_resource_package_store()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +144,7 @@ async def list_packages(
     detail endpoint to fetch the full payload (including all resources).
     """
     user_id = identity_policy_for(request).resolve(user_id)
-    store = get_resource_package_store()
+    store = _resource_store(request)
     since = datetime.now(UTC) - timedelta(hours=since_hours) if since_hours is not None else None
     items = await store.list(user_id, limit=limit, offset=offset, since=since, topic=topic)
     total = await store.count(user_id)
@@ -149,7 +161,7 @@ async def list_packages(
 async def user_stats(user_id: str, request: Request) -> dict[str, Any]:
     """Aggregate stats for one user's generated resources."""
     user_id = identity_policy_for(request).resolve(user_id)
-    store = get_resource_package_store()
+    store = _resource_store(request)
     return await store.stats(user_id)
 
 
@@ -157,35 +169,35 @@ async def user_stats(user_id: str, request: Request) -> dict[str, Any]:
 async def get_package(user_id: str, package_id: str, request: Request) -> dict[str, Any]:
     """Return one full :class:`ResourcePackage` (header + all resources)."""
     user_id = identity_policy_for(request).resolve(user_id)
-    store = get_resource_package_store()
+    store = _resource_store(request)
     pkg = await store.get(package_id)
     if pkg is None:
         raise HTTPException(status_code=404, detail="package not found")
     if (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
         # Don't leak across users
         raise HTTPException(status_code=404, detail="package not found")
-    return pkg.model_dump(mode="json")
+    return public_package_dump(pkg)
 
 
 @router.get("/resources/packages/{user_id}/{package_id}/resources/{resource_id}")
 async def get_resource(user_id: str, package_id: str, resource_id: str, request: Request) -> dict[str, Any]:
     """Return one resource inside a package (lighter than the full package)."""
     user_id = identity_policy_for(request).resolve(user_id)
-    store = get_resource_package_store()
+    store = _resource_store(request)
     res: Resource | None = await store.get_resource(resource_id)
     if res is None:
         raise HTTPException(status_code=404, detail="resource not found")
     pkg = await store.get(package_id)
     if pkg is None or (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
         raise HTTPException(status_code=404, detail="resource not found")
-    return res.model_dump(mode="json")
+    return public_resource_dump(res)
 
 
 @router.delete("/resources/packages/{user_id}/{package_id}")
 async def delete_package(user_id: str, package_id: str, request: Request) -> dict[str, Any]:
     """Delete one package (and its child resources)."""
     user_id = identity_policy_for(request).resolve(user_id)
-    store = get_resource_package_store()
+    store = _resource_store(request)
     pkg = await store.get(package_id)
     if pkg is None or (pkg.metadata or {}).get("user_id", "anonymous") != user_id:
         raise HTTPException(status_code=404, detail="package not found")
@@ -197,7 +209,7 @@ async def delete_package(user_id: str, package_id: str, request: Request) -> dic
 async def delete_all_packages(user_id: str, request: Request) -> dict[str, Any]:
     """Delete **all** packages for a user (use with care)."""
     user_id = identity_policy_for(request).resolve(user_id)
-    store = get_resource_package_store()
+    store = _resource_store(request)
     count = await store.delete_user(user_id)
     return {"deleted": count, "user_id": user_id}
 
@@ -214,7 +226,7 @@ async def download_resource_file(
     """Download an on-disk artifact for a resource (e.g. the .pptx file)."""
     policy = identity_policy_for(request)
     user_id = policy.resolve(user_id)
-    store = get_resource_package_store()
+    store = _resource_store(request)
     res = await store.get_resource(resource_id)
     if res is None:
         raise HTTPException(status_code=404, detail="resource not found")
