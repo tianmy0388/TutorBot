@@ -49,10 +49,11 @@ vi.mock("./store", () => ({
 
 vi.mock("./api", () => ({
   appendConversationMessage: vi.fn().mockResolvedValue(undefined),
+  getResourcePackageDetail: vi.fn(),
 }));
 
 import { dispatchStreamEvent } from "./event-handler";
-import { appendConversationMessage } from "./api";
+import { appendConversationMessage, getResourcePackageDetail } from "./api";
 import type { StreamEvent } from "./types";
 
 const RESOURCE_BASE = {
@@ -169,6 +170,7 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     mockStoreState.addMessage.mockClear();
     mockStoreState.completeActiveTurn.mockClear();
     vi.mocked(appendConversationMessage).mockClear();
+    vi.mocked(getResourcePackageDetail).mockReset();
     mockStoreState.sessionId = "s-test";
   });
 
@@ -311,6 +313,131 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     const ids = finalPkg.resources.map((r) => r.resource_id);
     const videoCount = ids.filter((id) => id === "r-video").length;
     expect(videoCount).toBe(1);
+  });
+
+  it("does not replace a canonical exercise with a truncated streamed copy", () => {
+    mockStoreState.latestPackage = {
+      package_id: "pkg-canonical",
+      resources: [
+        {
+          resource_id: "r-exercise",
+          type: "exercise",
+          title: "练习题",
+          content: "",
+          format_specific: {
+            questions: [
+              { id: "q-1", options: [{ label: "A", text: "完整选项" }] },
+            ],
+          },
+        },
+      ],
+    };
+
+    const event = resourceEvent("r-exercise", "exercise", "练习题");
+    event.type = "result";
+    event.content = JSON.stringify({
+      package: {
+        package_id: "pkg-canonical",
+        resources: [
+          {
+            ...((mockStoreState.latestPackage as {
+              resources: unknown[];
+            }).resources[0] as Record<string, unknown>),
+            format_specific: {
+              questions: [{ id: "q-1", options: ["[TRUNCATED]"] }],
+            },
+          },
+        ],
+      },
+      summary: {},
+    });
+
+    dispatchStreamEvent(event);
+
+    expect((mockStoreState.latestPackage as { resources: Array<{ format_specific: { questions: Array<{ options: unknown[] }> } }> }).resources[0].format_specific.questions[0].options)
+      .toEqual([{ label: "A", text: "完整选项" }]);
+  });
+
+  it("does not add an invalid incremental resource to latestPackage", () => {
+    dispatchStreamEvent(
+      resourceEvent("r-truncated", "exercise", "练习题", {
+        format_specific: {
+          questions: [{ id: "q-1", options: ["[TRUNCATED]"] }],
+        },
+      }),
+    );
+
+    expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+    expect(mockStoreState.latestPackage).toBeNull();
+  });
+
+  it("recovers an invalid durable package once using the authoritative user", async () => {
+    let resolveRecovery!: (value: unknown) => void;
+    const recovery = new Promise<unknown>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    vi.mocked(getResourcePackageDetail).mockReturnValue(recovery as never);
+    const event = resourceEvent("r-truncated", "exercise", "练习题", {
+      format_specific: {
+        questions: [{ id: "q-1", options: ["[TRUNCATED]"] }],
+      },
+      metadata: { package_id: "pkg-durable" },
+    });
+
+    dispatchStreamEvent(event, { userId: "authoritative-user" });
+    dispatchStreamEvent(event, { userId: "authoritative-user" });
+
+    await vi.waitFor(() => expect(getResourcePackageDetail).toHaveBeenCalledTimes(1));
+    expect(getResourcePackageDetail).toHaveBeenCalledWith(
+      "authoritative-user",
+      "pkg-durable",
+    );
+
+    resolveRecovery({
+      package_id: "pkg-durable",
+      resources: [
+        {
+          resource_id: "r-document",
+          type: "document",
+          title: "已恢复资源",
+          content: "完整内容",
+        },
+      ],
+    });
+    await vi.waitFor(() => expect(mockStoreState.setLatestPackage).toHaveBeenCalledTimes(1));
+  });
+
+  it("allows recovery to retry after a synchronous request failure", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(getResourcePackageDetail)
+      .mockImplementationOnce(() => {
+        throw new Error("adapter failure");
+      })
+      .mockResolvedValueOnce({
+        package_id: "pkg-retry",
+        resources: [
+          {
+            resource_id: "r-document",
+            type: "document",
+            title: "已恢复资源",
+            content: "完整内容",
+          },
+        ],
+      } as never);
+    const event = resourceEvent("r-truncated", "exercise", "练习题", {
+      format_specific: {
+        questions: [{ id: "q-1", options: ["[TRUNCATED]"] }],
+      },
+      metadata: { package_id: "pkg-retry" },
+    });
+
+    dispatchStreamEvent(event, { userId: "authoritative-user" });
+    await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    dispatchStreamEvent(event, { userId: "authoritative-user" });
+
+    await vi.waitFor(() => expect(getResourcePackageDetail).toHaveBeenCalledTimes(2));
+    warnSpy.mockRestore();
   });
 
   it("does not route session A resource events into the active session B view", () => {

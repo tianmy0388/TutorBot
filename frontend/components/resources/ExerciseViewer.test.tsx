@@ -85,6 +85,34 @@ function selectCurrentPackage(resource: Resource) {
 }
 
 describe("ExerciseViewer code integration", () => {
+  it("renders duplicate and empty legacy options without duplicate-key warnings", () => {
+    const resource = exerciseResource();
+    resource.format_specific.questions = [
+      {
+        id: "q-options",
+        type: "single_choice",
+        question: "选择答案",
+        answer: "A",
+        options: [
+          { label: "", text: "第一个" },
+          { label: "", text: "第二个" },
+          { label: "A", text: "" },
+        ],
+        explanation: "",
+      },
+    ];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<ExerciseViewer resource={resource} />);
+
+    expect(screen.getByText("第一个")).toBeVisible();
+    expect(screen.getByText("第二个")).toBeVisible();
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("Encountered two children with the same key"),
+    );
+    errorSpy.mockRestore();
+  });
+
   it("keeps non-code scoring unchanged and excludes code from bulk local scoring", () => {
     const resource = exerciseResource();
     selectCurrentPackage(resource);

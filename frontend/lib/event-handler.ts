@@ -15,6 +15,11 @@ import { useTutorStore } from "./store";
 import { getJobIdFromEvent } from "./job-reducer";
 import type { ClientJob } from "./job-reducer";
 import { workflowMessage } from "./workflow-snapshot";
+import { getResourcePackageDetail } from "./api";
+import {
+  isUsableResourcePackage,
+  isUsableStreamedResource,
+} from "./resource-validation";
 import type {
   ConversationMessageInput,
   StreamEvent,
@@ -83,6 +88,7 @@ const inactiveStageHistory = new Map<string, InactiveStageHistory>();
 const inactiveTerminalPersistence = new Map<string, InactiveTerminalPersistence>();
 const MAX_INACTIVE_STAGE_HISTORIES = 256;
 const MAX_INACTIVE_TERMINAL_RECORDS = 256;
+const resourceRecoveryInFlight = new Map<string, Promise<void>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -210,7 +216,7 @@ export function dispatchStreamEvent(
     case "result": {
       try {
         const payload: unknown = JSON.parse(streamEv.content);
-        if (isRecord(payload)) routeResult(payload, streamEv);
+        if (isRecord(payload)) routeResult(payload, streamEv, context);
       } catch (e) {
         console.warn("[event-handler] failed to parse result", e);
       }
@@ -224,7 +230,7 @@ export function dispatchStreamEvent(
       // renders the card immediately rather than waiting for the
       // final ``RESULT`` event (which may never arrive if a later
       // stage fails or the 600s timeout fires).
-      handleIncrementalResource(streamEv);
+      handleIncrementalResource(streamEv, context);
       break;
     }
     case "error": {
@@ -249,7 +255,7 @@ export function dispatchStreamEvent(
       const md = streamEv.metadata as Record<string, unknown> | undefined;
       const contract = md?.contract as Record<string, unknown> | undefined;
       if (contract && typeof contract === "object") {
-        routeResult(contract, streamEv);
+        routeResult(contract, streamEv, context);
       }
 
       // **2026-07-08 fix (fdb26152):** when the contract status is
@@ -571,13 +577,20 @@ function parseStructuredError(value: unknown): StructuredError | null {
 function routeResult(
   payload: Record<string, unknown>,
   ev: StreamEvent,
+  context: StreamDispatchContext,
 ): void {
   const store = useTutorStore.getState();
 
   // Resource generation result
   if (payload.package && payload.summary) {
-    const pkg = payload.package as ResourcePackage;
-    store.setLatestPackage(pkg);
+    if (isUsableResourcePackage(payload.package)) {
+      store.setLatestPackage(payload.package);
+    } else {
+      scheduleResourcePackageRecovery(
+        packageIdFromValue(payload.package),
+        context,
+      );
+    }
     return;
   }
 
@@ -751,10 +764,17 @@ function buildPartialPackageFromContract(
   });
 }
 
-function handleIncrementalResource(ev: StreamEvent): void {
+function handleIncrementalResource(
+  ev: StreamEvent,
+  context: StreamDispatchContext,
+): void {
   const md = (ev.metadata ?? {}) as Record<string, unknown>;
   const raw = md.resource as Record<string, unknown> | undefined;
   if (!raw || typeof raw !== "object") return;
+  if (!isUsableStreamedResource(raw)) {
+    scheduleResourcePackageRecovery(packageIdFromValue(raw) ?? packageIdFromValue(md), context);
+    return;
+  }
   const resourceId =
     typeof raw.resource_id === "string"
       ? (raw.resource_id as string)
@@ -834,6 +854,41 @@ function handleIncrementalResource(ev: StreamEvent): void {
     });
   }
   // else: we already have a real resource with this id; nothing to do.
+}
+
+function packageIdFromValue(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const direct = typeof value.package_id === "string" ? value.package_id.trim() : "";
+  if (direct) return direct;
+  const metadata = isRecord(value.metadata) ? value.metadata : null;
+  const nested = typeof metadata?.package_id === "string" ? metadata.package_id.trim() : "";
+  return nested || null;
+}
+
+function scheduleResourcePackageRecovery(
+  packageId: string | null,
+  context: StreamDispatchContext,
+): void {
+  const userId = context.userId || useTutorStore.getState().userId;
+  if (!userId || !packageId) return;
+
+  const key = `${userId}:${packageId}`;
+  if (resourceRecoveryInFlight.has(key)) return;
+
+  const recovery = Promise.resolve()
+    .then(() => getResourcePackageDetail(userId, packageId))
+    .then((pkg) => {
+      if (isUsableResourcePackage(pkg)) {
+        useTutorStore.getState().setLatestPackage(pkg);
+      }
+    })
+    .catch((error) => {
+      console.warn("[event-handler] resource package recovery failed", error);
+    })
+    .finally(() => {
+      resourceRecoveryInFlight.delete(key);
+    });
+  resourceRecoveryInFlight.set(key, recovery);
 }
 
 /**

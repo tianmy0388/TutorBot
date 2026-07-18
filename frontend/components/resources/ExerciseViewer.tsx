@@ -39,6 +39,34 @@ interface ParsedQuestion {
   code_spec: PublicCodeSpec | null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cleanOptionText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function parseOptions(value: unknown): Array<{ label: string; text: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((option, index) => {
+    if (!isRecord(option)) return [];
+    const text = cleanOptionText(option.text);
+    const label = cleanOptionText(option.label);
+    if (
+      !text ||
+      text === "[TRUNCATED]" ||
+      label === "[TRUNCATED]"
+    ) {
+      return [];
+    }
+    return [{
+      label: label || String.fromCharCode(65 + index),
+      text,
+    }];
+  });
+}
+
 function parseQuestions(resource: Resource): ParsedQuestion[] {
   const qs = (resource.format_specific?.questions as any[]) || [];
   return qs.map((q, i) => ({
@@ -47,12 +75,7 @@ function parseQuestions(resource: Resource): ParsedQuestion[] {
     difficulty: Number(q.difficulty || 2),
     knowledge_point: String(q.knowledge_point || ""),
     question: String(q.question || ""),
-    options: Array.isArray(q.options)
-      ? q.options.map((o: any) => ({
-          label: String(o.label || ""),
-          text: String(o.text || ""),
-        }))
-      : [],
+    options: parseOptions(q.options),
     answer: q.answer,
     explanation: String(q.explanation || ""),
     code_spec:
@@ -404,12 +427,12 @@ function QuestionCard({
       <p className="text-sm text-fg mb-3 leading-relaxed">{q.question}</p>
       {q.type === "single_choice" && q.options.length > 0 && (
         <div className="space-y-2">
-          {q.options.map((opt) => {
+          {q.options.map((opt, index) => {
             const checked = answer === opt.label;
             const isAnswer = String(q.answer) === opt.label;
             return (
               <label
-                key={opt.label}
+                key={`${q.id}:${opt.label || "option"}:${index}`}
                 className={cn(
                   "flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors",
                   checked
@@ -442,7 +465,7 @@ function QuestionCard({
       )}
       {q.type === "multiple_choice" && q.options.length > 0 && (
         <div className="space-y-2">
-          {q.options.map((opt) => {
+          {q.options.map((opt, index) => {
             const current = Array.isArray(answer) ? answer : [];
             const checked = current.includes(opt.label);
             const isAnswer = Array.isArray(q.answer)
@@ -450,7 +473,7 @@ function QuestionCard({
               : String(q.answer) === opt.label;
             return (
               <label
-                key={opt.label}
+                key={`${q.id}:${opt.label || "option"}:${index}`}
                 className={cn(
                   "flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors",
                   checked
