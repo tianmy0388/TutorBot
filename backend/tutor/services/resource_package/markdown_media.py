@@ -31,7 +31,7 @@ def replace_unowned_markdown_images(markdown: str, artifact_names: set[str]) -> 
             continue
         end, alt, source = image
         original = markdown[start:end]
-        if _is_allowed_image_source(source, artifact_names):
+        if source is not None and _is_allowed_image_source(source, artifact_names):
             result.append(original)
         else:
             label = alt.strip() or "图片"
@@ -40,7 +40,7 @@ def replace_unowned_markdown_images(markdown: str, artifact_names: set[str]) -> 
     return "".join(result)
 
 
-def _parse_markdown_image(markdown: str, start: int) -> tuple[int, str, str] | None:
+def _parse_markdown_image(markdown: str, start: int) -> tuple[int, str, str | None] | None:
     """Parse the bounded inline-image forms accepted by CommonMark.
 
     This intentionally handles only inline images (not reference links): an
@@ -54,7 +54,9 @@ def _parse_markdown_image(markdown: str, start: int) -> tuple[int, str, str] | N
         return None
     end = _find_closing_parenthesis(markdown, alt_end + 2, limit)
     if end < 0:
-        return None
+        # Do not retain the beginning of an oversized candidate: it could be
+        # an unsafe absolute URI. The bounded prefix is replaced visibly.
+        return limit, markdown[start + 2 : alt_end], None
     body = markdown[alt_end + 2 : end].strip()
     if not body:
         return None
@@ -81,6 +83,7 @@ def _find_closing_parenthesis(text: str, start: int, limit: int) -> int:
     escaped = False
     quote = ""
     angle = False
+    nesting = 0
     for index in range(start, limit):
         char = text[index]
         if escaped:
@@ -102,8 +105,16 @@ def _find_closing_parenthesis(text: str, start: int, limit: int) -> int:
         if char == ">":
             angle = False
             continue
-        if char == ")" and not angle:
-            return index
+        if angle:
+            continue
+        if char == "(":
+            nesting += 1
+            continue
+        if char == ")":
+            if nesting:
+                nesting -= 1
+            else:
+                return index
     return -1
 
 
@@ -135,7 +146,7 @@ def _is_allowed_image_source(source: str, artifact_names: set[str]) -> bool:
         or _is_windows_absolute(unescaped)
     ):
         return False
-    basename = PurePosixPath(unquote(unescaped.replace("\\", "/"))).name
+    basename = PurePosixPath(unquote(parsed.path.replace("\\", "/"))).name
     return bool(basename and basename in artifact_names)
 
 
