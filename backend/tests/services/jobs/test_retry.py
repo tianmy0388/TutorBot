@@ -22,6 +22,7 @@ from tutor.services.jobs import (
     get_job_store,
     reset_job_runner,
     reset_job_store,
+    shutdown_job_runner,
 )
 from tutor.services.jobs.contracts import JobResultContract
 from tutor.services.jobs.schema import JobStatus as SchemaJobStatus
@@ -244,35 +245,42 @@ async def test_local_mode_retries_missing_artifact_from_succeeded_historical_job
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
-    async with _client(multi_user_enabled=False) as client:
-        store = get_job_store()
-        await store.init()
-        parent_id = await _seed_parent_job(
-            store,
-            user_id="historical-owner",
-            capability="resource_generation",
-            metadata={
-                "plan_id": "plan-success",
-                "selected_resource_types": ["code"],
-                "topic": "Recovery",
-            },
-            contract_status="succeeded",
-            artifacts=[{"resource_type": "code", "status": "succeeded"}],
-            row_status=SchemaJobStatus.SUCCEEDED,
-            session_id="recovery-session",
-        )
+    store = None
+    try:
+        async with _client(multi_user_enabled=False) as client:
+            store = get_job_store()
+            await store.init()
+            parent_id = await _seed_parent_job(
+                store,
+                user_id="historical-owner",
+                capability="resource_generation",
+                metadata={
+                    "plan_id": "plan-success",
+                    "selected_resource_types": ["code"],
+                    "topic": "Recovery",
+                },
+                contract_status="succeeded",
+                artifacts=[{"resource_type": "code", "status": "succeeded"}],
+                row_status=SchemaJobStatus.SUCCEEDED,
+                session_id="recovery-session",
+            )
 
-        response = await client.post(
-            f"/api/v1/jobs/stale-browser/{parent_id}/retry",
-            json={"resource_types": ["code"]},
-        )
+            response = await client.post(
+                f"/api/v1/jobs/stale-browser/{parent_id}/retry",
+                json={"resource_types": ["code"]},
+            )
 
-        assert response.status_code == 200, response.text
-        assert response.json()["preserved_artifacts"] == []
-        child = await store.get(response.json()["job_id"])
-        assert child is not None
-        assert child.user_id == "local-user"
-        assert child.session_id == "recovery-session"
+            assert response.status_code == 200, response.text
+            assert response.json()["preserved_artifacts"] == []
+            child = await store.get(response.json()["job_id"])
+            assert child is not None
+            assert child.user_id == "local-user"
+            assert child.session_id == "recovery-session"
+    finally:
+        await shutdown_job_runner()
+        if store is not None:
+            await store.close()
+        reset_job_store()
 
 
 @pytest.mark.asyncio

@@ -449,6 +449,10 @@ describe("job-reducer", () => {
       },
     });
     expect(next.jobsById["job-12"].status).toBe("failed");
-    expect(next.jobsById["job-12"].error).toBe("boom");
+    expect(next.jobsById["job-12"].error).toEqual({
+      code: "CAPABILITY_ERROR",
+      message: "boom",
+      retryable: true,
+    });
   });
 });

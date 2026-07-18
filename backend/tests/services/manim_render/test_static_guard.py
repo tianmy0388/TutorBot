@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from tutor.services.manim_render.static_guard import StaticGuard
 
@@ -78,6 +80,29 @@ def test_cleaned_code_trailing_newline():
     guard = StaticGuard()
     result = guard.check(VALID_CODE)
     assert result.cleaned_code.endswith("\n")
+
+
+def test_py_compile_uses_utf8_and_replaces_invalid_diagnostic_bytes(
+    monkeypatch,
+):
+    observed = {}
+
+    def completed_run(*args, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(
+            args[0],
+            1,
+            stdout="",
+            stderr="SyntaxError: 中文诊断�",
+        )
+
+    monkeypatch.setattr(subprocess, "run", completed_run)
+
+    errors = StaticGuard()._py_compile("def broken(:\n")
+
+    assert observed["encoding"] == "utf-8"
+    assert observed["errors"] == "replace"
+    assert errors == ["py_compile failed: SyntaxError: 中文诊断�"]
 
 
 def test_camera_frame_mypy_false_positive_filtered():

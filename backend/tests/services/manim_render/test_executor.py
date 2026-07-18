@@ -146,6 +146,40 @@ def test_timeout_preserves_complete_utf8_safe_streams(tmp_path, monkeypatch):
     assert result.stderr == "root cause stderr �"
 
 
+def test_render_decodes_chinese_and_invalid_bytes_with_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    observed = {}
+
+    class FailedProcess:
+        returncode = 1
+
+        def communicate(self, timeout=None):
+            return (
+                "渲染输出".encode() + b"\xff",
+                "错误".encode() + b"\xfe",
+            )
+
+    def popen(*args, **kwargs):
+        observed.update(kwargs)
+        return FailedProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    exe = ManimExecutor(
+        manim_executable="manim",
+        output_dir=tmp_path / "out",
+        temp_dir=tmp_path / "tmp",
+    )
+
+    result = exe.render(SIMPLE_VALID_CODE, "HelloScene", job_id="utf8-job")
+
+    assert observed["encoding"] == "utf-8"
+    assert observed["errors"] == "replace"
+    assert result.stdout == "渲染输出�"
+    assert result.stderr == "错误�"
+
+
 def test_cancelled_process_maps_to_cancelled_with_captured_streams(
     tmp_path,
     monkeypatch,

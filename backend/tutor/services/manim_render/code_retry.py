@@ -39,6 +39,7 @@ from typing import Any
 from loguru import logger
 
 from tutor.services.llm.base import LLMMessage, LLMProvider, LLMRequest
+from tutor.services.logging import redact_sensitive
 from tutor.services.manim_render.executor import (
     RenderFailure,
     safe_failure_summary,
@@ -278,7 +279,15 @@ class CodeRetry:
             llm = self._get_llm()
             resp = await llm.call(request)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"CodeRetry LLM call failed: {exc!r}")
+            logger.warning(
+                "MANIM_RETRY_LLM_FAILED details={details}",
+                details=redact_sensitive(
+                    {
+                        "error_code": "MANIM_RETRY_LLM_FAILED",
+                        "exception_type": type(exc).__name__,
+                    }
+                ),
+            )
             return []
 
         data = self._parse_json_safe(resp.content)
@@ -325,7 +334,15 @@ class CodeRetry:
                 # Replace only the FIRST occurrence to avoid over-matching
                 out = out.replace(search, replace, 1)
             else:
-                logger.debug(f"Patch search not found, skipping: {search[:80]}")
+                logger.debug(
+                    "MANIM_PATCH_SEARCH_MISSED details={details}",
+                    details=redact_sensitive(
+                        {
+                            "error_code": "MANIM_PATCH_SEARCH_MISSED",
+                            "source_code": search,
+                        }
+                    ),
+                )
         return out
 
     @staticmethod

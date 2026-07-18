@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from loguru import logger
 from tutor.services.mcp.config import MCPServerSpec
 from tutor.services.mcp.stdio_client import StdioMCPClient
 
@@ -122,3 +125,72 @@ async def test_shutdown_bounds_stalled_stdin_close_before_terminating_process() 
     assert client._proc is None
     assert client._read_task is None
     assert client._stderr_task is None
+
+
+@pytest.mark.asyncio
+async def test_minimax_stderr_log_replaces_invalid_utf8_and_redacts_credentials() -> None:
+    class _Stderr:
+        def __init__(self) -> None:
+            self._lines = [
+                b"MiniMax api_key=SECRET_MINIMAX_STDERR \xff\n",
+                b"",
+            ]
+
+        async def readline(self) -> bytes:
+            return self._lines.pop(0)
+
+    client = StdioMCPClient(MCPServerSpec(name="MiniMax", command="fake"))
+    client._proc = SimpleNamespace(stderr=_Stderr())  # type: ignore[assignment]
+    records = []
+    sink_id = logger.add(records.append, format="{message}", level="DEBUG")
+    try:
+        await client._stderr_loop()
+    finally:
+        logger.remove(sink_id)
+
+    captured = "\n".join(str(record) for record in records)
+    assert "MCP_SERVER_STDERR" in captured
+    assert "MiniMax" in captured
+    assert "SECRET_MINIMAX_STDERR" not in captured
+    assert "�" in captured
+
+
+@pytest.mark.asyncio
+async def test_startup_log_never_records_expanded_mcp_arguments(monkeypatch) -> None:
+    secret = "SECRET_EXPANDED_MINIMAX_ARGUMENT"
+    client = StdioMCPClient(
+        MCPServerSpec(
+            name="MiniMax",
+            command="fake-command",
+            args=["--api-key", secret],
+        )
+    )
+    client._resolve_command = lambda _command: "C:/tools/fake-command.exe"  # type: ignore[method-assign]
+    client._request = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            {"serverInfo": {}, "capabilities": {}},
+            {"tools": []},
+        ]
+    )
+    client._notify = AsyncMock()  # type: ignore[method-assign]
+    client._read_loop = AsyncMock()  # type: ignore[method-assign]
+    client._stderr_loop = AsyncMock()  # type: ignore[method-assign]
+
+    async def fake_subprocess(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    records = []
+    sink_id = logger.add(records.append, format="{message}", level="INFO")
+    try:
+        await client.start()
+        await asyncio.sleep(0)
+    finally:
+        logger.remove(sink_id)
+        client._proc = None
+
+    captured = "\n".join(str(record) for record in records)
+    assert "MCP_SERVER_STARTING" in captured
+    assert "fake-command.exe" in captured
+    assert "arg_count" in captured
+    assert secret not in captured

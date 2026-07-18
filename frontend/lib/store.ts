@@ -16,12 +16,15 @@ import type {
   AssessmentReport,
   ChatMessage,
   LearnerProfileDetail,
+  JobResultContract,
   MessageRole,
   PlannedPath,
   QuestionUnderstanding,
   ResourcePackage,
+  RetrievalScope,
   StreamEvent,
   StrategyDecision,
+  StructuredError,
   TutoringAnswer,
   EnrichmentSuggestion,
   VideoRetryResponse,
@@ -127,12 +130,7 @@ export interface TutorState {
   // (which we keep as the legacy fallback for pre-fix
   // capabilities).
   ragEnabled: boolean;
-  retrievalScope:
-    | { kind: "all" }
-    | { kind: "course"; id: string }
-    | { kind: "library"; id: string }
-    | { kind: "none" }
-      | null;
+  retrievalScope: RetrievalScope | null;
   webSearchEnabled: boolean;
   webSearchMutationPending: boolean;
   webSearchError: string | null;
@@ -173,14 +171,7 @@ export interface TutorState {
   setActiveKnowledgeBaseId: (id: string) => void;
   // 2026-06-21 plan (D10): RAG scope setters.
   setRagEnabled: (enabled: boolean) => void;
-  setRetrievalScope: (
-    scope:
-      | { kind: "all" }
-      | { kind: "course"; id: string }
-      | { kind: "library"; id: string }
-      | { kind: "none" }
-      | null,
-  ) => void;
+  setRetrievalScope: (scope: RetrievalScope | null) => void;
   setDraftWebSearchEnabled: (enabled: boolean) => void;
   restoreDraftWebSearch: (enabled: boolean) => void;
   setConversationMaterialized: (materialized: boolean) => void;
@@ -233,8 +224,8 @@ export interface TutorState {
     finished_at?: string | null;
     events?: import("./types").StreamEvent[];
     event_count?: number;
-    result?: unknown;
-    error?: string | null;
+    result?: JobResultContract | null;
+    error?: StructuredError | null;
     children?: import("./types").JobChildSummary[];
     background_status?: import("./types").JobStatus | null;
   }) => void;
@@ -943,7 +934,7 @@ export const useTutorStore = create<TutorState>()(
                   ? existing?.last_seq ?? 0
                   : Math.max(0, ...detail.events.map((event) => event.seq ?? 0)),
               events: detail.events ?? existing?.events ?? [],
-              result: (detail.result as any) ?? null,
+              result: detail.result ?? null,
               error: detail.error,
               event_count: detail.event_count,
               children: detail.children ?? [],

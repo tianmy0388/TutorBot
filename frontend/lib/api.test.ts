@@ -122,6 +122,45 @@ describe("ApiError surface", () => {
   });
 });
 
+describe("job error adapter", () => {
+  it("normalizes legacy and structured REST errors at the API boundary", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          items: [
+            { job_id: "legacy-job", error: "CAPABILITY_FAILED" },
+            {
+              job_id: "structured-job",
+              error: {
+                code: "INVALID_SCOPE",
+                message: "请选择检索范围",
+                details: { kind: null },
+              },
+            },
+          ],
+          total: 2,
+          limit: 50,
+          offset: 0,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { listJobs } = await import("./api");
+    const response = await listJobs("local-user");
+
+    expect(response.items[0].error).toEqual({
+      code: "JOB_FAILED",
+      message: "CAPABILITY_FAILED",
+    });
+    expect(response.items[1].error).toEqual({
+      code: "INVALID_SCOPE",
+      message: "请选择检索范围",
+      details: { kind: null },
+    });
+  });
+});
+
 describe("video render retry", () => {
   it("posts to the resource-scoped durable retry endpoint", async () => {
     const { retryVideoRender } = await import("./api");

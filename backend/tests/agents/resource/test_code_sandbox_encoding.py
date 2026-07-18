@@ -16,14 +16,12 @@ asserts the CodeSandboxAgent returns a resource (with a string
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from unittest.mock import MagicMock
 
 import pytest
-
-from tutor.agents.resource.code_sandbox import CodeSandboxAgent
+from tutor.agents.resource.code_sandbox import CodeSandboxAgent, _bounded_utf8
 from tutor.core.context import UnifiedContext
 from tutor.services.llm.base import LLMResponse
 
@@ -67,6 +65,10 @@ async def test_code_sandbox_handles_non_ascii_subprocess_output():
     assert isinstance(stdout, str), f"stdout should be str, got {type(stdout).__name__}: {stdout!r}"
     # And the Chinese text should have made it through.
     assert "反向传播" in stdout or "sigmoid" in stdout
+
+
+def test_submission_output_replaces_invalid_utf8_bytes_deterministically():
+    assert _bounded_utf8("中文输出".encode() + b"\xff") == "中文输出�"
 
 
 if __name__ == "__main__":

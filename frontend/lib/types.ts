@@ -25,6 +25,14 @@ export interface ChatMessage {
   metadata?: Record<string, unknown>;
 }
 
+export interface ConversationMessageInput {
+  role: "user" | "assistant" | "system";
+  content: string;
+  job_id?: string | null;
+  capability?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
 // ============================================================================
 // Stream events (from StreamBus on backend)
 // ============================================================================
@@ -40,6 +48,7 @@ export type StreamEventType =
   | "tool_result"
   | "progress"
   | "sources"
+  | "resource"
   | "result"
   | "error"
   | "cancelled"
@@ -254,6 +263,31 @@ export interface CourseListResponse {
   courses: string[];
 }
 
+export interface CourseResponse {
+  id: string;
+  name: string;
+  description: string;
+  knowledge_graph_id: string;
+  is_seeded: boolean;
+  library_count: number;
+  document_count: number;
+  ready_count: number;
+  total_chunks: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CourseListResponseV2 {
+  items: CourseResponse[];
+  total: number;
+}
+
+export type RetrievalScope =
+  | { kind: "course"; id: string }
+  | { kind: "library"; id: string }
+  | { kind: "all" }
+  | { kind: "none" };
+
 // ============================================================================
 // Resources
 // ============================================================================
@@ -290,6 +324,10 @@ export interface Resource {
   tags: string[];
   created_at: string;
   metadata: Record<string, unknown>;
+  citations?: Array<Record<string, unknown>>;
+  review?: Record<string, unknown>;
+  safety?: Record<string, unknown>;
+  unverified_claims?: string[];
 }
 
 export interface ResourcePackage {
@@ -375,9 +413,13 @@ export interface JobProgress {
   active_agents: string[];
 }
 
-export interface JobError {
+export interface StructuredError {
   code: string;
   message: string;
+  details?: unknown;
+}
+
+export interface JobError extends StructuredError {
   diagnostic?: string;
   retryable: boolean;
 }
@@ -433,7 +475,7 @@ export interface JobSummary {
   finished_at: string | null;
   duration_seconds: number | null;
   has_result: boolean;
-  error: string | null;
+  error: StructuredError | null;
   parent_job_id?: string | null;
   task_kind?: string | null;
   dedupe_key?: string | null;
@@ -526,7 +568,7 @@ export interface JobDetail extends JobSummary {
   message: string;
   language: string;
   metadata: Record<string, unknown>;
-  result: Record<string, unknown> | null;
+  result: JobResultContract | null;
   events: StreamEvent[];
 }
 

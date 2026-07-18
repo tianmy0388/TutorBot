@@ -252,6 +252,22 @@ describe("ChatMessages — terminal state", () => {
     expect(container.textContent ?? "").toMatch(/self-attention.*QKV.*注意力/);
   });
 
+  it("renders a structured live-job error without coercing it to an object string", () => {
+    const job = runningJob("job-structured-error", "");
+    job.error = {
+      code: "INVALID_SCOPE",
+      message: "请选择检索范围",
+      details: { kind: null },
+    };
+    mockStoreState({
+      jobs: { jobsById: { [job.job_id]: job }, jobOrder: [job.job_id] },
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText("[INVALID_SCOPE] 请选择检索范围")).toBeInTheDocument();
+  });
+
   it("shows recovery warnings as non-blocking dismissible notices", () => {
     const dismiss = vi.fn();
     mockStoreState({

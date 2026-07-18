@@ -177,6 +177,23 @@ describe("useJobQueue durable child refresh", () => {
     expect(useTutorStore.getState().messages).toHaveLength(0);
   });
 
+  it("serializes an explicit none retrieval scope without an invalid id suffix", async () => {
+    apiMocks.listJobs.mockResolvedValue({ items: [], total: 0 });
+    useTutorStore.setState({
+      retrievalScope: { kind: "none" },
+      ragEnabled: true,
+    });
+    const { result } = renderHook(() => useJobQueue("local-user"));
+    await act(flushPromises);
+
+    await act(async () => {
+      await result.current.submit("question without a corpus", "tutoring");
+    });
+
+    const envelope = wsMocks.startJobMessage.mock.calls[0][0];
+    expect(envelope.metadata.retrieval_scope).toBe("none");
+  });
+
   it.each([
     ["failed" as const, "渲染失败"],
     ["succeeded" as const, "渲染完成"],

@@ -25,6 +25,7 @@ from typing import Any
 
 from loguru import logger
 
+from tutor.services.logging import redact_sensitive
 from tutor.services.mcp.config import MCPServerSpec
 
 
@@ -140,7 +141,14 @@ class StdioMCPClient:
                 merged_env.pop(k, None)
 
         logger.info(
-            f"MCP[{self.name}]: starting {command_path} {self._spec.args!r}"
+            "MCP_SERVER_STARTING details={details}",
+            details=redact_sensitive(
+                {
+                    "provider": self.name,
+                    "command": os.path.basename(command_path),
+                    "arg_count": len(self._spec.args),
+                }
+            ),
         )
         try:
             self._proc = await asyncio.create_subprocess_exec(
@@ -380,14 +388,30 @@ class StdioMCPClient:
                     msg = json.loads(text)
                 except json.JSONDecodeError:
                     logger.warning(
-                        f"MCP[{self.name}]: ignoring malformed JSON line: {text[:200]!r}"
+                        "MCP_MALFORMED_JSON details={details}",
+                        details=redact_sensitive(
+                            {
+                                "error_code": "MCP_MALFORMED_JSON",
+                                "provider": self.name,
+                                "line_chars": len(text),
+                            }
+                        ),
                     )
                     continue
                 await self._dispatch(msg)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception(f"MCP[{self.name}]: read loop crashed: {exc!r}")
+            logger.error(
+                "MCP_READ_LOOP_FAILED details={details}",
+                details=redact_sensitive(
+                    {
+                        "error_code": "MCP_READ_LOOP_FAILED",
+                        "provider": self.name,
+                        "exception_type": type(exc).__name__,
+                    }
+                ),
+            )
             self._fail_all_pending(exc)
 
     async def _stderr_loop(self) -> None:
@@ -403,7 +427,15 @@ class StdioMCPClient:
                 except Exception:
                     continue
                 if line:
-                    logger.debug(f"MCP[{self.name}] stderr: {line}")
+                    logger.debug(
+                        "MCP_SERVER_STDERR details={details}",
+                        details=redact_sensitive(
+                            {
+                                "provider": self.name,
+                                "stderr": line,
+                            }
+                        ),
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -445,7 +477,14 @@ class StdioMCPClient:
                     )
                 except Exception as exc:
                     logger.warning(
-                        f"MCP[{self.name}]: failed to refresh tool list: {exc!r}"
+                        "MCP_TOOL_REFRESH_FAILED details={details}",
+                        details=redact_sensitive(
+                            {
+                                "error_code": "MCP_TOOL_REFRESH_FAILED",
+                                "provider": self.name,
+                                "exception_type": type(exc).__name__,
+                            }
+                        ),
                     )
             return
 

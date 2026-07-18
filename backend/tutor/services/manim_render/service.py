@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import shutil
 import threading
+import traceback
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -301,6 +302,23 @@ class ManimRenderService:
             return False, failure
 
         return _render_with_track, results
+
+    @staticmethod
+    def _write_current_exception_log_artifact(
+        job_id: str,
+        *,
+        attempt_label: str,
+        public_stderr: str,
+    ) -> str:
+        """Keep the active traceback only in the access-controlled operator log."""
+
+        return ManimRenderService._write_log_artifact(
+            job_id,
+            attempt_label=attempt_label,
+            stdout="",
+            stderr=public_stderr,
+            operator_stderr=traceback.format_exc(),
+        )
 
     @staticmethod
     def _write_log_artifact(

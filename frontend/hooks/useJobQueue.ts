@@ -156,11 +156,14 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
             if (!ragEnabled) {
               scopeWire = "none";
             } else if (
-              scopeObj && scopeObj.kind && scopeObj.kind !== "all"
+              scopeObj?.kind === "course" ||
+              scopeObj?.kind === "library"
             ) {
-              scopeWire = `${scopeObj.kind}:${scopeObj.id || ""}`;
-            } else if (scopeObj && scopeObj.kind === "all") {
+              scopeWire = `${scopeObj.kind}:${scopeObj.id}`;
+            } else if (scopeObj?.kind === "all") {
               scopeWire = "all";
+            } else if (scopeObj?.kind === "none") {
+              scopeWire = "none";
             } else {
               scopeWire = "all";
             }

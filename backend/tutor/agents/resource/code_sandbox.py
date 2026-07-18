@@ -892,8 +892,12 @@ def _submission_environment() -> dict[str, str]:
     return env
 
 
-def _bounded_utf8(value: str) -> str:
-    return value.encode("utf-8")[:_SUBMISSION_OUTPUT_LIMIT_BYTES].decode("utf-8", "ignore")
+def _bounded_utf8(value: str | bytes) -> str:
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+    return (
+        text.encode("utf-8", errors="replace")[:_SUBMISSION_OUTPUT_LIMIT_BYTES]
+        .decode("utf-8", errors="replace")
+    )
 
 
 def _submission_terminal(

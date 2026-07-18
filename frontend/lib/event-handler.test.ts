@@ -70,6 +70,7 @@ function resourceEvent(
   extras: Record<string, unknown> = {},
 ): StreamEvent {
   return {
+    ...RESOURCE_BASE,
     type: "resource",
     content: "",
     metadata: {
@@ -93,12 +94,12 @@ function resourceEvent(
       job_id: "job-bbf6ddbf",
     },
     seq: 1,
-    ...RESOURCE_BASE,
   };
 }
 
 function jobTerminalEvent(partialArtifacts: unknown[]): StreamEvent {
   return {
+    ...RESOURCE_BASE,
     type: "job_terminal",
     source: "job_runner",
     stage: "terminal",
@@ -122,7 +123,6 @@ function jobTerminalEvent(partialArtifacts: unknown[]): StreamEvent {
       },
     },
     seq: 100,
-    ...RESOURCE_BASE,
     event_id: "evt-terminal",
   };
 }
@@ -256,6 +256,7 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     // Placeholder content for both, since no incremental events.
     expect(finalPkg.resources[0].content).toContain("此资源在任务超时前未完整生成");
     expect(finalPkg.resources[1].content).toContain("此资源在任务超时前未完整生成");
+    expect(finalPkg).not.toHaveProperty("summary");
   });
 
   it("039b4a70 — duplicates the same resource_id in partial_artifacts do not appear twice in final package", () => {
@@ -370,5 +371,67 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
     expect(mockStoreState.addMessage).not.toHaveBeenCalled();
     expect(mockStoreState.completeActiveTurn).not.toHaveBeenCalled();
+  });
+
+  it("uses the injected persistence adapter without falling back to fetch", async () => {
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const fetchSpy = vi.fn(() => {
+      throw new Error("unexpected HTTP request");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    dispatchStreamEvent(jobTerminalEvent([]), {
+      sessionId: "s-test",
+      userId: "u-test",
+      appendConversationMessage: persist,
+    });
+
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+    expect(appendConversationMessage).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a structured error when nullable event content is absent", () => {
+    dispatchStreamEvent({
+      type: "error",
+      source: "retrieval",
+      stage: "retrieve",
+      content: undefined,
+      metadata: {
+        job_id: "job-invalid-scope",
+        error: {
+          code: "INVALID_SCOPE",
+          message: "请选择检索范围",
+          details: { kind: null },
+        },
+      },
+      session_id: "s-test",
+    });
+
+    expect(mockStoreState.addMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "错误 [INVALID_SCOPE]: 请选择检索范围",
+        metadata: expect.objectContaining({
+          error: {
+            code: "INVALID_SCOPE",
+            message: "请选择检索范围",
+            details: { kind: null },
+          },
+        }),
+      }),
+    );
+  });
+
+  it("fails closed at the parser boundary for an unknown public event type", () => {
+    const publicPayload: unknown = {
+      type: "future_event",
+      metadata: { job_id: "job-future" },
+      session_id: "s-test",
+    };
+
+    dispatchStreamEvent(publicPayload);
+
+    expect(mockStoreState.applyStreamEvent).not.toHaveBeenCalled();
+    expect(mockStoreState.addMessage).not.toHaveBeenCalled();
   });
 });

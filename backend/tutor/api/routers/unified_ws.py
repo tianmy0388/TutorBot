@@ -42,6 +42,7 @@ from loguru import logger
 
 from tutor.services.identity import IdentityPolicy, identity_policy_for
 from tutor.services.jobs import JobSubmit, get_job_runner, get_job_store
+from tutor.services.logging import redact_sensitive
 
 router = APIRouter()
 
@@ -90,9 +91,17 @@ async def unified_ws(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.debug("WebSocket disconnected")
     except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Unified WS error: {exc!r}")
+        logger.error(
+            "UNIFIED_WS_FAILED details={details}",
+            details=redact_sensitive(
+                {
+                    "error_code": "UNIFIED_WS_FAILED",
+                    "exception_type": type(exc).__name__,
+                }
+            ),
+        )
         with suppress(Exception):
-            await _send_error(websocket, f"Server error: {exc}")
+            await _send_error(websocket, "Server error")
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +130,16 @@ async def _handle_submit(
         await _send_error(websocket, str(exc))
         return
     except Exception as exc:  # noqa: BLE001
-        logger.exception(f"submit_job failed: {exc!r}")
-        await _send_error(websocket, f"submit failed: {exc}")
+        logger.error(
+            "JOB_SUBMIT_FAILED details={details}",
+            details=redact_sensitive(
+                {
+                    "error_code": "JOB_SUBMIT_FAILED",
+                    "exception_type": type(exc).__name__,
+                }
+            ),
+        )
+        await _send_error(websocket, "submit failed")
         return
 
     try:
@@ -192,7 +209,16 @@ async def _handle_subscribe(
             try:
                 await websocket.send_text(json.dumps(evt, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"subscribe_job: send failed job={job_id[:12]}… exc={exc!r}")
+                logger.warning(
+                    "JOB_SUBSCRIPTION_SEND_FAILED details={details}",
+                    details=redact_sensitive(
+                        {
+                            "error_code": "JOB_SUBSCRIPTION_SEND_FAILED",
+                            "job_id": job_id[:12],
+                            "exception_type": type(exc).__name__,
+                        }
+                    ),
+                )
                 return
     except KeyError as exc:
         await _send_error(websocket, str(exc))

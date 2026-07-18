@@ -27,7 +27,6 @@ the whole generation. The package will simply have one fewer resource.
 from __future__ import annotations
 
 import asyncio
-import traceback
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -1263,12 +1262,10 @@ class ResourceGenerationCapability(BaseCapability):
             from tutor.services.manim_render.service import ManimRenderService
 
             message = "Video rendering failed internally"
-            log_key = ManimRenderService._write_log_artifact(
+            log_key = ManimRenderService._write_current_exception_log_artifact(
                 context.job_id or res.resource_id,
                 attempt_label="internal-error",
-                stdout="",
-                stderr=message,
-                operator_stderr=traceback.format_exc(),
+                public_stderr=message,
             )
             if context.job_id:
                 res.format_specific["render_job_id"] = context.job_id

@@ -22,8 +22,10 @@ import type {
   JobResultContract,
   JobChildSummary,
   JobStatus,
+  StructuredError,
   StreamEvent,
 } from "./types";
+import { normalizeStructuredError } from "./errors";
 
 function toMillis(value: string | number | null | undefined): number | null {
   if (value == null) return null;
@@ -48,7 +50,7 @@ export interface ClientJob {
   events: StreamEvent[];
   result: JobResultContract | null;
   /** Server-supplied error message (e.g. "process restarted"). */
-  error: string | null;
+  error: StructuredError | null;
   event_count: number;
   /** event_ids we've already applied (for dedup). */
   seen_event_ids: Set<string>;
@@ -128,7 +130,7 @@ export interface SnapshotReducerEvent {
     last_seq?: number;
     events?: StreamEvent[];
     result?: JobResultContract | null;
-    error?: string | null;
+    error?: StructuredError | null;
     event_count?: number;
     children?: JobChildSummary[];
     background_status?: JobStatus | null;
@@ -331,8 +333,11 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
   if (stream.type === "thinking" && stream.content) {
     thinkingBuf = thinkingBuf + stream.content;
   }
-  if (stream.type === "error" && stream.content) {
-    jobError = stream.content;
+  if (stream.type === "error") {
+    jobError =
+      normalizeStructuredError(stream.metadata.error, "JOB_STREAM_ERROR") ??
+      normalizeStructuredError(stream.content, "JOB_STREAM_ERROR") ??
+      jobError;
   }
   if (stream.type === "stage_start" && stream.stage) {
     jobStage = stream.stage;
@@ -451,7 +456,7 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       last_seq: ev.result.event_cursor ?? 0,
       events: [],
       result: ev.result,
-      error: ev.result.error?.message ?? null,
+      error: ev.result.error ?? null,
       event_count: 0,
       seen_event_ids: new Set(ev.event_id ? [ev.event_id] : []),
       text_buffer: "",
@@ -502,7 +507,7 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
         : job.last_seq,
     events: trimmed,
     result: ev.result,
-    error: ev.result.error?.message ?? null,
+    error: ev.result.error ?? null,
     seen_event_ids: seen,
     // **2026-07-08 fix (585f367d):** clear the open-stages stack so
     // the right-pane chip stops showing a "stuck" active stage

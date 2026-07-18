@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger
 from tutor.services.llm.base import LLMResponse
 from tutor.services.manim_render.code_retry import CodeRetry
 
@@ -50,6 +51,25 @@ def test_apply_patches_skips_unmatched_search():
     out = cr._apply_patches(code, patches)
     # Unchanged because search not found
     assert out == "x = 1\n"
+
+
+def test_unmatched_patch_log_does_not_include_source_text():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    source = "api_key = 'SECRET_PATCH_SEARCH_VALUE'"
+    records = []
+    sink_id = logger.add(records.append, format="{message}", level="DEBUG")
+    try:
+        cr._apply_patches(
+            "x = 1\n",
+            [{"search": source, "replace": "x = 2"}],
+        )
+    finally:
+        logger.remove(sink_id)
+
+    captured = "\n".join(str(record) for record in records)
+    assert "MANIM_PATCH_SEARCH_MISSED" in captured
+    assert f"[REDACTED:{len(source)} chars]" in captured
+    assert "SECRET_PATCH_SEARCH_VALUE" not in captured
 
 
 def test_apply_multiple_patches():
@@ -230,7 +250,7 @@ async def test_retry_handles_llm_failure_as_terminal_unchanged_output():
     llm.default_max_tokens = 2048
 
     async def call(req):
-        raise RuntimeError("LLM down")
+        raise RuntimeError("api_key=SECRET_RETRY_PROVIDER_VALUE")
 
     llm.call = call
     cr = CodeRetry(llm=llm, max_attempts=3)
@@ -238,12 +258,21 @@ async def test_retry_handles_llm_failure_as_terminal_unchanged_output():
     async def render_fn(code: str) -> tuple[bool, str]:
         return False, "render fail"
 
-    result = await cr.fix_until_renderable(
-        original_code="x = 1", render_fn=render_fn
-    )
+    records = []
+    sink_id = logger.add(records.append, format="{message}")
+    try:
+        result = await cr.fix_until_renderable(
+            original_code="x = 1", render_fn=render_fn
+        )
+    finally:
+        logger.remove(sink_id)
     assert result.success is False
     assert result.attempts_used == 1
     assert result.error_code == "unchanged_retry"
+    captured = "\n".join(str(record) for record in records)
+    assert "MANIM_RETRY_LLM_FAILED" in captured
+    assert "RuntimeError" in captured
+    assert "SECRET_RETRY_PROVIDER_VALUE" not in captured
 
 
 @pytest.mark.asyncio

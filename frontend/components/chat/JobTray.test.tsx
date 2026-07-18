@@ -65,7 +65,10 @@ describe("JobTray durable terminal state", () => {
     const state = createJobState("job-queue", "tutoring");
     state.jobsById["job-queue"].status = "failed";
     state.jobsById["job-queue"].finished_at = Date.now();
-    state.jobsById["job-queue"].error = "CAPABILITY_FAILED";
+    state.jobsById["job-queue"].error = {
+      code: "CAPABILITY_FAILED",
+      message: "能力执行失败",
+    };
     useTutorStoreMock.mockImplementation((selector: (value: unknown) => unknown) =>
       selector({ userId: "local-user", jobsById: state.jobsById }),
     );
@@ -75,6 +78,7 @@ describe("JobTray durable terminal state", () => {
 
     expect(screen.queryByText("排队中")).not.toBeInTheDocument();
     expect(screen.getByText("失败")).toBeInTheDocument();
+    expect(screen.getByText("[CAPABILITY_FAILED] 能力执行失败")).toBeInTheDocument();
     expect(screen.queryByText("1 运行中")).not.toBeInTheDocument();
   });
 

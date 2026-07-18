@@ -43,6 +43,7 @@ import {
   renameConversation,
   type ConversationSummary,
 } from "@/lib/api";
+import type { CourseResponse } from "@/lib/types";
 
 interface SidebarProps {
   /** May be empty during the first SSR frame — we render a placeholder. */
@@ -97,15 +98,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
   const messageCount = useTutorStore((s) => s.messages.length);
   const { courses: kgCourses, currentCourse, plannedPath } = useKG();
 
-  const [appCourses, setAppCourses] = useState<
-    Array<{
-      id: string;
-      name: string;
-      library_count: number;
-      ready_count: number;
-      document_count: number;
-    }>
-  >([]);
+  const [appCourses, setAppCourses] = useState<CourseResponse[]>([]);
 
   useEffect(() => {
     if (!userId) return;

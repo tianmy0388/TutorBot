@@ -9,8 +9,10 @@ import type {
   AssessmentReport,
   CapabilitiesResponse,
   ConfigTestResult,
+  ConversationMessageInput,
   CourseGraph,
   CourseListResponse,
+  CourseListResponseV2,
   EmbeddingSectionPatch,
   ExerciseAttempt,
   ExerciseAttemptListResponse,
@@ -39,6 +41,7 @@ import type {
   WebSearchSectionPatch,
   VideoRetryResponse,
 } from "./types";
+import { normalizeStructuredError } from "./errors";
 
 const API_BASE =
   (typeof window !== "undefined" && (window as any).__TUTOR_API__) ||
@@ -172,24 +175,7 @@ export const listCourses = () => request<CourseListResponse>("/kg/courses");
 // 2026-06-21 plan: Courses API (Part D). Distinct from /kg/courses
 // which returns course names from the knowledge graph YAML — this
 // endpoint returns the persistent Course rows with aggregate counts.
-export interface CourseResponse {
-  id: string;
-  name: string;
-  description: string;
-  knowledge_graph_id: string;
-  is_seeded: boolean;
-  library_count: number;
-  document_count: number;
-  ready_count: number;
-  total_chunks: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CourseListResponseV2 {
-  items: CourseResponse[];
-  total: number;
-}
+export type { CourseResponse } from "./types";
 
 export const listAppCourses = () =>
   request<CourseListResponseV2>("/courses");
@@ -313,6 +299,16 @@ export const submitExerciseAttempt = (
 // Jobs (Phase 5.2)
 // ---------------------------------------------------------------------------
 
+type JobSummaryWire = Omit<JobSummary, "error"> & { error?: unknown };
+type JobDetailWire = Omit<JobDetail, "error"> & { error?: unknown };
+type JobListResponseWire = Omit<JobListResponse, "items"> & {
+  items: JobSummaryWire[];
+};
+
+function adaptJobSummary(job: JobSummaryWire): JobSummary {
+  return { ...job, error: normalizeStructuredError(job.error) };
+}
+
 export const listJobs = (
   userId: string,
   opts: { status?: string; limit?: number; offset?: number } = {},
@@ -322,18 +318,24 @@ export const listJobs = (
   if (opts.limit) params.set("limit", String(opts.limit));
   if (opts.offset) params.set("offset", String(opts.offset));
   const qs = params.toString();
-  return request<JobListResponse>(
+  return request<JobListResponseWire>(
     `/jobs/${encodeURIComponent(userId)}${qs ? `?${qs}` : ""}`,
-  );
+  ).then((response) => ({
+    ...response,
+    items: response.items.map(adaptJobSummary),
+  }));
 };
 
 export const getJobStats = (userId: string) =>
   request<JobStatsResponse>(`/jobs/${encodeURIComponent(userId)}/stats`);
 
 export const getJobDetail = (userId: string, jobId: string) =>
-  request<JobDetail>(
+  request<JobDetailWire>(
     `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}`,
-  );
+  ).then((detail) => ({
+    ...detail,
+    error: normalizeStructuredError(detail.error),
+  }));
 
 export const cancelJob = (userId: string, jobId: string) =>
   request<{ cancelled: boolean; job_id: string }>(
@@ -572,6 +574,10 @@ export interface ConversationAggregate {
   recovery_warnings: RecoveryWarning[];
 }
 
+type ConversationAggregateWire = Omit<ConversationAggregate, "jobs"> & {
+  jobs: JobSummaryWire[];
+};
+
 export interface RecoveryWarning {
   code:
     | "migrated_ownership"
@@ -589,9 +595,12 @@ export const getConversationAggregate = (
   userId: string,
   sessionId: string,
 ) =>
-  request<ConversationAggregate>(
+  request<ConversationAggregateWire>(
     `/conversations/${encodeURIComponent(sessionId)}/aggregate?user_id=${encodeURIComponent(userId)}`,
-  );
+  ).then((aggregate) => ({
+    ...aggregate,
+    jobs: aggregate.jobs.map(adaptJobSummary),
+  }));
 
 export const createConversation = (
   userId: string,
@@ -641,13 +650,7 @@ export const deleteConversation = (userId: string, sessionId: string) =>
 export const appendConversationMessage = (
   userId: string,
   sessionId: string,
-  msg: {
-    role: "user" | "assistant" | "system";
-    content: string;
-    job_id?: string | null;
-    capability?: string | null;
-    metadata?: Record<string, unknown>;
-  },
+  msg: ConversationMessageInput,
 ) =>
   request<ConversationMessage>(
     `/conversations/${encodeURIComponent(sessionId)}/messages?user_id=${encodeURIComponent(userId)}`,

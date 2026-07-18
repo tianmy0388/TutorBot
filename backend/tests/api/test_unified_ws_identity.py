@@ -6,6 +6,7 @@ import pytest
 import tutor.api.routers.unified_ws as ws_module
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from loguru import logger
 
 
 class _JobStore:
@@ -36,6 +37,13 @@ class _RejectingRunner(_Runner):
         raise ValueError(
             "INVALID_CAPABILITY: 'admin'; expected one of assessment, "
             "path_planning, profile, resource_generation, tutoring"
+        )
+
+
+class _SecretFailingRunner(_Runner):
+    async def submit(self, req):
+        raise RuntimeError(
+            "api_key=SECRET_TOKEN_LOG_BOUNDARY source_code=print('private')"
         )
 
 
@@ -142,3 +150,33 @@ def test_submit_invalid_explicit_capability_returns_structured_ws_error(
     assert response["type"] == "error"
     assert "INVALID_CAPABILITY" in response["content"]
     assert len(runner.submissions) == 1
+
+
+def test_submit_internal_failure_does_not_log_or_return_exception_content(
+    monkeypatch,
+) -> None:
+    runner = _SecretFailingRunner()
+    monkeypatch.setattr(ws_module, "get_job_runner", lambda: runner)
+    app = FastAPI()
+    app.state.settings = SimpleNamespace(multi_user_enabled=False)
+    app.include_router(ws_module.router, prefix="/api/v1")
+    records = []
+    sink_id = logger.add(records.append, format="{message}")
+    try:
+        with TestClient(app).websocket_connect("/api/v1/ws") as websocket:
+            websocket.send_json(
+                {
+                    "type": "submit_job",
+                    "message": "private submission",
+                }
+            )
+            response = websocket.receive_json()
+    finally:
+        logger.remove(sink_id)
+
+    captured = "\n".join(str(record) for record in records)
+    assert response == {"type": "error", "content": "submit failed"}
+    assert "JOB_SUBMIT_FAILED" in captured
+    assert "RuntimeError" in captured
+    assert "SECRET_TOKEN_LOG_BOUNDARY" not in captured
+    assert "print('private')" not in captured

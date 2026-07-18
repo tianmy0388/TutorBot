@@ -14,7 +14,11 @@
 import { useTutorStore } from "./store";
 import { getJobIdFromEvent } from "./job-reducer";
 import type { ClientJob } from "./job-reducer";
-import type { StreamEvent, WSServerMessage } from "./types";
+import type {
+  ConversationMessageInput,
+  StreamEvent,
+  StructuredError,
+} from "./types";
 import {
   type AssessmentReport,
   type PlannedPath,
@@ -28,6 +32,65 @@ import {
 export interface StreamDispatchContext {
   sessionId?: string;
   userId?: string;
+  appendConversationMessage?: ConversationMessageAppender;
+}
+
+export type ConversationMessageAppender = (
+  userId: string,
+  sessionId: string,
+  message: ConversationMessageInput,
+) => Promise<unknown>;
+
+const STREAM_EVENT_TYPES = new Set<StreamEvent["type"]>([
+  "stage_start",
+  "stage_end",
+  "thinking",
+  "observation",
+  "content",
+  "content_final",
+  "tool_call",
+  "tool_result",
+  "progress",
+  "sources",
+  "resource",
+  "result",
+  "error",
+  "cancelled",
+  "session",
+  "done",
+  "job_terminal",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStreamEventType(value: unknown): value is StreamEvent["type"] {
+  return (
+    typeof value === "string" &&
+    STREAM_EVENT_TYPES.has(value as StreamEvent["type"])
+  );
+}
+
+/** Narrow an untrusted WebSocket payload at one explicit public boundary. */
+export function parseStreamEvent(value: unknown): StreamEvent | null {
+  if (!isRecord(value) || !isStreamEventType(value.type)) return null;
+  const metadata = isRecord(value.metadata) ? value.metadata : {};
+  return {
+    type: value.type,
+    source: typeof value.source === "string" ? value.source : "",
+    stage: typeof value.stage === "string" ? value.stage : "",
+    content: typeof value.content === "string" ? value.content : "",
+    metadata,
+    session_id: typeof value.session_id === "string" ? value.session_id : "",
+    turn_id: typeof value.turn_id === "string" ? value.turn_id : "",
+    seq: typeof value.seq === "number" && Number.isFinite(value.seq) ? value.seq : 0,
+    timestamp:
+      typeof value.timestamp === "number" && Number.isFinite(value.timestamp)
+        ? value.timestamp
+        : Date.now() / 1000,
+    event_id: typeof value.event_id === "string" ? value.event_id : "",
+  };
 }
 
 /**
@@ -38,31 +101,19 @@ export interface StreamDispatchContext {
  * (for capability-specific payload dispatch).
  */
 export function dispatchStreamEvent(
-  ev: StreamEvent | WSServerMessage,
+  ev: unknown,
   context: StreamDispatchContext = {},
 ): void {
   // Protocol / ack messages (job_submitted, ack, pong) are handled by the
   // WsClient itself; we shouldn't see them here. Defensive no-op.
   if (
-    ev.type === "ack" ||
-    ev.type === "pong" ||
-    ev.type === "job_submitted"
+    isRecord(ev) &&
+    (ev.type === "ack" || ev.type === "pong" || ev.type === "job_submitted")
   ) {
     return;
   }
-  // Normalise to a strict StreamEvent for the reducer + router.
-  const streamEv: StreamEvent = {
-    type: ev.type as StreamEvent["type"],
-    source: ev.source ?? "",
-    stage: ev.stage ?? "",
-    content: ev.content ?? "",
-    metadata: ev.metadata ?? {},
-    session_id: ev.session_id ?? "",
-    turn_id: ev.turn_id ?? "",
-    seq: ev.seq ?? 0,
-    timestamp: ev.timestamp ?? Date.now() / 1000,
-    event_id: ev.event_id ?? "",
-  };
+  const streamEv = parseStreamEvent(ev);
+  if (!streamEv) return;
   const metadataSessionId =
     typeof streamEv.metadata?.session_id === "string"
       ? streamEv.metadata.session_id
@@ -91,6 +142,7 @@ export function dispatchStreamEvent(
         inactiveJobId,
         context.userId || stateAtDispatch.userId,
         authoritativeSessionId,
+        context.appendConversationMessage,
       );
     }
     return;
@@ -113,8 +165,8 @@ export function dispatchStreamEvent(
   switch (streamEv.type) {
     case "result": {
       try {
-        const payload = JSON.parse(streamEv.content);
-        routeResult(payload, streamEv);
+        const payload: unknown = JSON.parse(streamEv.content);
+        if (isRecord(payload)) routeResult(payload, streamEv);
       } catch (e) {
         console.warn("[event-handler] failed to parse result", e);
       }
@@ -132,11 +184,20 @@ export function dispatchStreamEvent(
       break;
     }
     case "error": {
+      const structuredError = parseStructuredError(streamEv.metadata.error);
+      const errorText = structuredError
+        ? `错误 [${structuredError.code}]: ${structuredError.message}`
+        : `错误: ${streamEv.content || "未知错误"}`;
       useTutorStore.getState().addMessage({
         role: "system",
-        content: `错误: ${streamEv.content}`,
+        content: errorText,
         stage: streamEv.stage,
-        metadata: { ...streamEv.metadata, source: streamEv.source, job_id: jobId },
+        metadata: {
+          ...streamEv.metadata,
+          ...(structuredError ? { error: structuredError } : {}),
+          source: streamEv.source,
+          job_id: jobId,
+        },
       });
       break;
     }
@@ -161,6 +222,7 @@ export function dispatchStreamEvent(
       const hasPackage =
         typeof contract?.package === "object" && contract.package !== null;
       if (
+        contract &&
         (contractStatus === "failed" || contractStatus === "partial") &&
         !hasPackage &&
         partial.length > 0
@@ -188,19 +250,19 @@ export function dispatchStreamEvent(
           typeof contract?.capability === "string"
             ? (contract.capability as string)
             : null;
-        void import("./api")
-          .then(({ appendConversationMessage }) =>
-            appendConversationMessage(persistenceUserId, persistenceSessionId, {
-              role: "assistant",
-              content: assistantText,
-              job_id: jobId,
-              capability: cap,
-              metadata: { job_id: jobId, capability: cap },
-            }),
-          )
-          .catch((e) => {
-            console.warn("appendConversationMessage(assistant) failed", e);
-          });
+        persistConversationMessage(
+          context.appendConversationMessage,
+          persistenceUserId,
+          persistenceSessionId,
+          {
+            role: "assistant",
+            content: assistantText,
+            job_id: jobId,
+            capability: cap,
+            metadata: { job_id: jobId, capability: cap },
+          },
+          "assistant",
+        );
 
         // **2026-07-09 fix:** persist a structured workflow timeline
         // derived from the in-memory ``ClientJob.events[]``. The user
@@ -239,36 +301,29 @@ export function dispatchStreamEvent(
           stage: "",
           open_stages: [],
         };
-        const partialResources = Array.isArray(
-          (contract?.partial_artifacts as unknown[] | undefined),
-        )
-          ? (contract.partial_artifacts as Array<Record<string, unknown>>)
-          : [];
+        const partialResources = partial.filter(isRecord);
         const timeline = buildWorkflowTimeline(
           syntheticJob,
           partialResources,
         );
         if (timeline) {
-          void import("./api")
-            .then(({ appendConversationMessage }) =>
-              appendConversationMessage(persistenceUserId, persistenceSessionId, {
-                role: "assistant",
-                content: timeline,
+          persistConversationMessage(
+            context.appendConversationMessage,
+            persistenceUserId,
+            persistenceSessionId,
+            {
+              role: "assistant",
+              content: timeline,
+              job_id: jobId,
+              capability: cap,
+              metadata: {
                 job_id: jobId,
                 capability: cap,
-                metadata: {
-                  job_id: jobId,
-                  capability: cap,
-                  kind: "workflow_timeline",
-                },
-              }),
-            )
-            .catch((e) => {
-              console.warn(
-                "appendConversationMessage(workflow_timeline) failed",
-                e,
-              );
-            });
+                kind: "workflow_timeline",
+              },
+            },
+            "workflow_timeline",
+          );
         }
       }
       // Always clear the legacy single-activeTurn indicator. The new
@@ -300,6 +355,7 @@ function persistTerminalAssistant(
   jobId: string,
   userId: string | null | undefined,
   sessionId: string,
+  appendConversationMessage?: ConversationMessageAppender,
 ): void {
   if (!contract || !userId || !sessionId) return;
   const content =
@@ -311,19 +367,50 @@ function persistTerminalAssistant(
   if (!content) return;
   const capability =
     typeof contract.capability === "string" ? contract.capability : null;
-  void import("./api")
-    .then(({ appendConversationMessage }) =>
-      appendConversationMessage(userId, sessionId, {
-        role: "assistant",
-        content,
-        job_id: jobId,
-        capability,
-        metadata: { job_id: jobId, capability },
-      }),
-    )
-    .catch((error) => {
-      console.warn("appendConversationMessage(assistant) failed", error);
-    });
+  persistConversationMessage(
+    appendConversationMessage,
+    userId,
+    sessionId,
+    {
+      role: "assistant",
+      content,
+      job_id: jobId,
+      capability,
+      metadata: { job_id: jobId, capability },
+    },
+    "assistant",
+  );
+}
+
+function persistConversationMessage(
+  adapter: ConversationMessageAppender | undefined,
+  userId: string,
+  sessionId: string,
+  message: ConversationMessageInput,
+  label: string,
+): void {
+  const pending = adapter
+    ? Promise.resolve().then(() => adapter(userId, sessionId, message))
+    : import("./api").then(({ appendConversationMessage }) =>
+        appendConversationMessage(userId, sessionId, message),
+      );
+  void pending.catch((error: unknown) => {
+    console.warn(`appendConversationMessage(${label}) failed`, error);
+  });
+}
+
+function parseStructuredError(value: unknown): StructuredError | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.code !== "string" || typeof value.message !== "string") {
+    return null;
+  }
+  return {
+    code: value.code,
+    message: value.message,
+    ...(Object.prototype.hasOwnProperty.call(value, "details")
+      ? { details: value.details }
+      : {}),
+  };
 }
 
 function routeResult(
@@ -491,7 +578,6 @@ function buildPartialPackageFromContract(
     package_id: placeholderPackageId,
     topic: typeof ev.metadata?.job_id === "string" ? "" : "",
     resources: resources as never,
-    summary: `部分生成：${resources.length} 项资源（任务未完成）`,
     created_at: new Date().toISOString(),
     target_profile_snapshot: {},
     learning_path_summary: {},
@@ -505,6 +591,7 @@ function buildPartialPackageFromContract(
       // covered by incremental RESOURCE events.
       preserved_count: preservedCount,
       placeholder_count: resources.length - preservedCount,
+      display_summary: `部分生成：${resources.length} 项资源（任务未完成）`,
     },
   });
 }
@@ -575,8 +662,6 @@ function handleIncrementalResource(ev: StreamEvent): void {
           ? (raw.topic as string)
           : existing?.topic ?? "",
       resources: filtered as never,
-      summary:
-        existing?.summary ?? `已生成 ${filtered.length} 项资源`,
       created_at: existing?.created_at ?? new Date().toISOString(),
       target_profile_snapshot:
         existing?.target_profile_snapshot ?? {},
@@ -586,6 +671,10 @@ function handleIncrementalResource(ev: StreamEvent): void {
       metadata: {
         ...(existing?.metadata ?? {}),
         incremental: true,
+        display_summary:
+          typeof existing?.metadata?.display_summary === "string"
+            ? existing.metadata.display_summary
+            : `已生成 ${filtered.length} 项资源`,
       },
     });
   }

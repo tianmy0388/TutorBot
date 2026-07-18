@@ -38,6 +38,7 @@ import { useJobQueue } from "@/hooks/useJobQueue";
 import { useTutorStore } from "@/lib/store";
 import type { JobStatus, JobSummary } from "@/lib/types";
 import { isJobTerminal, isTerminal } from "@/lib/job-reducer";
+import { formatStructuredError } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 
 const STATUS_META: Record<
@@ -332,7 +333,7 @@ function JobRow({
           </div>
           {job.error && (
             <div className="text-[10px] text-red-300 mt-1 line-clamp-2">
-              {job.error}
+              {formatStructuredError(job.error)}
             </div>
           )}
         </div>

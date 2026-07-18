@@ -25,6 +25,8 @@ import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { StageIndicator, StageRow } from "./StageIndicator";
 import { isJobTerminal } from "@/lib/job-reducer";
+import { formatStructuredError } from "@/lib/errors";
+import type { StructuredError } from "@/lib/types";
 import {
   Bot,
   User,
@@ -293,7 +295,7 @@ function ActiveTurnView(props: {
   stage: string;
   showTrace: boolean;
   events: Array<{ type: string; stage: string; source: string; content: string }>;
-  error: string | null;
+  error: StructuredError | null;
 }) {
   // Thinking is shown by default while the model is working. Once the final
   // text starts streaming in (``textBuffer`` non-empty) we auto-collapse it
@@ -394,7 +396,7 @@ function ActiveTurnView(props: {
         {props.error && (
           <div className="mt-3 text-sm text-red-300 flex items-start gap-2 p-3 bg-red-950/30 border border-red-800/40 rounded-lg">
             <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-            <span>{props.error}</span>
+            <span>{formatStructuredError(props.error)}</span>
           </div>
         )}
 
