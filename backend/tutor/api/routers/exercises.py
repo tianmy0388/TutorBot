@@ -1,4 +1,4 @@
-"""Owner-scoped Python exercise attempt endpoints."""
+"""Owner-scoped exercise drafts, submissions, and Python attempts."""
 
 from __future__ import annotations
 
@@ -23,6 +23,16 @@ from tutor.services.exercise_attempts.store import (
     AttemptOwnershipError,
     ExerciseAttemptStore,
 )
+from tutor.services.exercise_responses.publisher import publish_submission_event
+from tutor.services.exercise_responses.schema import (
+    ExerciseDraft,
+    ExerciseQuestionType,
+    ExerciseSubmission,
+)
+from tutor.services.exercise_responses.store import (
+    ExerciseResponseConflictError,
+    ExerciseResponseStore,
+)
 from tutor.services.identity import IdentityRequired, identity_policy_for
 from tutor.services.resource_package.schema import CodeSpec, ResourceType
 
@@ -39,8 +49,33 @@ class ExerciseAttemptRequest(BaseModel):
     client_attempt_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class ExerciseDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str | None = Field(default=None, max_length=128)
+    answer_json: Any
+
+
+class ExerciseSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str | None = Field(default=None, max_length=128)
+    session_id: str = Field(default="", max_length=64)
+    answer_json: Any = None
+    client_submission_id: str | None = Field(
+        default=None, min_length=1, max_length=64
+    )
+    linked_code_attempt_id: str | None = Field(
+        default=None, min_length=1, max_length=64
+    )
+
+
 def _attempt_store(request: Request) -> ExerciseAttemptStore:
     return request.app.state.exercise_attempt_store
+
+
+def _response_store(request: Request) -> ExerciseResponseStore:
+    return request.app.state.exercise_response_store
 
 
 def _canonical_user(request: Request, requested: str | None) -> str:
@@ -60,13 +95,14 @@ def _not_found() -> HTTPException:
     )
 
 
-async def _owned_code_question(
+async def _owned_question(
     request: Request,
     *,
     user_id: str,
     package_id: str,
+    resource_id: str | None,
     question_id: str,
-) -> tuple[CodeSpec, str, str]:
+) -> tuple[dict[str, Any], str, str]:
     package = await request.app.state.resource_package_store.get_for_user(
         package_id, user_id
     )
@@ -76,17 +112,36 @@ async def _owned_code_question(
     for resource in package.resources:
         if resource.type != ResourceType.EXERCISE:
             continue
+        if resource_id is not None and resource.resource_id != resource_id:
+            continue
         questions = (resource.format_specific or {}).get("questions")
         if not isinstance(questions, list):
             continue
         matches.extend(
-            item
+            {"question": item, "resource_id": resource.resource_id}
             for item in questions
             if isinstance(item, dict) and str(item.get("id", "")) == question_id
         )
     if len(matches) != 1:
         raise _not_found()
-    question = matches[0]
+    match = matches[0]
+    return match["question"], str(match["resource_id"]), package.topic
+
+
+async def _owned_code_question(
+    request: Request,
+    *,
+    user_id: str,
+    package_id: str,
+    question_id: str,
+) -> tuple[CodeSpec, str, str]:
+    question, _, course = await _owned_question(
+        request,
+        user_id=user_id,
+        package_id=package_id,
+        resource_id=None,
+        question_id=question_id,
+    )
     if question.get("type") != "code":
         raise HTTPException(
             status_code=422,
@@ -106,7 +161,61 @@ async def _owned_code_question(
             },
         ) from exc
     concept_id = str(question.get("knowledge_point") or question_id)
-    return code_spec, concept_id, package.topic
+    return code_spec, concept_id, course
+
+
+def _malformed_answer() -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail={
+            "code": "MALFORMED_ANSWER",
+            "message": "The submitted answer does not match the question type",
+        },
+    )
+
+
+def _normalized_text(value: Any) -> str:
+    if not isinstance(value, str):
+        raise _malformed_answer()
+    return " ".join(value.split()).casefold()
+
+
+def _normalized_boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = _normalized_text(value)
+    if normalized in {"true", "t", "yes", "y", "1", "对", "正确", "是"}:
+        return True
+    if normalized in {"false", "f", "no", "n", "0", "错", "错误", "否"}:
+        return False
+    raise _malformed_answer()
+
+
+def _score_answer(question_type: ExerciseQuestionType, submitted: Any, canonical: Any) -> tuple[bool, float]:
+    if question_type == ExerciseQuestionType.SINGLE_CHOICE:
+        correct = _normalized_text(submitted) == _normalized_text(canonical)
+    elif question_type == ExerciseQuestionType.MULTIPLE_CHOICE:
+        if not isinstance(submitted, list) or not isinstance(canonical, list):
+            raise _malformed_answer()
+        submitted_set = {_normalized_text(item) for item in submitted}
+        canonical_set = {_normalized_text(item) for item in canonical}
+        if not submitted_set or not canonical_set:
+            raise _malformed_answer()
+        correct = submitted_set == canonical_set
+    elif question_type == ExerciseQuestionType.TRUE_FALSE:
+        correct = _normalized_boolean(submitted) == _normalized_boolean(canonical)
+    elif question_type in {
+        ExerciseQuestionType.FILL_BLANK,
+        ExerciseQuestionType.SHORT_ANSWER,
+    }:
+        submitted_text = _normalized_text(submitted)
+        accepted = canonical if isinstance(canonical, list) else [canonical]
+        if not accepted:
+            raise _malformed_answer()
+        correct = submitted_text in {_normalized_text(item) for item in accepted}
+    else:
+        raise _malformed_answer()
+    return correct, 1.0 if correct else 0.0
 
 
 def _validate_source(source: str) -> None:
@@ -138,6 +247,192 @@ async def _publish_best_effort(attempt: ExerciseAttempt, request: Request) -> No
             "EXERCISE_EVENT_PUBLICATION_DEFERRED exception_type={}",
             type(exc).__name__,
         )
+
+
+async def _publish_submission_best_effort(
+    submission: ExerciseSubmission, request: Request
+) -> None:
+    if submission.event_published:
+        return
+    try:
+        await publish_submission_event(
+            submission,
+            response_store=_response_store(request),
+            attempt_store=_attempt_store(request),
+            workflow=request.app.state.learning_workflow,
+            runner=getattr(request.app.state, "learning_runner", None),
+        )
+    except Exception as exc:  # terminal submission is already durable
+        logger.warning(
+            "EXERCISE_SUBMISSION_EVENT_PUBLICATION_DEFERRED exception_type={}",
+            type(exc).__name__,
+        )
+
+
+@router.get(
+    "/exercises/{package_id}/resources/{resource_id}/responses"
+)
+async def get_exercise_response_state(
+    package_id: str,
+    resource_id: str,
+    request: Request,
+    question_id: str = Query(min_length=1, max_length=64),
+    user_id: str | None = Query(default=None, max_length=128),
+) -> dict[str, Any]:
+    canonical_user = _canonical_user(request, user_id)
+    await _owned_question(
+        request,
+        user_id=canonical_user,
+        package_id=package_id,
+        resource_id=resource_id,
+        question_id=question_id,
+    )
+    state = await _response_store(request).get_state(
+        canonical_user, package_id, resource_id, question_id
+    )
+    return state.model_dump(mode="json")
+
+
+@router.put(
+    "/exercises/{package_id}/resources/{resource_id}/questions/{question_id}/draft"
+)
+async def put_exercise_draft(
+    package_id: str,
+    resource_id: str,
+    question_id: str,
+    body: ExerciseDraftRequest,
+    request: Request,
+) -> dict[str, Any]:
+    user_id = _canonical_user(request, body.user_id)
+    question, owned_resource_id, _ = await _owned_question(
+        request,
+        user_id=user_id,
+        package_id=package_id,
+        resource_id=resource_id,
+        question_id=question_id,
+    )
+    try:
+        question_type = ExerciseQuestionType(str(question.get("type", "")))
+    except ValueError as exc:
+        raise _not_found() from exc
+    draft = ExerciseDraft(
+        user_id=user_id,
+        package_id=package_id,
+        resource_id=owned_resource_id,
+        question_id=question_id,
+        question_type=question_type,
+        answer_json=body.answer_json,
+    )
+    durable = await _response_store(request).upsert_draft(draft)
+    return durable.model_dump(mode="json")
+
+
+@router.post(
+    "/exercises/{package_id}/resources/{resource_id}/questions/{question_id}/submit"
+)
+async def submit_exercise_response(
+    package_id: str,
+    resource_id: str,
+    question_id: str,
+    body: ExerciseSubmitRequest,
+    request: Request,
+) -> dict[str, Any]:
+    user_id = _canonical_user(request, body.user_id)
+    question, owned_resource_id, course = await _owned_question(
+        request,
+        user_id=user_id,
+        package_id=package_id,
+        resource_id=resource_id,
+        question_id=question_id,
+    )
+    try:
+        question_type = ExerciseQuestionType(str(question.get("type", "")))
+    except ValueError as exc:
+        raise _not_found() from exc
+
+    linked_attempt_id: str | None = None
+    answer_json = body.answer_json
+    session_id = body.session_id
+    if question_type == ExerciseQuestionType.CODE:
+        if not body.linked_code_attempt_id:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "CODE_ATTEMPT_REQUIRED",
+                    "message": "Submit code through the execution endpoint first",
+                },
+            )
+        attempt = await _attempt_store(request).get_for_user(
+            body.linked_code_attempt_id, user_id
+        )
+        if (
+            attempt is None
+            or attempt.package_id != package_id
+            or attempt.question_id != question_id
+        ):
+            raise _not_found()
+        linked_attempt_id = attempt.attempt_id
+        answer_json = None
+        session_id = body.session_id or attempt.session_id
+        correct = attempt.status == AttemptStatus.PASSED
+        score = (
+            attempt.passed_tests / attempt.total_tests
+            if attempt.total_tests
+            else 0.0
+        )
+    else:
+        if body.linked_code_attempt_id is not None:
+            raise _malformed_answer()
+        canonical = question.get("answer")
+        if canonical is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "ANSWER_UNAVAILABLE",
+                    "message": "This exercise cannot be scored",
+                },
+            )
+        correct, score = _score_answer(question_type, body.answer_json, canonical)
+
+    submission = ExerciseSubmission(
+        client_submission_id=body.client_submission_id,
+        user_id=user_id,
+        session_id=session_id,
+        package_id=package_id,
+        resource_id=owned_resource_id,
+        question_id=question_id,
+        question_type=question_type,
+        answer_json=answer_json,
+        correct=correct,
+        score=score,
+        concept_id=str(question.get("knowledge_point") or question_id),
+        course=course,
+        linked_code_attempt_id=linked_attempt_id,
+    )
+    try:
+        durable = await _response_store(request).save_submission(submission)
+    except ExerciseResponseConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": exc.code,
+                "message": "The client submission id is already used",
+            },
+        ) from exc
+    except Exception as exc:
+        logger.error(
+            "EXERCISE_RESPONSE_STORE_UNAVAILABLE exception_type={}",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "RESPONSE_STORE_UNAVAILABLE",
+                "message": "Exercise response service is unavailable",
+            },
+        ) from exc
+    await _publish_submission_best_effort(durable, request)
+    return durable.model_dump(mode="json")
 
 
 async def _wait_for_claimed_attempt(
@@ -322,4 +617,9 @@ async def list_exercise_attempts(
     }
 
 
-__all__ = ["ExerciseAttemptRequest", "router"]
+__all__ = [
+    "ExerciseAttemptRequest",
+    "ExerciseDraftRequest",
+    "ExerciseSubmitRequest",
+    "router",
+]

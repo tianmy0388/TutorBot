@@ -19,6 +19,7 @@ from tutor.services.exercise_attempts.schema import (
 from tutor.services.exercise_attempts.schema import (
     TestCaseResult as CaseResult,
 )
+from tutor.services.exercise_responses.schema import ExerciseSubmission
 from tutor.services.learning_events.schema import EventType
 from tutor.services.resource_package.schema import ResourcePackage, ResourceType, build_resource
 
@@ -58,7 +59,7 @@ def _package(
             ],
             "time_limit_seconds": 3,
         }
-    return ResourcePackage(
+    package = ResourcePackage(
         package_id="pkg-code",
         topic="python",
         resources=[
@@ -70,6 +71,70 @@ def _package(
             )
         ],
         metadata={"user_id": owner, "session_id": "sess-code"},
+    )
+    package.resources[0].resource_id = "resource-code"
+    return package
+
+
+def _general_package(*, owner: str = "local-user") -> ResourcePackage:
+    questions = [
+        {
+            "id": "q-single",
+            "type": "single_choice",
+            "knowledge_point": "selection",
+            "question": "Choose B",
+            "options": [
+                {"label": "A", "text": "A"},
+                {"label": "B", "text": "B"},
+            ],
+            "answer": "B",
+        },
+        {
+            "id": "q-multiple",
+            "type": "multiple_choice",
+            "knowledge_point": "collections",
+            "question": "Choose A and C",
+            "options": [
+                {"label": "A", "text": "A"},
+                {"label": "B", "text": "B"},
+                {"label": "C", "text": "C"},
+            ],
+            "answer": ["A", "C"],
+        },
+        {
+            "id": "q-boolean",
+            "type": "true_false",
+            "knowledge_point": "booleans",
+            "question": "True is truthy",
+            "answer": True,
+        },
+        {
+            "id": "q-fill",
+            "type": "fill_blank",
+            "knowledge_point": "strings",
+            "question": "Greeting",
+            "answer": "Hello World",
+        },
+        {
+            "id": "q-short",
+            "type": "short_answer",
+            "knowledge_point": "algorithms",
+            "question": "Expand DP",
+            "answer": ["dynamic programming", "dynamic-programming"],
+        },
+    ]
+    resource = build_resource(
+        type=ResourceType.EXERCISE,
+        title="General exercises",
+        format_specific={"questions": questions, "total_questions": len(questions)},
+        metadata={"package_id": "pkg-general"},
+    )
+    resource.resource_id = "resource-general"
+    return ResourcePackage(
+        package_id="pkg-general",
+        topic="computer-science",
+        resources=[resource],
+        metadata={"user_id": owner, "session_id": "sess-general"},
     )
 
 
@@ -94,13 +159,18 @@ async def _ready_app(
     await workflow.job_store.init()
     await app.state.resource_package_store.init()
     await app.state.exercise_attempt_store.init()
+    await app.state.exercise_response_store.init()
     await app.state.resource_package_store.save(
         _package(legacy=legacy, invalid_spec=invalid_spec), user_id="local-user"
+    )
+    await app.state.resource_package_store.save(
+        _general_package(), user_id="local-user"
     )
     return app
 
 
 async def _close_app(app) -> None:
+    await app.state.exercise_response_store.close()
     await app.state.exercise_attempt_store.close()
     await app.state.resource_package_store.close()
     workflow = app.state.learning_workflow
@@ -615,3 +685,273 @@ async def test_non_code_and_duplicate_question_ids_have_typed_safe_errors(tmp_pa
         assert duplicate_response.json()["detail"]["code"] == "EXERCISE_NOT_FOUND"
     finally:
         await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_general_draft_restores_without_event_and_submit_scores_server_side(
+    tmp_path,
+) -> None:
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            draft = await client.put(
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-single/draft",
+                json={"user_id": "ignored", "answer_json": " B "},
+            )
+            assert draft.status_code == 200
+            assert draft.json()["answer_json"] == " B "
+            assert "correct" not in draft.text
+            assert "canonical" not in draft.text
+            assert await app.state.learning_workflow.event_store.query(
+                "local-user", event_types=[EventType.EXERCISE_SCORED]
+            ) == []
+
+            restored = await client.get(
+                "/api/v1/exercises/pkg-general/resources/resource-general/responses",
+                params={"user_id": "ignored", "question_id": "q-single"},
+            )
+            assert restored.status_code == 200
+            assert restored.json()["draft"]["answer_json"] == " B "
+            assert restored.json()["submissions"] == []
+
+            submitted = await client.post(
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-single/submit",
+                json={
+                    "user_id": "ignored",
+                    "session_id": "sess-general",
+                    "answer_json": " b ",
+                    "client_submission_id": "submit-single",
+                },
+            )
+            assert submitted.status_code == 200
+            body = submitted.json()
+            assert body["correct"] is True
+            assert body["score"] == 1.0
+            assert body["user_id"] == "local-user"
+            assert "canonical" not in submitted.text
+            assert '"answer":"B"' not in submitted.text
+
+            final_state = await client.get(
+                "/api/v1/exercises/pkg-general/resources/resource-general/responses",
+                params={"question_id": "q-single"},
+            )
+            assert final_state.status_code == 200
+            assert final_state.json()["draft"] is None
+            assert final_state.json()["submissions"][0]["submission_id"] == body["submission_id"]
+
+        events = await app.state.learning_workflow.event_store.query(
+            "local-user", event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert len(events) == 1
+        assert events[0].event_id == f"exercise-submission:{body['submission_id']}"
+        assert events[0].score == 1.0
+        assert events[0].concept_id == "selection"
+        assert events[0].target_id == "q-single"
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question_id", "answer_json"),
+    [
+        ("q-single", " b "),
+        ("q-multiple", [" c ", "A", "a"]),
+        ("q-boolean", " YES "),
+        ("q-fill", "  hello   world "),
+        ("q-short", " Dynamic   Programming "),
+    ],
+)
+async def test_general_answer_types_are_normalized(
+    tmp_path, question_id, answer_json
+) -> None:
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/exercises/pkg-general/resources/resource-general/questions/{question_id}/submit",
+                json={
+                    "session_id": "sess-general",
+                    "answer_json": answer_json,
+                    "client_submission_id": f"normalize-{question_id}",
+                },
+            )
+        assert response.status_code == 200
+        assert response.json()["correct"] is True
+        assert response.json()["score"] == 1.0
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_general_wrong_retry_conflict_and_strict_request(tmp_path) -> None:
+    app = await _ready_app(tmp_path)
+    payload = {
+        "session_id": "sess-general",
+        "answer_json": "A",
+        "client_submission_id": "retry-general",
+    }
+    url = "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-single/submit"
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            first = await client.post(url, json=payload)
+            retry = await client.post(url, json=payload)
+            conflict = await client.post(url, json={**payload, "answer_json": "B"})
+            controlled = await client.post(
+                url,
+                json={
+                    **payload,
+                    "client_submission_id": "controlled",
+                    "score": 1,
+                    "correct": True,
+                    "canonical_answer": "A",
+                },
+            )
+        assert first.status_code == retry.status_code == 200
+        assert first.json()["submission_id"] == retry.json()["submission_id"]
+        assert first.json()["correct"] is False
+        assert first.json()["score"] == 0.0
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"]["code"] == "SUBMISSION_ID_CONFLICT"
+        assert controlled.status_code == 422
+        events = await app.state.learning_workflow.event_store.query(
+            "local-user", event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert len(events) == 1
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question_id", "answer_json"),
+    [
+        ("q-single", ["B"]),
+        ("q-multiple", "A,C"),
+        ("q-boolean", "maybe"),
+        ("q-fill", ["hello"]),
+        ("q-short", {"text": "dynamic programming"}),
+    ],
+)
+async def test_general_malformed_answers_have_typed_errors(
+    tmp_path, question_id, answer_json
+) -> None:
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/exercises/pkg-general/resources/resource-general/questions/{question_id}/submit",
+                json={"session_id": "sess", "answer_json": answer_json},
+            )
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "MALFORMED_ANSWER"
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_general_owner_isolation_and_resource_matching(tmp_path) -> None:
+    app = await _ready_app(tmp_path, multi_user=True)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            for path in (
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-single/draft",
+                "/api/v1/exercises/pkg-general/resources/missing/questions/q-single/draft",
+                "/api/v1/exercises/missing/resources/resource-general/questions/q-single/draft",
+            ):
+                response = await client.put(
+                    path,
+                    json={"user_id": "other-user", "answer_json": "B"},
+                )
+                assert response.status_code == 404
+                assert response.json()["detail"]["code"] == "EXERCISE_NOT_FOUND"
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_general_code_submission_links_existing_attempt_without_second_event(
+    tmp_path,
+) -> None:
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            attempt = await client.post(
+                "/api/v1/exercises/pkg-code/q-code/attempts",
+                json={
+                    "session_id": "sess-code",
+                    "source_code": "def add(a, b): return a + b",
+                    "client_attempt_id": "code-link-attempt",
+                },
+            )
+            assert attempt.status_code == 201
+            linked = await client.post(
+                "/api/v1/exercises/pkg-code/resources/resource-code/questions/q-code/submit",
+                json={
+                    "session_id": "sess-code",
+                    "client_submission_id": "code-link-submission",
+                    "linked_code_attempt_id": attempt.json()["attempt_id"],
+                },
+            )
+        assert linked.status_code == 200
+        assert linked.json()["linked_code_attempt_id"] == attempt.json()["attempt_id"]
+        assert linked.json()["correct"] is True
+        events = await app.state.learning_workflow.event_store.query(
+            "local-user", event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert len(events) == 1
+        assert events[0].event_id.startswith("exercise-attempt:")
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_startup_repairs_general_submission_and_closes_response_store(
+    tmp_path,
+) -> None:
+    app = create_app(Settings(env="test", data_dir=tmp_path))
+    await app.state.exercise_response_store.init()
+    saved = await app.state.exercise_response_store.save_submission(
+        ExerciseSubmission(
+            submission_id="general-crash-gap",
+            user_id="local-user",
+            session_id="sess-crash",
+            package_id="pkg-general",
+            resource_id="resource-general",
+            question_id="q-single",
+            question_type="single_choice",
+            answer_json="B",
+            correct=True,
+            score=1.0,
+            concept_id="selection",
+            course="computer-science",
+        )
+    )
+    assert saved.event_published is False
+    await app.state.exercise_response_store.close()
+
+    async with app.router.lifespan_context(app):
+        persisted = await app.state.exercise_response_store.get_submission_for_user(
+            "general-crash-gap", "local-user"
+        )
+        assert persisted is not None and persisted.event_published is True
+        events = await app.state.learning_workflow.event_store.query(
+            "local-user", event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert [event.event_id for event in events] == [
+            "exercise-submission:general-crash-gap"
+        ]
+
+    assert app.state.exercise_response_store._engine is None

@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
     workflow = app.state.learning_workflow
     resource_store = app.state.resource_package_store
     attempt_store = app.state.exercise_attempt_store
+    response_store = app.state.exercise_response_store
     kg_service = app.state.knowledge_graph_service
     from tutor.capabilities.assessment import AssessmentCapability
     from tutor.capabilities.path_planning import PathPlanningCapability
@@ -134,12 +135,22 @@ async def lifespan(app: FastAPI):
         await workflow.job_store.init()
         await resource_store.init()
         await attempt_store.init()
+        await response_store.init()
         await attempt_store.reap_orphaned_claims()
         from tutor.services.exercise_attempts.publisher import (
             repair_unpublished_attempt_events,
         )
 
         await repair_unpublished_attempt_events(
+            attempt_store=attempt_store,
+            workflow=workflow,
+        )
+        from tutor.services.exercise_responses.publisher import (
+            repair_unpublished_submission_events,
+        )
+
+        await repair_unpublished_submission_events(
+            response_store=response_store,
             attempt_store=attempt_store,
             workflow=workflow,
         )
@@ -174,6 +185,7 @@ async def lifespan(app: FastAPI):
             ("JOB_STORE_CLOSE_FAILED", workflow.job_store.close),
             ("RESOURCE_STORE_CLOSE_FAILED", resource_store.close),
             ("EXERCISE_ATTEMPT_STORE_CLOSE_FAILED", attempt_store.close),
+            ("EXERCISE_RESPONSE_STORE_CLOSE_FAILED", response_store.close),
         ):
             try:
                 await close()
@@ -198,6 +210,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # transports and identity dependencies).
     app.state.settings = settings
     from tutor.services.exercise_attempts.store import ExerciseAttemptStore
+    from tutor.services.exercise_responses.store import ExerciseResponseStore
     from tutor.services.jobs.store import JobStore
     from tutor.services.knowledge_graph.loader import KnowledgeGraphLoader
     from tutor.services.knowledge_graph.service import KnowledgeGraphService
@@ -219,6 +232,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.exercise_attempt_store = ExerciseAttemptStore(
         settings.data_dir / "exercise_attempts.db"
+    )
+    app.state.exercise_response_store = ExerciseResponseStore(
+        settings.data_dir / "exercise_responses.db"
     )
     app.state.knowledge_graph_service = KnowledgeGraphService(
         loader=KnowledgeGraphLoader(settings.kb_dir),
