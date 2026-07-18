@@ -121,4 +121,46 @@ describe("useExerciseResponses", () => {
     expect(signal.aborted).toBe(true);
     vi.useRealTimers();
   });
+
+  it("partitions submitting state when the resource changes with the same question id", async () => {
+    let resolveOld!: (value: unknown) => void;
+    let resolveNew!: (value: unknown) => void;
+    api.submitExerciseResponse
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveNew = resolve; }));
+    const view = renderHook(
+      ({ value }) => useExerciseResponses(value, ["q1"]),
+      { initialProps: { value: identity } },
+    );
+    act(() => { view.result.current.setDraft("q1", "old"); });
+    act(() => { void view.result.current.submit("q1"); });
+    expect(view.result.current.submitting.q1).toBe(true);
+
+    const next = { ...identity, resourceId: "resource-2" };
+    view.rerender({ value: next });
+    await waitFor(() => expect(view.result.current.submitting.q1).not.toBe(true));
+    act(() => { view.result.current.setDraft("q1", "new"); });
+    act(() => { void view.result.current.submit("q1"); });
+    expect(view.result.current.submitting.q1).toBe(true);
+    expect(api.submitExerciseResponse).toHaveBeenCalledTimes(2);
+
+    resolveOld({ submission_id: "old", question_id: "q1", answer_json: "old", grading_status: "auto_graded", correct: false, score: 0 });
+    await act(async () => { await Promise.resolve(); });
+    expect(view.result.current.submitting.q1).toBe(true);
+    resolveNew({ submission_id: "new", question_id: "q1", answer_json: "new", grading_status: "auto_graded", correct: true, score: 1 });
+  });
+
+  it("ignores a shared load that resolves after unmount", async () => {
+    let resolveLoad!: (value: typeof emptyState) => void;
+    api.getExerciseResponseState.mockReturnValue(
+      new Promise<typeof emptyState>((resolve) => { resolveLoad = resolve; }),
+    );
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = renderHook(() => useExerciseResponses(identity, ["q1"]));
+    view.unmount();
+    resolveLoad(emptyState);
+    await act(async () => { await Promise.resolve(); });
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
 });

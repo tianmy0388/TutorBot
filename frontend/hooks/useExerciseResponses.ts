@@ -179,19 +179,21 @@ export function useExerciseResponses(
   }, [flush, identity, identityKey]);
 
   useEffect(() => {
+    let active = true;
     const requestKey = identityKey;
     activeKeyRef.current = requestKey;
     replaceEntries({});
+    setSubmitting({});
     const loadVersions = new Map(versionsRef.current);
     if (!identity.packageId || !identity.userId || !identity.resourceId || !questionIds.length) {
-      return undefined;
+      return () => { active = false; };
     }
     const loads = questionIds.map((questionId) => ({ questionId, ...acquireLoad(identity, questionId) }));
     void Promise.all(loads.map(async ({ questionId, promise }) => ({
       questionId,
       state: await promise,
     }))).then((loaded) => {
-      if (activeKeyRef.current !== requestKey) return;
+      if (!active || activeKeyRef.current !== requestKey) return;
       const next = { ...entriesRef.current };
       for (const { questionId, state } of loaded) {
         if ((versionsRef.current.get(questionId) ?? 0) !== (loadVersions.get(questionId) ?? 0)) continue;
@@ -209,6 +211,7 @@ export function useExerciseResponses(
       if (!abortError(reason)) return;
     });
     return () => {
+      active = false;
       loads.forEach((load) => load.release());
       for (const [questionId, pending] of pendingRef.current) {
         if (keyOf(pending.identity) !== requestKey) continue;
