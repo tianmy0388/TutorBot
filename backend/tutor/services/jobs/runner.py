@@ -60,6 +60,10 @@ from tutor.services.jobs.contracts import (
 )
 from tutor.services.jobs.schema import Job, JobStatus, JobSubmit
 from tutor.services.jobs.store import JobStore, get_job_store
+from tutor.services.resource_package.public_projection import (
+    project_public_event,
+    project_public_payload,
+)
 from tutor.services.resource_package.schema import ArtifactRef
 
 
@@ -606,8 +610,6 @@ class JobRunner:
     @staticmethod
     def _normalize_capability_event(evt: Any, event_type: str) -> dict[str, Any]:
         """Project capability output onto the stable public event vocabulary."""
-        from tutor.core.redaction import redact_sensitive
-
         event = evt.to_dict()
         allowed = {"progress", "stage_start", "stage_end", "resource", "sources"}
         if event_type not in allowed:
@@ -622,6 +624,8 @@ class JobRunner:
             event["metadata"] = metadata
         # Defense in depth applies equally to already-allowed resource/source
         # events and to normalized legacy events. Never log the original.
+        if event_type == "resource":
+            return project_public_event(event)
         return redact_sensitive(event)
 
     async def _finish_job(
@@ -884,7 +888,9 @@ class JobRunner:
         compatibility_events: list[dict[str, Any]] = []
         if contract.status in {JobTerminalStatus.SUCCEEDED, JobTerminalStatus.PARTIAL}:
             result_payload = (
-                redact_sensitive(capability_result.payload) if capability_result else {}
+                project_public_payload(capability_result.payload)
+                if capability_result
+                else {}
             )
             result_event = self._runner_event(
                 job,
