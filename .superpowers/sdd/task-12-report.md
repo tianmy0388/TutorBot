@@ -2,7 +2,8 @@
 
 - status: `DONE_WITH_CONCERNS`
 - base commit: `d9319e1`
-- implementation commit: pending at report draft time; populated after the implementation commit
+- implementation commit: `47d38dd3a1ebb7e838e9ff5564feaa9ce215ff4a`
+- report-finalization commit: the follow-up commit containing this self-referential update
 
 ## Root-cause and data-flow findings
 
