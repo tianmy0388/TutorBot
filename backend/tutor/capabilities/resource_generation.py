@@ -1109,7 +1109,9 @@ class ResourceGenerationCapability(BaseCapability):
                 res.format_specific["render_error"] = "no manim_code in resource"
             else:
                 render_result = await manim_service.render(
-                    code=code, scene_class=scene
+                    code=code,
+                    scene_class=scene,
+                    job_id=context.job_id or None,
                 )
                 # Update the resource payload in-place.
                 res.format_specific["render_status"] = (
@@ -1141,8 +1143,39 @@ class ResourceGenerationCapability(BaseCapability):
                         render_result.duration_seconds
                     )
                 if not render_result.success:
-                    res.format_specific["render_error_code"] = "VIDEO_RENDER_FAILED"
-                    res.format_specific["render_error"] = "Video rendering failed"
+                    failure = render_result.failure
+                    if failure is not None:
+                        res.format_specific["render_failure"] = failure.to_dict()
+                        res.format_specific["render_error_code"] = failure.error_code
+                        res.format_specific["render_error"] = failure.summary
+                        if failure.log_artifact_key:
+                            log_name = failure.log_artifact_key.rsplit("/", 1)[-1]
+                            artifacts = [
+                                item
+                                for item in (res.format_specific.get("artifacts") or [])
+                                if not (
+                                    isinstance(item, dict)
+                                    and item.get("kind") == "render_log"
+                                )
+                            ]
+                            artifacts.append(
+                                {
+                                    "name": log_name,
+                                    "kind": "render_log",
+                                    "artifact_key": failure.log_artifact_key,
+                                }
+                            )
+                            res.format_specific["artifacts"] = artifacts
+                    else:
+                        res.format_specific["render_error_code"] = "internal_error"
+                        res.format_specific["render_error"] = "Video rendering failed"
+                else:
+                    for key in (
+                        "render_failure",
+                        "render_error_code",
+                        "render_error",
+                    ):
+                        res.format_specific.pop(key, None)
                 await stream.observation(
                     (
                         f"视频渲染{'成功' if render_result.success else '失败'}: "
@@ -1158,8 +1191,14 @@ class ResourceGenerationCapability(BaseCapability):
                 )
         except Exception:  # noqa: BLE001
             res.format_specific["render_status"] = "failed"
-            res.format_specific["render_error_code"] = "VIDEO_RENDER_FAILED"
+            res.format_specific["render_error_code"] = "internal_error"
             res.format_specific["render_error"] = "Video rendering failed"
+            res.format_specific["render_failure"] = {
+                "error_code": "internal_error",
+                "summary": "Video rendering failed internally",
+                "traceback_tail": [],
+                "log_artifact_key": "",
+            }
             await report_degraded(
                 stream,
                 code="VIDEO_RENDER_FAILED",

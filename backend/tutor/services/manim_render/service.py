@@ -19,12 +19,13 @@ The service is async-friendly and provides:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import shutil
 import threading
-from dataclasses import dataclass, field
-from functools import lru_cache
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -34,7 +35,11 @@ from tutor.services.manim_render.code_retry import CodeRetry, RetryResult
 from tutor.services.manim_render.executor import (
     ManimExecutor,
     ManimRenderResult,
+    RenderFailure,
     RenderStatus,
+    failure_for_render_result,
+    safe_failure_summary,
+    tail_lines,
 )
 from tutor.services.manim_render.static_guard import StaticGuard, StaticGuardResult
 
@@ -45,14 +50,15 @@ class RenderedVideo:
 
     success: bool
     code: str
-    video_path: Optional[Path] = None
+    video_path: Path | None = None
     duration_seconds: float = 0.0
     attempts: int = 0
     error: str = ""
-    static_guard: Optional[StaticGuardResult] = None
-    retry_result: Optional[RetryResult] = None
-    final_render: Optional[ManimRenderResult] = None
+    static_guard: StaticGuardResult | None = None
+    retry_result: RetryResult | None = None
+    final_render: ManimRenderResult | None = None
     public_url: str = ""
+    failure: RenderFailure | None = None
 
     def to_dict(self) -> dict[str, Any]:
         artifact_key = None
@@ -76,6 +82,7 @@ class RenderedVideo:
             "render_status": (
                 self.final_render.status.value if self.final_render else None
             ),
+            "failure": self.failure.to_dict() if self.failure else None,
         }
 
 
@@ -85,10 +92,10 @@ class ManimRenderService:
     def __init__(
         self,
         *,
-        static_guard: Optional[StaticGuard] = None,
-        executor: Optional[ManimExecutor] = None,
-        code_retry: Optional[CodeRetry] = None,
-        public_dir: Optional[Path] = None,
+        static_guard: StaticGuard | None = None,
+        executor: ManimExecutor | None = None,
+        code_retry: CodeRetry | None = None,
+        public_dir: Path | None = None,
     ) -> None:
         settings = get_settings()
         self.static_guard = static_guard or StaticGuard()
@@ -125,33 +132,87 @@ class ManimRenderService:
     def is_available(self) -> bool:
         return self.executor.is_available()
 
-    def validate(self, code: str) -> StaticGuardResult:
+    def validate(
+        self,
+        code: str,
+        *,
+        workdir: Path | None = None,
+    ) -> StaticGuardResult:
         """Run pre-render checks (synchronous, no rendering)."""
-        return self.static_guard.check(code)
+        return self.static_guard.check(code, workdir=workdir)
 
     async def render(
         self,
         *,
         code: str,
         scene_class: str = "MainScene",
-        job_id: Optional[str] = None,
+        job_id: str | None = None,
     ) -> RenderedVideo:
         """Full pipeline: validate → render → (retry on failure) → publish."""
         # Stage 1: StaticGuard
-        sg = self.static_guard.check(code)
+        invocation_id = job_id or uuid.uuid4().hex
+        configured_workdir = getattr(self.executor, "temp_dir", None)
+        render_workdir = Path(
+            configured_workdir
+            if isinstance(configured_workdir, (str, Path))
+            else get_settings().manim_temp_dir
+        )
+        render_workdir.mkdir(parents=True, exist_ok=True)
+        sg = self.static_guard.check(code, workdir=render_workdir)
         if not sg.passed:
+            log_key = self._write_log_artifact(
+                invocation_id,
+                attempt_label="preflight",
+                stdout="",
+                stderr="\n".join(sg.errors),
+            )
+            failure = RenderFailure(
+                error_code=sg.error_code or "preflight_failed",
+                summary=safe_failure_summary(
+                    sg.summary,
+                    fallback="Manim source failed preflight checks",
+                ),
+                traceback_tail=tail_lines("\n".join(sg.errors)),
+                log_artifact_key=log_key,
+            )
             return RenderedVideo(
                 success=False,
                 code=code,
                 attempts=0,
-                error=f"static_guard_failed: {'; '.join(sg.errors[:3])}",
+                error=f"static_guard_failed: {failure.summary}",
                 static_guard=sg,
+                failure=failure,
+            )
+
+        if not self.executor.is_available():
+            log_key = self._write_log_artifact(
+                invocation_id,
+                attempt_label="runtime-preflight",
+                stdout="",
+                stderr="Manim runtime is unavailable",
+            )
+            failure = RenderFailure(
+                error_code="manim_not_found",
+                summary="Manim runtime is unavailable",
+                traceback_tail=("Manim runtime is unavailable",),
+                log_artifact_key=log_key,
+            )
+            return RenderedVideo(
+                success=False,
+                code=sg.cleaned_code or code,
+                attempts=0,
+                error=failure.summary,
+                static_guard=sg,
+                failure=failure,
             )
 
         cleaned = sg.cleaned_code or code
 
         # Stage 2 + 3: render with retry
-        render_fn, render_history = self._make_render_fn(scene_class, job_id)
+        render_fn, render_history = self._make_render_fn(
+            scene_class,
+            invocation_id,
+        )
         retry_result = await self.code_retry.fix_until_renderable(
             original_code=cleaned,
             render_fn=render_fn,
@@ -183,13 +244,14 @@ class ManimRenderService:
             retry_result=retry_result,
             final_render=final_render,
             public_url=public_url,
+            failure=retry_result.failure,
         )
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _make_render_fn(self, scene_class: str, job_id: Optional[str]):
+    def _make_render_fn(self, scene_class: str, job_id: str):
         """Build the closure passed to CodeRetry — runs executor and tracks results.
 
         Returns ``(render_fn, results_holder)`` where ``render_fn`` is the
@@ -197,19 +259,72 @@ class ManimRenderService:
         that the closure appends the latest :class:`ManimRenderResult` to.
         """
         results: list[ManimRenderResult] = []
+        attempt = 0
 
-        async def _render_with_track(snippet: str) -> tuple[bool, str]:
+        async def _render_with_track(
+            snippet: str,
+        ) -> tuple[bool, RenderFailure | str]:
+            nonlocal attempt
+            attempt += 1
             loop = asyncio.get_event_loop()
             res = await loop.run_in_executor(
                 None,
-                lambda: self.executor.render(snippet, scene_class, job_id=job_id),
+                lambda: self.executor.render(
+                    snippet,
+                    scene_class,
+                    # Manim repeats the source stem under videos/... and
+                    # partial_movie_files. Keep this executor-local id short
+                    # enough for Windows' legacy MAX_PATH boundary while the
+                    # full durable child id remains in the canonical log key.
+                    job_id=(
+                        f"{hashlib.sha256(job_id.encode('utf-8')).hexdigest()[:10]}"
+                        f"a{attempt}"
+                    ),
+                ),
             )
             results.append(res)
             ok = res.status == RenderStatus.SUCCESS and res.video_path is not None
-            err = res.error_message or (res.stderr[-500:] if res.stderr else "render failed")
-            return ok, err
+            if ok:
+                return True, ""
+            log_key = self._write_log_artifact(
+                job_id,
+                attempt_label=f"attempt-{attempt:02d}",
+                stdout=res.stdout,
+                stderr=res.stderr,
+            )
+            failure = failure_for_render_result(
+                res,
+                log_artifact_key=log_key,
+            )
+            res.failure = failure
+            return False, failure
 
         return _render_with_track, results
+
+    @staticmethod
+    def _write_log_artifact(
+        job_id: str,
+        *,
+        attempt_label: str,
+        stdout: str,
+        stderr: str,
+    ) -> str:
+        """Persist complete captured streams under the canonical data root."""
+        data_dir = Path(get_settings().data_dir)
+        safe_job_id = "".join(
+            character for character in job_id if character.isalnum() or character in "-_"
+        )[:96] or uuid.uuid4().hex
+        log_path = data_dir / "manim_logs" / safe_job_id / f"{attempt_label}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "[stdout]\n"
+            + (stdout or "")
+            + "\n[stderr]\n"
+            + (stderr or ""),
+            encoding="utf-8",
+            errors="replace",
+        )
+        return to_artifact_key(log_path, data_dir)
 
     def _publish(
         self,
@@ -232,7 +347,7 @@ class ManimRenderService:
 # ---------------------------------------------------------------------------
 
 
-_service: Optional[ManimRenderService] = None
+_service: ManimRenderService | None = None
 _service_lock = threading.Lock()
 
 

@@ -471,6 +471,23 @@ export const retryJob = (userId: string, jobId: string, resourceTypes: string[])
     },
   );
 
+export const retryVideoRender = (
+  userId: string,
+  packageId: string,
+  resourceId: string,
+) =>
+  request<{
+    job_id: string;
+    parent_job_id: string;
+    package_id: string;
+    resource_id: string;
+    status: string;
+  }>(
+    `/resources/packages/${encodeURIComponent(userId)}/${encodeURIComponent(packageId)}`
+      + `/resources/${encodeURIComponent(resourceId)}/retry-video`,
+    { method: "POST" },
+  );
+
 // ---------------------------------------------------------------------------
 // Re-exports
 // ---------------------------------------------------------------------------

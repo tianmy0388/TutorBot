@@ -22,10 +22,12 @@ import {
   Download,
   Copy,
   Check,
+  RefreshCw,
 } from "lucide-react";
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import type { Resource } from "@/lib/types";
+import { retryVideoRender } from "@/lib/api";
 import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -33,13 +35,15 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   const child = useTutorStore((state) =>
     Object.values(state.jobsById)
       .flatMap((job) => job.children ?? [])
-      .find(
+      .filter(
         (candidate) =>
           candidate.task_kind === "video_render" &&
           (candidate.metadata?.resource_id === resource.resource_id ||
             candidate.dedupe_key?.endsWith(`:${resource.resource_id}`)),
-      ),
+      )
+      .at(-1),
   );
+  const userId = useTutorStore((state) => state.userId);
   // **2026-07-08 fix (fdb26152 regression):** ``resource.format_specific``
   // can be undefined for partial resources (e.g. the placeholder
   // cards emitted via ``contract.partial_artifacts`` on a FAILED
@@ -53,6 +57,17 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     render_status?: string;
     duration_seconds?: number;
     render_error?: string;
+    render_failure?: {
+      error_code?: string;
+      summary?: string;
+      traceback_tail?: string[] | string;
+      log_artifact_key?: string;
+    };
+    artifacts?: Array<{
+      name?: string;
+      kind?: string;
+      artifact_key?: string;
+    }>;
     scenes?: Array<{ name: string; duration: number; description?: string }>;
     concept?: string;
     fps?: number;
@@ -67,19 +82,30 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   // renders a 0-second blank player. We surface that explicitly as
   // an error banner with a one-click retry of the original render.
   const [videoLoadFailed, setVideoLoadFailed] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState("");
+  const [retryQueued, setRetryQueued] = useState(false);
 
   const isReady = !!formatSpec.video_url && !videoLoadFailed;
   // When ``formatSpec.video_url`` is set but the network failed we
   // flip the UI into the failure banner instead of the player shell.
   const effectiveRenderStatus = videoLoadFailed
     ? "failed"
-    : child?.status === "failed" || child?.status === "cancelled"
+    : formatSpec.render_status === "failed"
       ? "failed"
-      : child?.status === "succeeded"
-        ? "succeeded"
-        : formatSpec.render_status ?? "unknown";
+      : formatSpec.render_status === "ready"
+        ? "ready"
+        : child?.status === "failed" || child?.status === "cancelled"
+          ? "failed"
+          : child?.status === "succeeded"
+            ? "succeeded"
+            : child?.status === "pending" || child?.status === "running"
+              ? child.status
+              : formatSpec.render_status ?? "unknown";
   const isFailed = effectiveRenderStatus === "failed";
-  const isSucceeded = effectiveRenderStatus === "succeeded" && !isReady;
+  const isSucceeded =
+    (effectiveRenderStatus === "succeeded" || effectiveRenderStatus === "ready") &&
+    !isReady;
   // **2026-07-08 fix:** without ``formatSpec`` being defined, a
   // missing ``render_status`` shouldn't masquerade as "rendering".
   // We also collapse the three "not ready" states into one banner
@@ -93,7 +119,45 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     !isSucceeded &&
     (renderStatus === "pending" ||
       renderStatus === "rendering" ||
-      renderStatus === "unknown");
+      renderStatus === "running");
+  const isUnavailable = !isReady && !isFailed && !isSucceeded && !isPending;
+
+  const failure = formatSpec.render_failure;
+  const failureSummary = videoLoadFailed
+    ? "视频文件无法加载"
+    : failure?.summary || formatSpec.render_error || "渲染流程未生成可播放视频。";
+  const tracebackTail = Array.isArray(failure?.traceback_tail)
+    ? failure.traceback_tail.join("\n")
+    : failure?.traceback_tail || "";
+  const logArtifact = formatSpec.artifacts?.find(
+    (artifact) =>
+      artifact.kind === "render_log" ||
+      (!!failure?.log_artifact_key &&
+        artifact.artifact_key === failure.log_artifact_key),
+  );
+  const packageId =
+    typeof resource.metadata?.package_id === "string"
+      ? resource.metadata.package_id
+      : "";
+  const logUrl = logArtifact?.name
+    ? `/api/v1/resources/packages/${encodeURIComponent(userId)}/${encodeURIComponent(packageId)}`
+      + `/resources/${encodeURIComponent(resource.resource_id)}/artifacts/${encodeURIComponent(logArtifact.name)}`
+    : "";
+
+  const retry = async () => {
+    if (!packageId || retrying) return;
+    setRetrying(true);
+    setRetryError("");
+    setRetryQueued(false);
+    try {
+      await retryVideoRender(userId, packageId, resource.resource_id);
+      setRetryQueued(true);
+    } catch (error) {
+      setRetryError(error instanceof Error ? error.message : "重试请求失败");
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   const copy = async () => {
     if (!formatSpec.manim_code) return;
@@ -157,9 +221,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
           <div className="mt-1 text-xs text-fg-muted">
             {renderStatus === "rendering"
               ? "正在执行 Manim 渲染任务"
-              : renderStatus === "unknown"
-                ? "资源尚未完整生成（任务可能已超时）"
-                : "任务已排队 — 通常 30 秒内完成"}
+              : "任务已排队 — 通常 30 秒内完成"}
           </div>
           <div className="mt-3 h-1 bg-bg-panel rounded-full overflow-hidden max-w-xs mx-auto">
             <div className="h-full bg-gradient-to-r from-pink-500 to-pink-400 animate-pulse w-2/3" />
@@ -177,14 +239,53 @@ export function VideoViewer({ resource }: { resource: Resource }) {
             <div className="mt-1 text-xs text-red-400/80">
               {videoLoadFailed
                 ? `无法访问 ${formatSpec.video_url} — 后端静态文件路由可能未配置（ada95ede fix），或视频文件已被清理。`
-                : "渲染流程未生成可播放视频。"}
+                : failureSummary}
             </div>
-            {formatSpec.render_error && (
-              <div className="mt-2 text-xs text-red-400/80 font-mono whitespace-pre-wrap bg-red-950/40 rounded p-2 border border-red-800/30">
-                {formatSpec.render_error}
+            {tracebackTail && (
+              <details className="mt-2 text-xs text-red-300/90">
+                <summary className="cursor-pointer select-none">查看技术详情</summary>
+                <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded border border-red-800/30 bg-red-950/40 p-2 font-mono text-[11px]">
+                  {tracebackTail}
+                </pre>
+              </details>
+            )}
+            {logUrl && (
+              <a
+                href={logUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-2 inline-block text-xs text-red-300 underline hover:text-red-200"
+              >
+                查看完整渲染日志
+              </a>
+            )}
+            {packageId && (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  aria-label="重新渲染视频"
+                  onClick={retry}
+                  disabled={retrying}
+                  className="inline-flex items-center gap-1 rounded border border-red-700/50 px-2 py-1 text-xs text-red-200 hover:bg-red-900/30 disabled:opacity-60"
+                >
+                  <RefreshCw className={cn("h-3 w-3", retrying && "animate-spin")} />
+                  {retrying ? "正在提交…" : "重新渲染"}
+                </button>
+                {retryQueued && (
+                  <span className="ml-2 text-xs text-green-300">重试任务已排队</span>
+                )}
+                {retryError && (
+                  <div className="mt-1 text-xs text-red-300">{retryError}</div>
+                )}
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {isUnavailable && (
+        <div className="rounded-lg border border-amber-800/40 bg-amber-950/20 p-4 text-sm text-amber-200">
+          视频状态暂不可用，请刷新任务状态。
         </div>
       )}
 

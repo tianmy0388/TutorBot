@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
+import importlib.util
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.services.llm.base import LLMResponse
 from tutor.services.manim_render.code_retry import CodeRetry
 from tutor.services.manim_render.executor import ManimExecutor, ManimRenderResult, RenderStatus
 from tutor.services.manim_render.service import ManimRenderService
 from tutor.services.manim_render.static_guard import StaticGuard
-
 
 VALID_CODE = '''from manim import *
 
@@ -27,7 +26,7 @@ class HelloScene(Scene):
 
 
 requires_manim = pytest.mark.skipif(
-    shutil.which("manim") is None,
+    shutil.which("manim") is None and importlib.util.find_spec("manim") is None,
     reason="manim not installed",
 )
 
@@ -169,7 +168,6 @@ async def test_render_retries_on_failure_then_succeeds(tmp_path):
     """First render fails, retry applies patch, second render succeeds."""
     # Build a real CodeRetry with mock LLM that produces a no-op patch
     # (the test patches the render fn to succeed on second call)
-    from tutor.services.llm.base import LLMResponse
     from unittest.mock import MagicMock
 
     llm = MagicMock()
@@ -246,6 +244,57 @@ async def test_render_manim_not_available(tmp_path):
         assert result.success is False
 
 
+@pytest.mark.asyncio
+async def test_render_failure_keeps_last_120_lines_and_complete_log_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    from tutor.services.artifacts import resolve_artifact_key
+    from tutor.services.config.settings import get_settings
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    lines = [f"trace line {index:03d}" for index in range(150)]
+    stderr = "\n".join(lines)
+    executor = MagicMock(spec=ManimExecutor)
+    executor.is_available.return_value = True
+    executor.temp_dir = tmp_path / "render-workdir"
+    executor.temp_dir.mkdir()
+    executor.render.return_value = ManimRenderResult(
+        status=RenderStatus.FAILED,
+        stdout="complete stdout Ω",
+        stderr=stderr,
+        exit_code=1,
+        error_message="unsafe C:\\private\\render.py detail",
+    )
+    svc = ManimRenderService(
+        static_guard=StaticGuard(),
+        executor=executor,
+        code_retry=CodeRetry(llm=_mock_llm_no_op(), max_attempts=1),
+        public_dir=data_dir / "manim_videos",
+    )
+
+    result = await svc.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="child-video-failure",
+    )
+
+    assert result.success is False
+    assert result.failure.error_code == "process_exit"
+    assert result.failure.traceback_tail == tuple(lines[-120:])
+    assert len(result.failure.summary) <= 200
+    assert "C:\\private" not in result.failure.summary
+    assert result.failure.log_artifact_key
+    log_path = resolve_artifact_key(result.failure.log_artifact_key, data_dir)
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "complete stdout Ω" in log_text
+    assert lines[0] in log_text
+    assert lines[-1] in log_text
+    assert result.to_dict()["failure"]["traceback_tail"] == lines[-120:]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -254,7 +303,6 @@ async def test_render_manim_not_available(tmp_path):
 def _mock_llm_no_op():
     """LLM that returns empty patches (forces retry to give up early)."""
     from unittest.mock import MagicMock
-    from tutor.services.llm.base import LLMResponse
 
     llm = MagicMock()
     llm.model = "mock"
@@ -277,7 +325,6 @@ def _mock_llm_no_op():
 @pytest.mark.asyncio
 async def test_real_render_full_pipeline(tmp_path):
     """Run the entire pipeline against real manim."""
-    from tutor.services.config.settings import Settings, get_settings
     import os
 
     os.environ["TUTOR_MANIM_OUTPUT_DIR"] = str(tmp_path / "manim_out")

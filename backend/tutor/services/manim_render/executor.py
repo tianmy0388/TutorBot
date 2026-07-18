@@ -16,21 +16,22 @@ Python, with Windows-friendly subprocess handling).
 from __future__ import annotations
 
 import enum
+import importlib.util
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
-class RenderStatus(str, enum.Enum):
+class RenderStatus(str, enum.Enum):  # noqa: UP042 - public enum compatibility
     """Outcome of a render attempt."""
 
     SUCCESS = "success"
@@ -38,6 +39,24 @@ class RenderStatus(str, enum.Enum):
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
     NOT_FOUND = "not_found"  # manim executable not installed
+
+
+@dataclass(frozen=True)
+class RenderFailure:
+    """Stable public failure projection for one render pipeline outcome."""
+
+    error_code: str
+    summary: str
+    traceback_tail: tuple[str, ...] = ()
+    log_artifact_key: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "error_code": self.error_code,
+            "summary": self.summary,
+            "traceback_tail": list(self.traceback_tail),
+            "log_artifact_key": self.log_artifact_key,
+        }
 
 
 @dataclass
@@ -48,12 +67,13 @@ class ManimRenderResult:
     stdout: str = ""
     stderr: str = ""
     exit_code: int = -1
-    output_path: Optional[Path] = None
+    output_path: Path | None = None
     duration_seconds: float = 0.0
     peak_memory_mb: float = 0.0
     error_message: str = ""
     # The full path to the rendered .mp4 (if success)
-    video_path: Optional[Path] = None
+    video_path: Path | None = None
+    failure: RenderFailure | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -66,6 +86,7 @@ class ManimRenderResult:
             "duration_seconds": self.duration_seconds,
             "peak_memory_mb": self.peak_memory_mb,
             "error_message": self.error_message,
+            "failure": self.failure.to_dict() if self.failure else None,
         }
 
 
@@ -76,10 +97,10 @@ class ManimExecutor:
         self,
         *,
         quality: str = "l",
-        output_dir: Optional[Path] = None,
-        temp_dir: Optional[Path] = None,
+        output_dir: Path | None = None,
+        temp_dir: Path | None = None,
         timeout_seconds: int = 600,
-        manim_executable: Optional[str] = None,
+        manim_executable: str | None = None,
     ) -> None:
         if quality not in ("l", "m", "h"):
             raise ValueError(f"quality must be one of l/m/h, got {quality!r}")
@@ -87,10 +108,24 @@ class ManimExecutor:
         self.output_dir = Path(output_dir) if output_dir else Path.cwd() / "manim_output"
         self.temp_dir = Path(temp_dir) if temp_dir else Path.cwd() / "manim_temp"
         self.timeout_seconds = timeout_seconds
-        self.manim_executable = manim_executable or self._resolve_manim()
+        if manim_executable:
+            self.manim_executable = manim_executable
+            self._manim_command = [manim_executable]
+        else:
+            resolved = shutil.which("manim")
+            if resolved:
+                self.manim_executable = resolved
+                self._manim_command = [resolved]
+            elif sys.executable and importlib.util.find_spec("manim") is not None:
+                self.manim_executable = sys.executable
+                self._manim_command = [sys.executable, "-m", "manim"]
+            else:
+                self.manim_executable = None
+                self._manim_command = []
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self._active_processes: dict[str, subprocess.Popen] = {}
+        self._cancelled_jobs: set[str] = set()
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -99,14 +134,14 @@ class ManimExecutor:
 
     def is_available(self) -> bool:
         """Return True if ``manim`` is on PATH and runnable."""
-        return self.manim_executable is not None
+        return bool(self._manim_command)
 
     def render(
         self,
         code: str,
         scene_class: str = "MainScene",
         *,
-        job_id: Optional[str] = None,
+        job_id: str | None = None,
     ) -> ManimRenderResult:
         """Write ``code`` to a temp file and run ``manim``.
 
@@ -136,7 +171,7 @@ class ManimExecutor:
         media_dir.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            self.manim_executable,  # type: ignore[list-item]
+            *self._manim_command,
             "-q", self.quality,
             "--media_dir", str(media_dir),
             "--disable_caching",
@@ -145,7 +180,9 @@ class ManimExecutor:
         ]
 
         t0 = time.time()
-        proc: Optional[subprocess.Popen] = None
+        proc: subprocess.Popen | None = None
+        stdout = ""
+        stderr = ""
         try:
             # On Windows, shell=False is required for signal handling; we use
             # CREATE_NEW_PROCESS_GROUP to enable CTRL_BREAK_EVENT for kill.
@@ -155,6 +192,7 @@ class ManimExecutor:
                 "text": True,
                 "encoding": "utf-8",
                 "errors": "replace",
+                "cwd": str(self.temp_dir),
             }
             if os.name == "nt":
                 kwargs["creationflags"] = (
@@ -171,16 +209,40 @@ class ManimExecutor:
 
             try:
                 stdout, stderr = proc.communicate(timeout=self.timeout_seconds)
-            except subprocess.TimeoutExpired:
+                stdout = _utf8_text(stdout)
+                stderr = _utf8_text(stderr)
+            except subprocess.TimeoutExpired as exc:
                 self._kill(proc)
+                try:
+                    stdout, stderr = proc.communicate()
+                except Exception:  # noqa: BLE001 - retain partial diagnostics
+                    stdout, stderr = exc.output, exc.stderr
+                stdout = _utf8_text(stdout)
+                stderr = _utf8_text(stderr)
                 return ManimRenderResult(
                     status=RenderStatus.TIMEOUT,
+                    stdout=stdout,
+                    stderr=stderr,
+                    exit_code=proc.returncode if proc.returncode is not None else -1,
+                    output_path=media_dir,
                     error_message=f"render timeout after {self.timeout_seconds}s",
                     duration_seconds=time.time() - t0,
                 )
 
             duration = time.time() - t0
             exit_code = proc.returncode if proc.returncode is not None else -1
+            with self._lock:
+                was_cancelled = job_id in self._cancelled_jobs
+            if was_cancelled:
+                return ManimRenderResult(
+                    status=RenderStatus.CANCELLED,
+                    stdout=stdout,
+                    stderr=stderr,
+                    exit_code=exit_code,
+                    output_path=media_dir,
+                    duration_seconds=duration,
+                    error_message="render cancelled",
+                )
             video_path = self._find_output_video(media_dir, scene_class)
 
             if exit_code == 0 and video_path is not None and video_path.exists():
@@ -216,6 +278,7 @@ class ManimExecutor:
         finally:
             with self._lock:
                 self._active_processes.pop(job_id, None)
+                self._cancelled_jobs.discard(job_id)
             # 2026-06-21 plan (C4): persist the render logs to
             # ``media_dir/logs/`` so operators can debug
             # production videos without re-running the pipeline.
@@ -225,20 +288,20 @@ class ManimExecutor:
                 media_dir,
                 job_id,
                 cmd=cmd,
-                stdout=stdout if "stdout" in dir() else "",
-                stderr=stderr if "stderr" in dir() else "",
+                stdout=stdout,
+                stderr=stderr,
                 code=code,
             )
             # Clean up the temp .py file (the media dir stays for the caller)
-            try:
+            with suppress(OSError):
                 code_path.unlink()
-            except OSError:
-                pass
 
     def cancel(self, job_id: str) -> bool:
         """Kill a running render. Returns True if killed."""
         with self._lock:
             proc = self._active_processes.get(job_id)
+            if proc is not None:
+                self._cancelled_jobs.add(job_id)
         if proc is None:
             return False
         self._kill(proc)
@@ -253,19 +316,16 @@ class ManimExecutor:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _resolve_manim() -> Optional[str]:
+    def _resolve_manim() -> str | None:
         """Locate the manim executable, with Windows-friendly fallbacks."""
         # 1) shutil.which (uses PATH)
         exe = shutil.which("manim")
         if exe:
             return exe
-        # 2) python -m manim fallback (lets us use the current interpreter's manim)
-        if sys.executable:
-            return f"{sys.executable} -m manim"
         return None
 
     @staticmethod
-    def _find_output_video(media_dir: Path, scene_class: str) -> Optional[Path]:
+    def _find_output_video(media_dir: Path, scene_class: str) -> Path | None:
         """Manim writes to ``media_dir/videos/<script>/<quality>/<scene>.mp4``.
 
         We don't know the script name so we walk the directory.
@@ -300,14 +360,102 @@ def _extract_error(stderr: str) -> str:
         return "manim exited with non-zero status (no stderr)"
     lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
     # Skip noise lines
-    SKIP_PREFIXES = ("INFO", "DEBUG", "Traceback", "File \"")
-    useful = [ln for ln in lines if not any(ln.startswith(p) for p in SKIP_PREFIXES)]
+    skip_prefixes = ("INFO", "DEBUG", "Traceback", "File \"")
+    useful = [ln for ln in lines if not any(ln.startswith(p) for p in skip_prefixes)]
     if not useful:
         useful = lines[-3:]
     return "\n".join(useful[:5])
 
 
-__all__ = ["ManimExecutor", "ManimRenderResult", "RenderStatus"]
+def _utf8_text(value: object) -> str:
+    """Normalize subprocess output while preserving undecodable diagnostics."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def tail_lines(text: str, limit: int = 120) -> tuple[str, ...]:
+    """Return the final public-safe diagnostic lines in source order."""
+    if not text:
+        return ()
+    return tuple(
+        _redact_host_paths(line)
+        for line in text.splitlines()[-max(1, limit) :]
+    )
+
+
+def safe_failure_summary(text: str, *, fallback: str) -> str:
+    """Bound a concise summary and hide Windows host paths."""
+    summary = " ".join((text or fallback).split())
+    summary = _redact_host_paths(summary)
+    return summary[:200] or fallback
+
+
+def _redact_host_paths(text: str) -> str:
+    """Remove absolute host paths from API-facing diagnostics."""
+    return re.sub(
+        r"(?i)(?:\b[a-z]:[\\/]|/(?:tmp|private/tmp|var/tmp|home|users)/)"
+        r"[^\s\"']+",
+        "<path>",
+        text,
+    )
+
+
+def failure_for_render_result(
+    result: ManimRenderResult,
+    *,
+    log_artifact_key: str = "",
+) -> RenderFailure:
+    """Map an executor result to one stable public failure."""
+    if result.failure is not None:
+        return RenderFailure(
+            error_code=result.failure.error_code,
+            summary=result.failure.summary,
+            traceback_tail=result.failure.traceback_tail,
+            log_artifact_key=(
+                log_artifact_key or result.failure.log_artifact_key
+            ),
+        )
+    if result.status == RenderStatus.TIMEOUT:
+        code, fallback = "render_timeout", "Manim rendering timed out"
+    elif result.status == RenderStatus.CANCELLED:
+        code, fallback = "render_cancelled", "Manim rendering was cancelled"
+    elif result.status == RenderStatus.NOT_FOUND:
+        code, fallback = "manim_not_found", "Manim runtime is unavailable"
+    elif result.status == RenderStatus.FAILED and result.exit_code == 0:
+        code, fallback = "missing_output", "Manim produced no playable video"
+    elif result.status == RenderStatus.FAILED and result.exit_code != -1:
+        code, fallback = "process_exit", "Manim exited before producing a video"
+    else:
+        code, fallback = "internal_error", "Video rendering failed internally"
+    expose_process_diagnostics = code not in {"internal_error", "manim_not_found"}
+    diagnostics = (
+        result.stderr or result.stdout or result.error_message
+        if expose_process_diagnostics
+        else fallback
+    )
+    summary_source = result.error_message if code == "process_exit" else fallback
+    return RenderFailure(
+        error_code=code,
+        summary=safe_failure_summary(summary_source, fallback=fallback),
+        traceback_tail=tail_lines(diagnostics),
+        log_artifact_key=log_artifact_key,
+    )
+
+
+__all__ = [
+    "ManimExecutor",
+    "ManimRenderResult",
+    "RenderFailure",
+    "RenderStatus",
+    "failure_for_render_result",
+    "safe_failure_summary",
+    "tail_lines",
+]
 
 
 def _save_render_logs(

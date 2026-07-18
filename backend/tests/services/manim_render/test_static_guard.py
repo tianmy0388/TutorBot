@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import pytest
-
 from tutor.services.manim_render.static_guard import StaticGuard
-
 
 VALID_CODE = '''from manim import *
 
@@ -118,3 +116,71 @@ class MainScene(Scene):
     # But sanity warns
     if result.passed:
         assert any("manim" in w.lower() for w in result.warnings)
+
+
+def test_missing_literal_svg_asset_fails_before_render(tmp_path):
+    code = '''from manim import *
+class MainScene(Scene):
+    def construct(self):
+        self.add(SVGMobject("person_silhouette.svg"))
+'''
+
+    result = StaticGuard().check(code, workdir=tmp_path)
+
+    assert result.passed is False
+    assert result.external_assets == ("person_silhouette.svg",)
+    assert result.error_code == "missing_external_asset"
+
+
+def test_literal_assets_are_ordered_deduplicated_and_allowed_only_inside_workdir(
+    tmp_path,
+):
+    (tmp_path / "diagram.svg").write_text("<svg/>", encoding="utf-8")
+    (tmp_path / "photo.png").write_bytes(b"png")
+    code = '''from manim import *
+class MainScene(Scene):
+    def construct(self):
+        self.add(manim.SVGMobject("diagram.svg"))
+        self.add(ImageMobject("photo.png"))
+        self.add(SVGMobject("diagram.svg"))
+'''
+
+    result = StaticGuard().check(code, workdir=tmp_path)
+
+    assert result.passed is True
+    assert result.external_assets == ("diagram.svg", "photo.png")
+
+
+@pytest.mark.parametrize("constructor", ["SVGMobject", "ImageMobject"])
+def test_unsafe_literal_asset_does_not_grant_host_filesystem_access(
+    tmp_path,
+    constructor,
+):
+    outside = tmp_path.parent / f"outside-{constructor}.dat"
+    outside.write_bytes(b"private")
+    code = f'''from manim import *
+class MainScene(Scene):
+    def construct(self):
+        self.add({constructor}({str(outside)!r}))
+'''
+
+    result = StaticGuard().check(code, workdir=tmp_path)
+
+    assert result.passed is False
+    assert result.error_code == "missing_external_asset"
+    assert str(outside.resolve()) not in result.summary
+
+
+def test_dynamic_asset_expression_is_not_treated_as_self_contained(tmp_path):
+    code = '''from manim import *
+class MainScene(Scene):
+    def construct(self):
+        filename = "diagram.svg"
+        self.add(SVGMobject(filename))
+'''
+
+    result = StaticGuard().check(code, workdir=tmp_path)
+
+    assert result.passed is False
+    assert result.external_assets == ()
+    assert result.error_code == "dynamic_external_asset"

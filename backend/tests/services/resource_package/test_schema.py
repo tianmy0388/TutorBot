@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-
 from tutor.services.resource_package.schema import (
     CodeResource,
     DocumentResource,
-    ExerciseOption,
     ExerciseQuestion,
     ExerciseResource,
-    MindMapResource,
-    PPTResource,
-    ReadingResource,
     Resource,
     ResourcePackage,
     ResourceReview,
@@ -168,6 +163,30 @@ def test_video_resource_render_status():
     assert v.render_status == "rendering"
     v2 = VideoResource(manim_code="", scene_class="X")
     assert v2.render_status == "pending"
+
+
+def test_video_resource_accepts_structured_render_failure_and_log_manifest():
+    v = VideoResource(
+        manim_code="from manim import *",
+        render_status="failed",
+        render_error_code="missing_external_asset",
+        render_failure={
+            "error_code": "missing_external_asset",
+            "summary": "asset missing",
+            "traceback_tail": ["FileNotFoundError: person.svg"],
+            "log_artifact_key": "manim_logs/child/attempt-01.log",
+        },
+        artifacts=[
+            {
+                "name": "attempt-01.log",
+                "kind": "render_log",
+                "artifact_key": "manim_logs/child/attempt-01.log",
+            }
+        ],
+    )
+
+    assert v.render_failure["error_code"] == "missing_external_asset"
+    assert v.artifacts[0].kind == "render_log"
 
 
 # ---------------------------------------------------------------------------

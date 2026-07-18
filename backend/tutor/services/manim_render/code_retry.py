@@ -30,6 +30,7 @@ skipped and the loop continues with the next attempt.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -37,8 +38,12 @@ from typing import Any
 
 from loguru import logger
 
-from tutor.agents.base_agent import BaseAgent
 from tutor.services.llm.base import LLMMessage, LLMProvider, LLMRequest
+from tutor.services.manim_render.executor import (
+    RenderFailure,
+    safe_failure_summary,
+    tail_lines,
+)
 
 
 @dataclass
@@ -49,6 +54,8 @@ class RetryResult:
     code: str
     attempts_used: int
     final_error: str = ""
+    error_code: str = ""
+    failure: RenderFailure | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
@@ -56,6 +63,8 @@ class RetryResult:
             "success": self.success,
             "attempts_used": self.attempts_used,
             "final_error": self.final_error,
+            "error_code": self.error_code,
+            "failure": self.failure.to_dict() if self.failure else None,
             "history": list(self.history),
             "code_chars": len(self.code),
         }
@@ -138,58 +147,93 @@ class CodeRetry:
         - ``attempts_used`` reflects the number of *render* attempts (not the
           number of LLM calls).
         """
-        code = original_code
+        code = normalize_generated_source(original_code)
         history: list[dict[str, Any]] = []
         attempts_used = 0
+        rendered_hashes: set[str] = set()
+        last_failure: RenderFailure | None = None
 
         for attempt in range(1, self.max_attempts + 1):
             attempts_used = attempt
-            success, error = await render_fn(code)
+            source_hash = _source_hash(code)
+            rendered_hashes.add(source_hash)
+            success, raw_failure = await render_fn(code)
             if success:
                 return RetryResult(
                     success=True,
-                    code=code,
+                    code=(original_code if attempt == 1 else code),
                     attempts_used=attempt,
                     history=history,
                 )
 
+            last_failure = _coerce_failure(raw_failure)
+
             history.append(
-                {"attempt": attempt, "ok": False, "error": error[:500]}
+                {
+                    "attempt": attempt,
+                    "ok": False,
+                    "error_code": last_failure.error_code,
+                    "summary": last_failure.summary,
+                    "traceback_tail": list(last_failure.traceback_tail),
+                    "log_artifact_key": last_failure.log_artifact_key,
+                }
             )
             # If we have more attempts left, try to get patches
             if attempt < self.max_attempts:
-                patches = await self._ask_llm(code, error, attempt)
+                patches = await self._ask_llm(code, last_failure, attempt)
                 if not patches:
                     history.append(
                         {"attempt": attempt, "patch": "no patches returned"}
                     )
+                    new_code = code
                 else:
-                    new_code = self._apply_patches(code, patches)
-                    if new_code == code:
+                    new_code = normalize_generated_source(
+                        self._apply_patches(code, patches)
+                    )
+                    if _source_hash(new_code) in rendered_hashes:
                         history.append(
                             {
                                 "attempt": attempt,
                                 "patch": "patches did not match code",
                             }
                         )
-                    else:
-                        history.append(
-                            {
-                                "attempt": attempt,
-                                "patch": "applied",
-                                "patch_count": len(patches),
-                            }
-                        )
-                        code = new_code
+                if _source_hash(new_code) in rendered_hashes:
+                    unchanged = RenderFailure(
+                        error_code="unchanged_retry",
+                        summary=safe_failure_summary(
+                            f"Retry produced unchanged source. Prior failure: "
+                            f"{last_failure.summary}",
+                            fallback="Retry produced unchanged Manim source",
+                        ),
+                        traceback_tail=last_failure.traceback_tail,
+                        log_artifact_key=last_failure.log_artifact_key,
+                    )
+                    return RetryResult(
+                        success=False,
+                        code=code,
+                        attempts_used=attempts_used,
+                        final_error=unchanged.summary,
+                        error_code=unchanged.error_code,
+                        failure=unchanged,
+                        history=history,
+                    )
+                history.append(
+                    {
+                        "attempt": attempt,
+                        "patch": "applied",
+                        "patch_count": len(patches),
+                    }
+                )
+                code = new_code
 
         # Failed after max_attempts
         return RetryResult(
             success=False,
             code=code,
             attempts_used=attempts_used,
-            final_error=(
-                history[-1].get("error", "") if history else "no attempts"
-            ),
+            final_error=(last_failure.summary if last_failure else "no attempts"),
+            error_code=(last_failure.error_code if last_failure else "render_failed"),
+            failure=last_failure,
             history=history,
         )
 
@@ -200,7 +244,7 @@ class CodeRetry:
     async def _ask_llm(
         self,
         code: str,
-        error: str,
+        failure: RenderFailure,
         attempt: int,
     ) -> list[dict[str, str]]:
         """Call the LLM to produce SEARCH/REPLACE patches."""
@@ -214,8 +258,12 @@ class CodeRetry:
                 content=(
                     f"## Manim code (attempt {attempt})\n"
                     f"```python\n{code[:6000]}\n```\n\n"
-                    f"## Error from render\n"
-                    f"```\n{error[:2000]}\n```\n\n"
+                    f"## Stable render failure\n"
+                    f"error_code: {failure.error_code}\n"
+                    f"traceback_tail (last {len(failure.traceback_tail)} lines):\n"
+                    f"```\n{chr(10).join(failure.traceback_tail)}\n```\n\n"
+                    "Correction requirement: change the source in a way that "
+                    "directly addresses this error before another render.\n\n"
                     f"Please return SEARCH/REPLACE patches as JSON."
                 ),
             ),
@@ -304,4 +352,54 @@ class CodeRetry:
         return None
 
 
-__all__ = ["CodeRetry", "RetryResult", "RETRY_OUTPUT_SCHEMA"]
+def normalize_generated_source(code: str) -> str:
+    """Canonicalize generated source for rendering and retry hashing."""
+    text = (code or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    fenced = re.fullmatch(
+        r"```(?:python|py)?\s*\n(?P<body>.*)\n```",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if fenced:
+        text = fenced.group("body")
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _source_hash(code: str) -> str:
+    return hashlib.sha256(normalize_generated_source(code).encode("utf-8")).hexdigest()
+
+
+def _coerce_failure(value: Any) -> RenderFailure:
+    if isinstance(value, RenderFailure):
+        return value
+    if isinstance(value, dict):
+        return RenderFailure(
+            error_code=str(value.get("error_code") or "render_failed"),
+            summary=safe_failure_summary(
+                str(value.get("summary") or ""),
+                fallback="Manim rendering failed",
+            ),
+            traceback_tail=tuple(
+                str(line) for line in (value.get("traceback_tail") or ())
+            )[-120:],
+            log_artifact_key=str(value.get("log_artifact_key") or ""),
+        )
+    text = str(value or "render failed")
+    return RenderFailure(
+        error_code="render_failed",
+        summary=safe_failure_summary(text, fallback="Manim rendering failed"),
+        traceback_tail=tail_lines(text),
+    )
+
+
+__all__ = [
+    "CodeRetry",
+    "RetryResult",
+    "RETRY_OUTPUT_SCHEMA",
+    "normalize_generated_source",
+]

@@ -122,6 +122,21 @@ describe("ApiError surface", () => {
   });
 });
 
+describe("video render retry", () => {
+  it("posts to the resource-scoped durable retry endpoint", async () => {
+    const { retryVideoRender } = await import("./api");
+
+    await retryVideoRender("local user", "package/1", "video 1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      "/api/v1/resources/packages/local%20user/package%2F1/resources/video%201/retry-video",
+    );
+    expect(init.method).toBe("POST");
+  });
+});
+
 describe("conversation recovery hydration", () => {
   it("hydrates all recovery state atomically from one aggregate request", async () => {
     const aggregate = {

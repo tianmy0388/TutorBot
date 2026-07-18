@@ -27,6 +27,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from tutor.core.capability_result import FollowUpTaskSpec
 from tutor.services.artifacts import (
     UnsafeArtifactKey,
     resolve_artifact_key,
@@ -34,6 +35,8 @@ from tutor.services.artifacts import (
 )
 from tutor.services.config.settings import get_settings
 from tutor.services.identity import identity_policy_for
+from tutor.services.jobs.follow_up import FollowUpScheduler
+from tutor.services.jobs.schema import JobStatus
 from tutor.services.resource_package.schema import (
     Resource,
     ResourceType,
@@ -214,6 +217,115 @@ async def delete_all_packages(user_id: str, request: Request) -> dict[str, Any]:
     return {"deleted": count, "user_id": user_id}
 
 
+@router.post(
+    "/resources/packages/{user_id}/{package_id}/resources/{resource_id}/retry-video"
+)
+async def retry_video_render(
+    user_id: str,
+    package_id: str,
+    resource_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """Create or reuse one active durable retry child for a failed video."""
+    policy = identity_policy_for(request)
+    user_id = policy.resolve(user_id)
+    package_store = _resource_store(request)
+    package = await package_store.get(package_id)
+    if package is None or (
+        policy.multi_user_enabled
+        and (package.metadata or {}).get("user_id", "anonymous") != user_id
+    ):
+        raise HTTPException(status_code=404, detail="resource not found")
+    resource = next(
+        (item for item in package.resources if item.resource_id == resource_id),
+        None,
+    )
+    if resource is None:
+        raise HTTPException(status_code=404, detail="resource not found")
+    if resource.type != ResourceType.VIDEO:
+        raise HTTPException(status_code=422, detail="resource is not a video")
+
+    runner = getattr(request.app.state, "learning_runner", None)
+    if runner is None or not hasattr(runner, "store"):
+        raise HTTPException(status_code=503, detail="job runner is unavailable")
+    job_store = runner.store
+    parent_job_id = package.originating_job_id
+    parent = await job_store.get(parent_job_id) if parent_job_id else None
+    if parent is None or (
+        policy.multi_user_enabled and parent.user_id != user_id
+    ):
+        raise HTTPException(status_code=404, detail="originating job not found")
+    if parent.session_id != str((package.metadata or {}).get("session_id") or parent.session_id):
+        raise HTTPException(status_code=409, detail="package conversation does not match job")
+    if parent.status not in {JobStatus.SUCCEEDED, JobStatus.PARTIAL}:
+        raise HTTPException(status_code=409, detail="originating job cannot authorize retry")
+
+    matching = [
+        child
+        for child in await job_store.get_children(parent.job_id)
+        if child.task_kind == "video_render"
+        and str((child.metadata or {}).get("package_id") or "") == package_id
+        and str((child.metadata or {}).get("resource_id") or "") == resource_id
+    ]
+    child = next(
+        (
+            candidate
+            for candidate in reversed(matching)
+            if candidate.status in {JobStatus.PENDING, JobStatus.RUNNING}
+        ),
+        None,
+    )
+    if child is None:
+        revision = len(matching) + 1
+        child = (
+            await FollowUpScheduler(job_store).enqueue(
+                parent.job_id,
+                (
+                    FollowUpTaskSpec(
+                        kind="video_render",
+                        dedupe_key=(
+                            f"video-retry:{package_id}:{resource_id}:{revision}"
+                        ),
+                        payload={
+                            "package_id": package_id,
+                            "resource_id": resource_id,
+                            "user_id": parent.user_id,
+                        },
+                    ),
+                ),
+            )
+        )[0]
+
+    # Durable child creation is the commit point. Only then reopen the resource.
+    resource.format_specific["render_status"] = "pending"
+    for key in (
+        "render_failure",
+        "render_error_code",
+        "render_error",
+        "video_url",
+        "artifact_key",
+    ):
+        resource.format_specific.pop(key, None)
+    resource.format_specific["artifacts"] = [
+        item
+        for item in (resource.format_specific.get("artifacts") or [])
+        if not (isinstance(item, dict) and item.get("kind") == "render_log")
+    ]
+    await package_store.update_resource(
+        package_id,
+        resource,
+        user_id=parent.user_id,
+    )
+    await runner.resume_pending()
+    return {
+        "job_id": child.job_id,
+        "parent_job_id": parent.job_id,
+        "package_id": package_id,
+        "resource_id": resource_id,
+        "status": child.status.value,
+    }
+
+
 # ---------------------------------------------------------------------------
 # File downloads (Phase 5.3 — PPT)
 # ---------------------------------------------------------------------------
@@ -306,6 +418,8 @@ _ARTIFACT_MEDIA_TYPES: dict[str, str] = {
     "pdf": "application/pdf",
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
+    "log": "text/plain; charset=utf-8",
+    "render_log": "text/plain; charset=utf-8",
 }
 
 

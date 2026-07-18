@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
 from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.services.llm.base import LLMResponse
 from tutor.services.manim_render.code_retry import CodeRetry
 
@@ -144,7 +142,15 @@ async def test_retry_succeeds_after_one_patch():
 @pytest.mark.asyncio
 async def test_retry_gives_up_after_max_attempts():
     """All attempts fail → success=False, attempts_used=max."""
-    cr = CodeRetry(llm=_mock_llm([]), max_attempts=3)
+    cr = CodeRetry(
+        llm=_mock_llm(
+            [
+                '{"patches": [{"search": "x = 1", "replace": "x = 2"}]}',
+                '{"patches": [{"search": "x = 2", "replace": "x = 3"}]}',
+            ]
+        ),
+        max_attempts=3,
+    )
 
     async def render_fn(code: str) -> tuple[bool, str]:
         return False, "always fails"
@@ -158,36 +164,46 @@ async def test_retry_gives_up_after_max_attempts():
 
 
 @pytest.mark.asyncio
-async def test_retry_continues_after_empty_patches():
-    """If LLM returns no patches, retry loop continues until max_attempts."""
+async def test_retry_stops_before_rendering_unchanged_empty_patch_output():
+    """An empty patch result must not launch the same render again."""
     cr = CodeRetry(llm=_mock_llm(["{}"]), max_attempts=3)
 
+    calls = 0
+
     async def render_fn(code: str) -> tuple[bool, str]:
+        nonlocal calls
+        calls += 1
         return False, "fail"
 
     result = await cr.fix_until_renderable(
         original_code="x = 1", render_fn=render_fn
     )
-    # Loops to max_attempts even without patches
     assert result.success is False
-    assert result.attempts_used == 3
+    assert result.attempts_used == 1
+    assert result.error_code == "unchanged_retry"
+    assert calls == 1
 
 
 @pytest.mark.asyncio
-async def test_retry_continues_after_no_op_patches():
-    """If patches' search strings don't match, loop continues."""
+async def test_retry_stops_before_rendering_nonmatching_patch_output():
+    """A non-matching patch is terminal unchanged output."""
     no_op_patches = json_dumps_no_op()
     cr = CodeRetry(llm=_mock_llm([no_op_patches]), max_attempts=3)
 
+    calls = 0
+
     async def render_fn(code: str) -> tuple[bool, str]:
+        nonlocal calls
+        calls += 1
         return False, "fail"
 
     result = await cr.fix_until_renderable(
         original_code="x = 1", render_fn=render_fn
     )
-    # Patches were no-op but we keep trying
     assert result.success is False
-    assert result.attempts_used == 3
+    assert result.attempts_used == 1
+    assert result.error_code == "unchanged_retry"
+    assert calls == 1
 
 
 def json_dumps_no_op():
@@ -206,8 +222,8 @@ def json_dumps_no_op():
 
 
 @pytest.mark.asyncio
-async def test_retry_handles_llm_failure_gracefully():
-    """If LLM call raises, retry still continues through max_attempts."""
+async def test_retry_handles_llm_failure_as_terminal_unchanged_output():
+    """If patch generation fails, the same source is not rendered again."""
     llm = MagicMock()
     llm.model = "mock"
     llm.default_temperature = 0.5
@@ -225,6 +241,29 @@ async def test_retry_handles_llm_failure_gracefully():
     result = await cr.fix_until_renderable(
         original_code="x = 1", render_fn=render_fn
     )
-    # LLM failures don't kill the loop — we go through max_attempts renders
     assert result.success is False
-    assert result.attempts_used == 3
+    assert result.attempts_used == 1
+    assert result.error_code == "unchanged_retry"
+
+
+@pytest.mark.asyncio
+async def test_retry_normalizes_fences_line_endings_and_trailing_whitespace_before_hashing():
+    patches = (
+        '{"patches": [{"search": "x = 1", '
+        '"replace": "```python\\r\\nx = 1   \\r\\n```"}]}'
+    )
+    cr = CodeRetry(llm=_mock_llm([patches]), max_attempts=3)
+    rendered: list[str] = []
+
+    async def render_fn(code: str) -> tuple[bool, str]:
+        rendered.append(code)
+        return False, "root cause"
+
+    result = await cr.fix_until_renderable(
+        original_code="```python\r\nx = 1   \r\n```",
+        render_fn=render_fn,
+    )
+
+    assert rendered == ["x = 1\n"]
+    assert result.attempts_used == 1
+    assert result.error_code == "unchanged_retry"

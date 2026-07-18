@@ -12,25 +12,27 @@ Design follows ManimCat's two-stage AI + retry loop. We port it from
 TypeScript to Python and simplify for our MVP use case.
 """
 
+from tutor.services.manim_render.code_retry import CodeRetry, RetryResult
 from tutor.services.manim_render.executor import (
     ManimExecutor,
     ManimRenderResult,
+    RenderFailure,
     RenderStatus,
 )
-from tutor.services.manim_render.static_guard import StaticGuard, StaticGuardResult
-from tutor.services.manim_render.code_retry import CodeRetry, RetryResult
 from tutor.services.manim_render.service import (
     ManimRenderService,
     RenderedVideo,
     get_manim_render_service,
     reset_manim_render_service,
 )
+from tutor.services.manim_render.static_guard import StaticGuard, StaticGuardResult
 
 __all__ = [
     "CodeRetry",
     "ManimExecutor",
     "ManimRenderResult",
     "ManimRenderService",
+    "RenderFailure",
     "RenderStatus",
     "RenderedVideo",
     "RetryResult",
