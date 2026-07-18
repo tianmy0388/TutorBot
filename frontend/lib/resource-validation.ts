@@ -9,23 +9,35 @@ function clean(value: unknown): string {
 }
 
 export function hasUsableExerciseOptions(resource: Resource): boolean {
-  const questions = resource.format_specific?.questions;
-  return (
-    !Array.isArray(questions) ||
-    questions.every(
-      (question) =>
-        !isRecord(question) ||
-        !Array.isArray(question.options) ||
-        question.options.every(
-          (option: unknown) =>
-            isRecord(option) &&
-            clean(option.label) !== "" &&
-            clean(option.text) !== "" &&
-            clean(option.label) !== "[TRUNCATED]" &&
-            clean(option.text) !== "[TRUNCATED]",
-        ),
-    )
-  );
+  const formatSpecific = resource.format_specific;
+  if (!isRecord(formatSpecific) || !Array.isArray(formatSpecific.questions)) {
+    return false;
+  }
+
+  return formatSpecific.questions.every((question) => {
+    if (
+      !isRecord(question) ||
+      clean(question.id) === "" ||
+      clean(question.type) === "" ||
+      clean(question.question) === ""
+    ) {
+      return false;
+    }
+    if (!Object.prototype.hasOwnProperty.call(question, "options")) {
+      return true;
+    }
+    return (
+      Array.isArray(question.options) &&
+      question.options.every(
+        (option: unknown) =>
+          isRecord(option) &&
+          clean(option.label) !== "" &&
+          clean(option.text) !== "" &&
+          clean(option.label) !== "[TRUNCATED]" &&
+          clean(option.text) !== "[TRUNCATED]",
+      )
+    );
+  });
 }
 
 /** Guards data received directly from a stream before it reaches the store. */

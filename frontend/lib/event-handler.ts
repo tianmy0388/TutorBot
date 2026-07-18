@@ -264,7 +264,9 @@ export function dispatchStreamEvent(
       // fired). We must fall back to ``contract.partial_artifacts``
       // so the right pane shows the resources the capability had
       // already streamed before the timeout.
-      const partial = (contract?.partial_artifacts ?? []) as unknown[];
+      const partial = Array.isArray(contract?.partial_artifacts)
+        ? contract.partial_artifacts
+        : [];
       const contractStatus =
         typeof contract?.status === "string"
           ? (contract.status as string)
@@ -277,7 +279,7 @@ export function dispatchStreamEvent(
         !hasPackage &&
         partial.length > 0
       ) {
-        buildPartialPackageFromContract(contract, partial, streamEv);
+        buildPartialPackageFromContract(contract, partial, streamEv, context);
       }
       // Persist the assistant message into the active conversation
       // so the sidebar's message_count updates in real time
@@ -661,8 +663,11 @@ function buildPartialPackageFromContract(
   contract: Record<string, unknown>,
   partial: unknown[],
   ev: StreamEvent,
+  context: StreamDispatchContext,
 ): void {
   const store = useTutorStore.getState();
+  const existingPackage = store.latestPackage;
+  if (isUsableCanonicalResourcePackage(existingPackage)) return;
   const placeholderPackageId =
     typeof contract.job_id === "string"
       ? `partial-${contract.job_id}`
@@ -670,9 +675,9 @@ function buildPartialPackageFromContract(
 
   // Index existing real resources by id so we can preserve them.
   const existingResources = Array.isArray(
-    (store.latestPackage as { resources?: unknown[] } | null)?.resources,
+    (existingPackage as { resources?: unknown[] } | null)?.resources,
   )
-    ? ((store.latestPackage as { resources: unknown[] }).resources)
+    ? ((existingPackage as unknown as { resources: unknown[] }).resources)
     : [];
   const existingById = new Map<string, Record<string, unknown>>();
   for (const r of existingResources) {
@@ -695,11 +700,21 @@ function buildPartialPackageFromContract(
   const resources: Record<string, unknown>[] = [];
   const seenIds = new Set<string>();
   let preservedCount = 0;
+  let hasMalformedPartial = false;
   for (const entry of partial) {
-    if (!entry || typeof entry !== "object") continue;
+    if (!isRecord(entry)) {
+      hasMalformedPartial = true;
+      continue;
+    }
     const p = entry as Record<string, unknown>;
     const rid =
       typeof p.resource_id === "string" ? (p.resource_id as string) : "";
+    const resourceType =
+      typeof p.resource_type === "string" ? p.resource_type.trim() : "";
+    if (!rid.trim() || !resourceType) {
+      hasMalformedPartial = true;
+      continue;
+    }
     if (rid) {
       if (seenIds.has(rid)) {
         // Already added a resource for this id; skip the dup.
@@ -718,16 +733,14 @@ function buildPartialPackageFromContract(
     }
     resources.push({
       resource_id: rid,
-      type:
-        typeof p.resource_type === "string"
-          ? (p.resource_type as string)
-          : "unknown",
+      type: resourceType,
       title:
         typeof p.title === "string"
           ? (p.title as string)
           : `未命名 ${p.resource_type ?? "资源"}`,
       // No full content from a partial artifact — the UI shows a hint.
       content: "（此资源在任务超时前未完整生成，点击查看详情）",
+      format_specific: resourceType === "exercise" ? { questions: [] } : {},
       topic: "",
       difficulty: 3,
       estimated_minutes: 5,
@@ -742,10 +755,10 @@ function buildPartialPackageFromContract(
     });
   }
 
-  store.setLatestPackage({
+  const partialPackage = {
     package_id: placeholderPackageId,
     topic: typeof ev.metadata?.job_id === "string" ? "" : "",
-    resources: resources as never,
+    resources,
     created_at: new Date().toISOString(),
     target_profile_snapshot: {},
     learning_path_summary: {},
@@ -761,7 +774,15 @@ function buildPartialPackageFromContract(
       placeholder_count: resources.length - preservedCount,
       display_summary: `部分生成：${resources.length} 项资源（任务未完成）`,
     },
-  });
+  };
+  if (!hasMalformedPartial && isUsableResourcePackage(partialPackage)) {
+    store.setLatestPackage(partialPackage);
+    return;
+  }
+  scheduleResourcePackageRecovery(
+    packageIdFromValue(contract) ?? packageIdFromValue(ev.metadata),
+    context,
+  );
 }
 
 function handleIncrementalResource(
@@ -878,7 +899,12 @@ function scheduleResourcePackageRecovery(
   const recovery = Promise.resolve()
     .then(() => getResourcePackageDetail(userId, packageId))
     .then((pkg) => {
-      if (isUsableResourcePackage(pkg)) {
+      const current = useTutorStore.getState().latestPackage;
+      if (
+        isUsableResourcePackage(pkg) &&
+        pkg.package_id === packageId &&
+        !isUsableCanonicalResourcePackage(current)
+      ) {
         useTutorStore.getState().setLatestPackage(pkg);
       }
     })
@@ -889,6 +915,12 @@ function scheduleResourcePackageRecovery(
       resourceRecoveryInFlight.delete(key);
     });
   resourceRecoveryInFlight.set(key, recovery);
+}
+
+function isUsableCanonicalResourcePackage(value: unknown): value is ResourcePackage {
+  if (!isUsableResourcePackage(value)) return false;
+  const metadata = isRecord(value.metadata) ? value.metadata : {};
+  return metadata.incremental !== true && metadata.partial !== true;
 }
 
 /**

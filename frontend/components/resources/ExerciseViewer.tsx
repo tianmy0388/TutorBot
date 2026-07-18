@@ -432,7 +432,7 @@ function QuestionCard({
             const isAnswer = String(q.answer) === opt.label;
             return (
               <label
-                key={`${q.id}:${opt.label || "option"}:${index}`}
+                key={JSON.stringify([q.id, opt.label || "option", index])}
                 className={cn(
                   "flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors",
                   checked
@@ -473,7 +473,7 @@ function QuestionCard({
               : String(q.answer) === opt.label;
             return (
               <label
-                key={`${q.id}:${opt.label || "option"}:${index}`}
+                key={JSON.stringify([q.id, opt.label || "option", index])}
                 className={cn(
                   "flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors",
                   checked

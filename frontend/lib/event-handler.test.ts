@@ -91,6 +91,20 @@ function resourceEvent(
         generated_by: ["test_agent"],
         confidence_score: 0.9,
         tags: [],
+        ...(type === "exercise"
+          ? {
+              format_specific: {
+                questions: [
+                  {
+                    id: "q-valid",
+                    type: "single_choice",
+                    question: "有效练习题",
+                    options: [{ label: "A", text: "有效选项" }],
+                  },
+                ],
+              },
+            }
+          : {}),
         ...extras,
       },
       job_id: "job-bbf6ddbf",
@@ -438,6 +452,88 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
 
     await vi.waitFor(() => expect(getResourcePackageDetail).toHaveBeenCalledTimes(2));
     warnSpy.mockRestore();
+  });
+
+  it("does not let a stale recovery overwrite a newer canonical package", async () => {
+    let resolveRecovery!: (value: unknown) => void;
+    vi.mocked(getResourcePackageDetail).mockReturnValue(
+      new Promise<unknown>((resolve) => {
+        resolveRecovery = resolve;
+      }) as never,
+    );
+    const invalid = resourceEvent("r-truncated", "exercise", "练习题", {
+      format_specific: { questions: [{ id: "q-1", options: ["[TRUNCATED]"] }] },
+      metadata: { package_id: "pkg-old" },
+    });
+    dispatchStreamEvent(invalid, { userId: "authoritative-user" });
+    await vi.waitFor(() => expect(getResourcePackageDetail).toHaveBeenCalledTimes(1));
+
+    const newer = resourceEvent("r-new", "document", "新资源");
+    newer.type = "result";
+    newer.content = JSON.stringify({
+      package: { package_id: "pkg-new", resources: [newer.metadata.resource] },
+      summary: {},
+    });
+    dispatchStreamEvent(newer);
+
+    resolveRecovery({
+      package_id: "pkg-old",
+      resources: [{ resource_id: "r-old", type: "document", title: "旧资源", content: "完整内容" }],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((mockStoreState.latestPackage as { package_id: string }).package_id).toBe("pkg-new");
+  });
+
+  it("does not write a mismatched package recovered for an invalid stream", async () => {
+    vi.mocked(getResourcePackageDetail).mockResolvedValueOnce({
+      package_id: "pkg-other",
+      resources: [{ resource_id: "r-other", type: "document", title: "其他资源", content: "完整内容" }],
+    } as never);
+    dispatchStreamEvent(
+      resourceEvent("r-truncated", "exercise", "练习题", {
+        format_specific: { questions: [{ id: "q-1", options: ["[TRUNCATED]"] }] },
+        metadata: { package_id: "pkg-requested" },
+      }),
+      { userId: "authoritative-user" },
+    );
+
+    await vi.waitFor(() => expect(getResourcePackageDetail).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    expect(mockStoreState.latestPackage).toBeNull();
+  });
+
+  it("does not let a late partial terminal package replace a canonical package", () => {
+    mockStoreState.latestPackage = {
+      package_id: "pkg-canonical",
+      resources: [{ resource_id: "r-canonical", type: "document", title: "完整资源", content: "完整内容" }],
+    };
+
+    dispatchStreamEvent(jobTerminalEvent([
+      { resource_id: "r-partial", resource_type: "document", title: "部分资源" },
+    ]));
+
+    expect((mockStoreState.latestPackage as { package_id: string }).package_id).toBe("pkg-canonical");
+  });
+
+  it("rejects malformed partial artifacts and schedules durable recovery", async () => {
+    const event = jobTerminalEvent([{ resource_id: "", title: "坏资源" }]);
+    event.metadata = {
+      ...event.metadata,
+      contract: {
+        ...(event.metadata.contract as Record<string, unknown>),
+        package_id: "pkg-partial",
+      },
+    };
+
+    dispatchStreamEvent(event, { userId: "authoritative-user" });
+
+    await vi.waitFor(() => expect(getResourcePackageDetail).toHaveBeenCalledWith(
+      "authoritative-user",
+      "pkg-partial",
+    ));
+    expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
   });
 
   it("does not route session A resource events into the active session B view", () => {

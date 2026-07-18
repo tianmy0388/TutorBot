@@ -12,7 +12,7 @@ function exerciseWithOptions(options: unknown[]) {
     title: "练习",
     content: "",
     format_specific: {
-      questions: [{ id: "q-1", options }],
+      questions: [{ id: "q-1", type: "single_choice", question: "题目", options }],
     },
     difficulty: 2,
     estimated_minutes: 5,
@@ -53,6 +53,55 @@ describe("resource stream validation", () => {
       isUsableResourcePackage({
         package_id: "pkg-1",
         resources: [exerciseWithOptions(["[TRUNCATED]"])],
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects malformed exercise question containers and question records", () => {
+    const malformedResources = [
+      { ...exerciseWithOptions([]), format_specific: {} },
+      { ...exerciseWithOptions([]), format_specific: { questions: [null] } },
+      {
+        ...exerciseWithOptions([]),
+        format_specific: { questions: [{ id: "", type: "single_choice", question: "题目" }] },
+      },
+      {
+        ...exerciseWithOptions([]),
+        format_specific: { questions: [{ id: "q-1", type: "", question: "题目" }] },
+      },
+      {
+        ...exerciseWithOptions([]),
+        format_specific: { questions: [{ id: "q-1", type: "single_choice", question: "" }] },
+      },
+    ];
+
+    for (const resource of malformedResources) {
+      expect(isUsableStreamedResource(resource)).toBe(false);
+    }
+  });
+
+  it("rejects non-array exercise options and nested invalid packages", () => {
+    for (const options of [null, "A", { label: "A", text: "选项" }]) {
+      expect(
+        isUsableStreamedResource({
+          ...exerciseWithOptions([]),
+          format_specific: {
+            questions: [{ id: "q-1", type: "single_choice", question: "题目", options }],
+          },
+        }),
+      ).toBe(false);
+    }
+    expect(
+      isUsableResourcePackage({
+        package_id: "pkg-invalid-nested",
+        resources: [
+          {
+            ...exerciseWithOptions([]),
+            format_specific: {
+              questions: [{ id: "q-1", type: "single_choice", question: "题目", options: null }],
+            },
+          },
+        ],
       }),
     ).toBe(false);
   });

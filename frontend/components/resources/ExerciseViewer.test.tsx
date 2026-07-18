@@ -94,8 +94,8 @@ describe("ExerciseViewer code integration", () => {
         question: "选择答案",
         answer: "A",
         options: [
-          { label: "", text: "第一个" },
-          { label: "", text: "第二个" },
+          { label: "A:0", text: "第一个" },
+          { label: "A", text: "第二个" },
           { label: "A", text: "" },
         ],
         explanation: "",
