@@ -211,5 +211,53 @@ assert matplotlib.rcParams['axes.unicode_minus'] is False
     assert result[0] == "success", result[2]
 
 
+def test_no_show_final_capture_failure_is_typed_and_cannot_report_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = Settings(env="test", data_dir=tmp_path, execution_python=sys.executable)
+    result = _run_plot(
+        """
+import matplotlib.pyplot as plt
+figure = plt.figure()
+def fail_save(*args, **kwargs):
+    raise PermissionError('private save path must not leak')
+figure.savefig = fail_save
+""",
+        settings=settings,
+        monkeypatch=monkeypatch,
+    )
+
+    assert result[0] == "failed"
+    assert result[3] == "MATPLOTLIB_CAPTURE_FAILED"
+    assert "[matplotlib capture failed]" in result[2]
+    assert "private save path" not in result[2]
+
+
+def test_user_exception_remains_primary_when_final_capture_also_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = Settings(env="test", data_dir=tmp_path, execution_python=sys.executable)
+    result = _run_plot(
+        """
+import matplotlib.pyplot as plt
+figure = plt.figure()
+def fail_save(*args, **kwargs):
+    raise PermissionError('secondary private capture failure')
+figure.savefig = fail_save
+raise ValueError('original user failure')
+""",
+        settings=settings,
+        monkeypatch=monkeypatch,
+    )
+
+    assert result[0] == "failed"
+    assert result[3] == "CODE_EXECUTION_FAILED"
+    assert "original user failure" in result[2]
+    assert "secondary private capture failure" not in result[2]
+    assert "[matplotlib capture failed]" not in result[2]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))

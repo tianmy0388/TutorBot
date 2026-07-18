@@ -55,6 +55,7 @@ from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.runtime.workflow_graph import WorkflowGraph, WorkflowNode
+from tutor.services.config.settings import Settings
 from tutor.services.jobs.contracts import (
     ResourceArtifactNodeInput,
     ResourceArtifactNodeOutput,
@@ -132,6 +133,7 @@ class ResourceGenerationCapability(BaseCapability):
         anti_hallucination: AntiHallucinationAgent | None = None,
         ppt_generator: PPTGeneratorAgent | None = None,
         package_store: ResourcePackageStore | None = None,
+        settings: Settings | None = None,
     ) -> None:
         super().__init__()
         self.builder = builder
@@ -142,7 +144,8 @@ class ResourceGenerationCapability(BaseCapability):
         self.multimedia = multimedia or MultimediaAgent()
         self.exercise_generator = exercise_generator or ExerciseGeneratorAgent()
         self.manim_video = manim_video or ManimVideoAgent()
-        self.code_sandbox = code_sandbox or CodeSandboxAgent()
+        self.settings = settings
+        self.code_sandbox = code_sandbox or CodeSandboxAgent(settings=settings)
         self.quality_reviewer = quality_reviewer or QualityReviewerAgent()
         self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
         self.ppt_generator = ppt_generator or PPTGeneratorAgent()

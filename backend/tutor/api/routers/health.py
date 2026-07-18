@@ -32,6 +32,9 @@ async def health(request: Request) -> dict[str, Any]:
     )
     return {
         "status": "ok",
+        "readiness": (
+            "ready" if matplotlib_runtime["status"] == "ok" else "degraded"
+        ),
         "version": __version__,
         "python": sys.version.split()[0],
         "runtime": {
@@ -100,7 +103,13 @@ def _matplotlib_runtime_diagnostics(settings: Any) -> dict[str, Any]:
             return result
         line = (completed.stdout or "").strip().splitlines()[-1]
         payload = json.loads(line)
-        if Path(str(payload["cache_dir"])).resolve() != cache_dir:
+        result["version"] = str(payload["version"])
+        result["backend"] = str(payload["backend"])
+        if (
+            result["backend"].lower() != "agg"
+            or Path(str(payload["cache_dir"])).resolve() != cache_dir
+        ):
+            result["error_code"] = "MATPLOTLIB_RUNTIME_MISCONFIGURED"
             return result
         result.update(
             {

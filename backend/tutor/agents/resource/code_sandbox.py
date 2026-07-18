@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -55,7 +56,7 @@ from tutor.core.context import UnifiedContext
 from tutor.core.redaction import public_failure, redact_sensitive, redact_text
 from tutor.core.stream_bus import StreamBus
 from tutor.services.artifacts import to_artifact_key
-from tutor.services.config.settings import get_settings
+from tutor.services.config.settings import Settings, get_settings
 from tutor.services.resource_package.schema import (
     ArtifactRef,
     CodeResource,
@@ -91,6 +92,10 @@ class CodeSandboxAgent(BaseAgent):
     # routinely exceeds 2048 tokens, gets truncated mid-string,
     # and the salvage path returns a SyntaxError-filled block.
     default_max_tokens = 4096
+
+    def __init__(self, *, settings: Settings | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._settings = settings
 
     async def process(
         self,
@@ -174,7 +179,7 @@ class CodeSandboxAgent(BaseAgent):
             code = "\n".join(lines).strip()
 
         # Resolve the configured interpreter and timeout (2026-06-21 plan).
-        settings = get_settings()
+        settings = self._settings or get_settings()
         configured_timeout = (
             timeout_seconds
             if timeout_seconds is not None
@@ -284,7 +289,8 @@ class CodeSandboxAgent(BaseAgent):
         )
         if dependency_versions:
             vers = ", ".join(f"{k}={v}" for k, v in dependency_versions.items())
-            markdown += f"\n**运行环境**：{interpreter}（{vers}）\n"
+            interpreter_name = Path(interpreter).name or "python"
+            markdown += f"\n**运行环境**：{interpreter_name}（{vers}）\n"
         if stdout:
             markdown += f"\n## 运行输出\n\n```\n{stdout}\n```\n"
         if stderr:
@@ -296,6 +302,8 @@ class CodeSandboxAgent(BaseAgent):
                 "RUNTIME_DEPENDENCY_MISSING": "运行环境缺少依赖（pip install 后重试）",
                 "CODE_EXECUTION_FAILED": "代码执行失败（请检查代码）",
                 "CODE_RUN_TIMEOUT": "执行超时（请简化代码或拆分）",
+                "CODE_RUNTIME_PREPARATION_FAILED": "代码运行环境准备失败（请检查数据目录权限）",
+                "MATPLOTLIB_CAPTURE_FAILED": "Matplotlib 图片保存失败（请重试）",
             }.get(error_code, error_code)
             markdown += f"\n**错误类型**：{pretty}\n"
         if artifacts:
@@ -384,36 +392,43 @@ def _safe_run_python(
     - ``artifacts`` is the list of image / svg files written by the
       user code that we want the UI to render.
     """
-    code_runs_dir = settings.data_dir / getattr(settings, "code_run_subdir", "code_runs")
-    code_runs_dir.mkdir(parents=True, exist_ok=True)
-    # UUID names avoid same-millisecond collisions between concurrent
-    # jobs in the same backend process.
-    run_id = f"run_{uuid.uuid4().hex}"
-    scratch = code_runs_dir / run_id
-    scratch.mkdir(parents=True, exist_ok=False)
-
-    # Probe dependency versions in the *configured* interpreter. We
-    # do this in a separate short-lived process so a user-code
-    # ImportError doesn't bleed into the version snapshot.
-    # Matplotlib's font/config cache is application data, not a run
-    # artifact. Reusing one stable writable directory avoids rebuilding
-    # the font cache on every execution and is safe for independent run
-    # directories. The dependency probe receives this exact environment
-    # too, so it cannot accidentally warm the user's home cache instead.
-    matplotlib_cache = (settings.data_dir / "cache" / "matplotlib").resolve()
-    matplotlib_cache.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["MPLBACKEND"] = "Agg"
-    env["MPLCONFIGDIR"] = str(matplotlib_cache)
-    env["PYTHONIOENCODING"] = "utf-8"
-    deps = _cached_dependency_versions(
-        interpreter,
-        matplotlib_cache=matplotlib_cache,
-        env=env,
-    )
+    started = time.monotonic()
+    deps: dict[str, str] = {}
+    try:
+        code_runs_dir = settings.data_dir / getattr(
+            settings, "code_run_subdir", "code_runs"
+        )
+        code_runs_dir.mkdir(parents=True, exist_ok=True)
+        # Matplotlib's font/config cache is application data, not a run
+        # artifact. Prepare it before the scratch directory so a cache
+        # failure cannot leave an orphaned run directory.
+        matplotlib_cache = (settings.data_dir / "cache" / "matplotlib").resolve()
+        matplotlib_cache.mkdir(parents=True, exist_ok=True)
+        # UUID names avoid same-millisecond collisions between concurrent
+        # jobs in the same backend process.
+        scratch = code_runs_dir / f"run_{uuid.uuid4().hex}"
+        scratch.mkdir(parents=True, exist_ok=False)
+        env = os.environ.copy()
+        env["MPLBACKEND"] = "Agg"
+        env["MPLCONFIGDIR"] = str(matplotlib_cache)
+        env["PYTHONIOENCODING"] = "utf-8"
+        deps = _cached_dependency_versions(
+            interpreter,
+            matplotlib_cache=matplotlib_cache,
+            env=env,
+        )
+    except Exception:  # noqa: BLE001 - preparation failures are a typed result
+        return (
+            "failed",
+            "",
+            "[code runtime preparation failed]",
+            "CODE_RUNTIME_PREPARATION_FAILED",
+            {},
+            [],
+            time.monotonic() - started,
+        )
     # Run with cwd=scratch so any relative file writes land in our
     # artifact directory.
-    started = time.monotonic()
     try:
         proc = subprocess.run(
             [interpreter, "-c", _wrap_user_code(code, scratch)],
@@ -498,7 +513,9 @@ def _safe_run_python(
     # Classify the failure: ModuleNotFoundError / ImportError on
     # the configured interpreter is a runtime-dep issue; everything
     # else is the LLM-generated code.
-    if any(hint in stderr_text for hint in _MISSING_MODULE_HINTS):
+    if "[matplotlib capture failed]" in stderr_text:
+        error_code = "MATPLOTLIB_CAPTURE_FAILED"
+    elif any(hint in stderr_text for hint in _MISSING_MODULE_HINTS):
         error_code = "RUNTIME_DEPENDENCY_MISSING"
     else:
         error_code = "CODE_EXECUTION_FAILED"
@@ -529,13 +546,17 @@ def _cached_dependency_versions(
     env: dict[str, str],
 ) -> dict[str, str]:
     """Probe once per interpreter/cache pair and serialize first warm-up."""
-    key = (str(Path(interpreter).resolve()), str(matplotlib_cache))
+    resolved_interpreter = shutil.which(interpreter) or str(
+        Path(interpreter).expanduser().resolve()
+    )
+    key = (resolved_interpreter, str(matplotlib_cache))
     with _DEPENDENCY_PROBE_LOCK:
         cached = _DEPENDENCY_PROBE_CACHE.get(key)
         if cached is not None:
             return dict(cached)
         versions = _probe_dependency_versions(interpreter, env=env)
-        _DEPENDENCY_PROBE_CACHE[key] = dict(versions)
+        if "probe_error" not in versions:
+            _DEPENDENCY_PROBE_CACHE[key] = dict(versions)
         return versions
 
 
@@ -563,15 +584,15 @@ def _probe_dependency_versions(
         "    out['matplotlib'] = matplotlib.__version__\n"
         "except ImportError:\n"
         "    out['matplotlib'] = 'not_installed'\n"
-        "except Exception as e:\n"
-        "    out['matplotlib'] = f'error:{e}'\n"
+        "except Exception:\n"
+        "    out['matplotlib'] = 'error'\n"
         "try:\n"
         "    import numpy\n"
         "    out['numpy'] = numpy.__version__\n"
         "except ImportError:\n"
         "    out['numpy'] = 'not_installed'\n"
-        "except Exception as e:\n"
-        "    out['numpy'] = f'error:{e}'\n"
+        "except Exception:\n"
+        "    out['numpy'] = 'error'\n"
         "print(json.dumps(out))\n"
     )
     try:
@@ -587,25 +608,30 @@ def _probe_dependency_versions(
     except FileNotFoundError:
         return {
             "python": "unknown",
-            "probe_error": f"interpreter not found: {interpreter!r}",
+            "probe_error": "DEPENDENCY_INTERPRETER_UNAVAILABLE",
         }
     except Exception:  # noqa: BLE001
         return {"python": "unknown", "probe_error": "DEPENDENCY_PROBE_FAILED"}
     if proc.returncode != 0:
         return {
             "python": "unknown",
-            "probe_error": f"returncode={proc.returncode}",
-            "probe_stderr": redact_text((proc.stderr or "")[:500]),
+            "probe_error": "DEPENDENCY_PROBE_FAILED",
         }
     last = (proc.stdout or "").strip().splitlines()[-1] if proc.stdout else ""
     try:
         import json as _json
-        return {k: str(v) for k, v in _json.loads(last).items()}
+
+        parsed = {k: str(v) for k, v in _json.loads(last).items()}
+        if any(value == "error" for value in parsed.values()):
+            return {
+                "python": parsed.get("python", "unknown"),
+                "probe_error": "DEPENDENCY_PROBE_FAILED",
+            }
+        return parsed
     except Exception:
         return {
             "python": "unknown",
-            "probe_error": "stdout parse failed",
-            "probe_stdout": redact_text((proc.stdout or "")[:200]),
+            "probe_error": "DEPENDENCY_PROBE_FAILED",
         }
 
 
@@ -667,7 +693,7 @@ def _wrap_user_code(code: str, scratch: Path) -> str:
         "import matplotlib.pyplot as _tutor_plt\n"
         "_tutor_captured_figures = _weakref.WeakSet()\n"
         "_tutor_figure_index = 0\n"
-        "def _tutor_capture_figures(*_args, **_kwargs):\n"
+        "def _tutor_capture_figures():\n"
         "    global _tutor_figure_index\n"
         "    for _number in list(_tutor_plt.get_fignums()):\n"
         "        _figure = _tutor_plt.figure(_number)\n"
@@ -680,16 +706,26 @@ def _wrap_user_code(code: str, scratch: Path) -> str:
         "        )\n"
         "        _tutor_figure_index = _next_index\n"
         "        _tutor_captured_figures.add(_figure)\n"
-        "_tutor_plt.show = _tutor_capture_figures\n"
+        "def _tutor_show(*_args, **_kwargs):\n"
+        "    try:\n"
+        "        _tutor_capture_figures()\n"
+        "    except Exception:\n"
+        "        _sys.stderr.write('[matplotlib capture failed]\\n')\n"
+        "        raise RuntimeError('MATPLOTLIB_CAPTURE_FAILED') from None\n"
+        "_tutor_plt.show = _tutor_show\n"
         "_user_globals = {}\n"
+        "_tutor_user_failed = False\n"
         "try:\n"
         "    exec(compile(" + repr(code) + ", '<sandbox>', 'exec'), _user_globals)\n"
         "except BaseException as _user_exc:\n"
+        "    _tutor_user_failed = True\n"
         "    _sys.stderr.write(f'[user code raised: {type(_user_exc).__name__}: {_user_exc}]\\n')\n"
         "    raise\n"
         "finally:\n"
         "    try:\n"
         "        _tutor_capture_figures()\n"
         "    except Exception:\n"
-        "        pass\n"
+        "        if not _tutor_user_failed:\n"
+        "            _sys.stderr.write('[matplotlib capture failed]\\n')\n"
+        "            raise RuntimeError('MATPLOTLIB_CAPTURE_FAILED') from None\n"
     )

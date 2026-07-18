@@ -53,9 +53,10 @@ class VideoRenderFollowUpCapability(BaseCapability):
         tags=["internal", "follow_up", "video"],
     )
 
-    def __init__(self, package_store=None) -> None:
+    def __init__(self, package_store=None, settings=None) -> None:
         super().__init__()
         self._package_store = package_store
+        self._settings = settings
 
     async def run(
         self,
@@ -94,7 +95,10 @@ class VideoRenderFollowUpCapability(BaseCapability):
         if resource is None:
             raise RuntimeError("Video resource is unavailable")
 
-        capability = ResourceGenerationCapability(package_store=package_store)
+        capability = ResourceGenerationCapability(
+            package_store=package_store,
+            settings=self._settings,
+        )
         await capability._render_one_video(
             resource,
             package,

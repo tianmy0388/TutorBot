@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
         ResourceGenerationCapability(
             builder=profile_builder,
             package_store=resource_store,
+            settings=settings,
         ),
         PathPlanningCapability(
             profile_store=workflow.profile_store,
@@ -111,7 +112,10 @@ async def lifespan(app: FastAPI):
                 kg_service=kg_service,
             )
         if task_kind == "video_render":
-            return VideoRenderFollowUpCapability(package_store=resource_store)
+            return VideoRenderFollowUpCapability(
+                package_store=resource_store,
+                settings=settings,
+            )
         return build_follow_up_capability(task_kind)
 
     runner = JobRunner(
