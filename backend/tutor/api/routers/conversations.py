@@ -29,6 +29,7 @@ from tutor.services.conversations import (
     Message,
     RecoveryWarning,
     UpdateConversationRequest,
+    UpdateConversationSettingsRequest,
     get_conversation_store,
 )
 from tutor.services.identity import identity_policy_for
@@ -317,6 +318,29 @@ async def update_conversation(
     if existing.user_id != user_id:
         raise HTTPException(status_code=403, detail="not your conversation")
     updated = await store.update(session_id, title=req.title)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return updated.model_dump(mode="json")
+
+
+@router.patch("/conversations/{session_id}/settings")
+async def update_conversation_settings(
+    session_id: str,
+    req: UpdateConversationSettingsRequest,
+    request: Request,
+    user_id: str = Query(..., min_length=1, max_length=64),
+) -> dict[str, Any]:
+    user_id = identity_policy_for(request).resolve(user_id)
+    store = get_conversation_store()
+    existing = await store.get(session_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    if existing.user_id != user_id:
+        raise HTTPException(status_code=403, detail="not your conversation")
+    updated = await store.update_web_search_enabled(
+        session_id,
+        enabled=req.web_search_enabled,
+    )
     if updated is None:
         raise HTTPException(status_code=404, detail="conversation not found")
     return updated.model_dump(mode="json")

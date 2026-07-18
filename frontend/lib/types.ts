@@ -425,6 +425,8 @@ export interface JobSummary {
   status: JobStatus;
   message_preview: string;
   language: string;
+  web_search_enabled?: boolean;
+  web_search_requested?: boolean;
   event_count: number;
   created_at: string;
   started_at: string | null;

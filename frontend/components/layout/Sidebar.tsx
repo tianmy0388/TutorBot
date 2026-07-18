@@ -38,7 +38,6 @@ import { useKG } from "@/hooks/useKG";
 import { cn } from "@/lib/utils";
 import { Logo } from "@/components/brand/Logo";
 import {
-  createConversation,
   deleteConversation,
   listConversations,
   renameConversation,
@@ -163,11 +162,13 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
     if (!userId || convBusy) return;
     setConvBusy(true);
     try {
-      const conv = await createConversation(userId, {});
-      setSessionId(conv.session_id);
+      const draftId =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `s_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      setSessionId(draftId);
       resetSession();
       onNewSession();
-      await refreshConvs();
     } catch (e: any) {
       setConvError(e?.message ?? String(e));
     } finally {

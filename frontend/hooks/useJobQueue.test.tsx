@@ -8,11 +8,35 @@ const apiMocks = vi.hoisted(() => ({
   cancelJob: vi.fn(),
   deleteJob: vi.fn(),
 }));
+const wsMocks = vi.hoisted(() => ({
+  startJobMessage: vi.fn((input) => ({ type: "submit_job", ...input })),
+}));
 
 vi.mock("@/lib/api", () => apiMocks);
 vi.mock("@/lib/ws", () => ({
-  WsClient: class {},
-  startJobMessage: vi.fn(),
+  WsClient: class {
+    options: any;
+    constructor(options: any) {
+      this.options = options;
+    }
+    connect() {
+      this.options.onOpen();
+    }
+    send(message: any) {
+      if (message.type === "submit_job") {
+        this.options.onEvent({
+          type: "job_submitted",
+          job_id: "job-web-search",
+          capability: message.capability || "tutoring",
+          status: "pending",
+          created_at: "2026-07-18T00:00:00Z",
+          session_id: message.sessionId,
+        });
+      }
+    }
+    close() {}
+  },
+  startJobMessage: wsMocks.startJobMessage,
 }));
 
 import { VideoViewer } from "@/components/resources/VideoViewer";
@@ -91,6 +115,26 @@ afterEach(() => {
 });
 
 describe("useJobQueue durable child refresh", () => {
+  it("submits the per-turn web-search choice only as observable metadata", async () => {
+    apiMocks.listJobs.mockResolvedValue({ items: [], total: 0 });
+    useTutorStore.setState({
+      sessionId: "current-page",
+      webSearchEnabled: true,
+    });
+    const { result } = renderHook(() => useJobQueue("local-user"));
+    await act(flushPromises);
+
+    await act(async () => {
+      await result.current.submit("current question", "tutoring");
+    });
+
+    expect(wsMocks.startJobMessage).toHaveBeenCalledTimes(1);
+    const envelope = wsMocks.startJobMessage.mock.calls[0][0];
+    expect(envelope.sessionId).toBe("current-page");
+    expect(envelope.metadata.web_search_requested).toBe(true);
+    expect(envelope).not.toHaveProperty("web_search_enabled");
+  });
+
   it.each([
     ["failed" as const, "渲染失败"],
     ["succeeded" as const, "渲染完成"],

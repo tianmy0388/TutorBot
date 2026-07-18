@@ -161,6 +161,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
                   session_id: currentSessionId,
                   retrieval_scope: scopeWire,
                   rag_enabled: ragEnabled,
+                  web_search_requested: Boolean(state.webSearchEnabled),
                 },
               }),
             );
@@ -196,6 +197,12 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
                   message_preview:
                     text.length > 60 ? text.slice(0, 60) + "…" : text,
                   language: useTutorStore.getState().language || "zh",
+                  web_search_enabled: Boolean(
+                    useTutorStore.getState().webSearchEnabled,
+                  ),
+                  web_search_requested: Boolean(
+                    useTutorStore.getState().webSearchEnabled,
+                  ),
                   event_count: 0,
                   created_at: result.created_at,
                   started_at: null,

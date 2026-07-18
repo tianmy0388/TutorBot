@@ -33,7 +33,7 @@ import threading
 import traceback
 import uuid
 from collections import defaultdict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -111,10 +111,12 @@ class JobRunner:
         job_store: JobStore | None = None,
         capability_registry: CapabilityRegistry | None = None,
         follow_up_builder: Callable[[str], Any] | None = None,
+        conversation_lookup: Callable[[str], Awaitable[Any]] | None = None,
     ) -> None:
         self.store = job_store or get_job_store()
         self.capabilities = capability_registry or get_capability_registry()
         self._follow_up_builder = follow_up_builder
+        self._conversation_lookup = conversation_lookup
         self._runner_id = uuid.uuid4().hex
 
         # job_id → asyncio.Task executing _run()
@@ -136,7 +138,12 @@ class JobRunner:
     # Submit / cancel
     # ------------------------------------------------------------------
 
-    async def submit(self, req: JobSubmit) -> Job:
+    async def submit(
+        self,
+        req: JobSubmit,
+        *,
+        trusted_web_search_snapshot: bool | None = None,
+    ) -> Job:
         """Accept a job, persist as PENDING, schedule execution."""
         # Explicit validated hints stay explicit. Only submissions without a
         # capability cross the single deterministic intent-routing boundary.
@@ -146,13 +153,30 @@ class JobRunner:
         if self.capabilities.get(cap_name) is None:
             raise ValueError(f"Unknown capability: {cap_name!r}")
 
+        web_search_enabled = bool(trusted_web_search_snapshot)
+        if trusted_web_search_snapshot is None and req.session_id:
+            if self._conversation_lookup is not None:
+                conversation = await self._conversation_lookup(req.session_id)
+            else:
+                from tutor.services.conversations import get_conversation_store
+
+                conversation = await get_conversation_store().get(req.session_id)
+            if conversation is not None and conversation.user_id == (req.user_id or "anonymous"):
+                web_search_enabled = bool(conversation.web_search_enabled)
+
+        metadata = dict(req.metadata or {})
+        # These client-observable aliases are projections only. Server-side
+        # conversation state always overwrites any envelope metadata value.
+        metadata["web_search_enabled"] = web_search_enabled
+        metadata["web_search_requested"] = web_search_enabled
         job = Job(
             user_id=req.user_id or "anonymous",
             session_id=req.session_id or uuid.uuid4().hex,
             capability=cap_name,
             message=req.message,
             language=req.language or "zh",
-            metadata=dict(req.metadata or {}),
+            metadata=metadata,
+            web_search_enabled=web_search_enabled,
             status=JobStatus.PENDING,
         )
         await self.store.save(job)
@@ -430,6 +454,7 @@ class JobRunner:
             user_message=job.message,
             language=job.language,
             capability=job.capability,
+            web_search_enabled=job.web_search_enabled,
             metadata=context_metadata,
         )
         bus: StreamBus = context.stream_bus

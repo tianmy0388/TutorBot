@@ -25,6 +25,7 @@ import { Send, Sparkles, MessageCircle, BarChart3, Compass, X, Database, Chevron
 import { useTutorStore } from "@/lib/store";
 import { useJobQueue } from "@/hooks/useJobQueue";
 import { cn } from "@/lib/utils";
+import { WebSearchToggle } from "./WebSearchToggle";
 import {
   appendConversationMessage,
   createConversation,
@@ -52,6 +53,23 @@ export function ChatComposer() {
   const setCapability = useTutorStore((s) => s.setCurrentCapability);
   const addMessage = useTutorStore((s) => s.addMessage);
   const queue = useJobQueue(userId);
+  const webSearchEnabled = useTutorStore((s) => s.webSearchEnabled);
+  const webSearchMutationPending = useTutorStore(
+    (s) => s.webSearchMutationPending,
+  );
+  const webSearchError = useTutorStore((s) => s.webSearchError);
+  const conversationMaterialized = useTutorStore(
+    (s) => s.conversationMaterialized,
+  );
+  const setDraftWebSearchEnabled = useTutorStore(
+    (s) => s.setDraftWebSearchEnabled,
+  );
+  const setConversationMaterialized = useTutorStore(
+    (s) => s.setConversationMaterialized,
+  );
+  const persistWebSearch = useTutorStore(
+    (s) => s.setConversationWebSearch,
+  );
 
   // 2026-06-21 plan (D10): RAG scope selector state.
   const ragEnabled = useTutorStore((s) => s.ragEnabled);
@@ -84,13 +102,19 @@ export function ChatComposer() {
   }, [text]);
 
   const submit = async () => {
-    if (!text.trim() || submitting) return;
+    if (!text.trim() || submitting || webSearchMutationPending) return;
     const msg = text.trim();
+    const requestedWebSearch = webSearchEnabled;
+    const wasDraft = !conversationMaterialized;
     setText("");
     setSubmitting(true);
 
     // Add user message to chat immediately
-    addMessage({ role: "user", content: msg });
+    addMessage({
+      role: "user",
+      content: msg,
+      metadata: { web_search_requested: requestedWebSearch },
+    });
 
     // 2026-06-21 plan: the first message in a brand-new (draft) session
     // must materialise the server-side conversation before we try to
@@ -99,9 +123,12 @@ export function ChatComposer() {
     // causes a row in the conversation history — that is the spec
     // behaviour for "no empty sessions in history".
     let activeSessionId = sessionId;
+    let materialized = conversationMaterialized;
     if (userId && activeSessionId) {
       try {
         await getConversation(userId, activeSessionId);
+        materialized = true;
+        setConversationMaterialized(true);
       } catch (e: any) {
         if (e?.status === 404) {
           // The sessionId is a draft — promote it to a real
@@ -114,12 +141,32 @@ export function ChatComposer() {
           });
           activeSessionId = conv.session_id;
           useTutorStore.getState().setSessionId(conv.session_id);
+          materialized = true;
+          setConversationMaterialized(true);
         } else {
           // Network / 5xx — fall through; the append below is also
           // best-effort so a transient backend hiccup does not block
           // submission.
           console.warn("getConversation pre-flight failed", e);
         }
+      }
+    }
+
+    // A draft's opt-in exists only in the active UI until the first send.
+    // Materialize the row above, then persist the choice before the durable
+    // job boundary. A failed opt-in must never silently submit as server-off.
+    if (userId && activeSessionId && wasDraft && requestedWebSearch) {
+      const persisted = materialized
+        ? await persistWebSearch(userId, activeSessionId, true)
+        : false;
+      if (!persisted) {
+        addMessage({
+          role: "system",
+          content: "联网搜索设置保存失败，本条消息尚未提交，请重试。",
+          metadata: { source: "chat_composer", web_search_requested: true },
+        });
+        setSubmitting(false);
+        return;
       }
     }
 
@@ -131,7 +178,10 @@ export function ChatComposer() {
       void appendConversationMessage(userId, activeSessionId, {
         role: "user",
         content: msg,
-        metadata: { source: "chat_composer" },
+        metadata: {
+          source: "chat_composer",
+          web_search_requested: requestedWebSearch,
+        },
       }).catch((e) => {
         // Swallow — UI already has the message; the persist is a
         // best-effort background write.
@@ -318,6 +368,21 @@ export function ChatComposer() {
           </div>
         </div>
 
+        <div className="mb-2 pl-1 border-l border-fg/10">
+          <WebSearchToggle
+            checked={webSearchEnabled}
+            disabled={submitting || webSearchMutationPending}
+            error={webSearchError}
+            onChange={(enabled) => {
+              if (conversationMaterialized && userId && sessionId) {
+                void persistWebSearch(userId, sessionId, enabled);
+              } else {
+                setDraftWebSearchEnabled(enabled);
+              }
+            }}
+          />
+        </div>
+
         {/* Capability chips */}
         <div className="flex gap-2 mb-2 flex-wrap items-center">
           {CAPABILITY_OPTIONS.map((c) => {
@@ -383,10 +448,11 @@ export function ChatComposer() {
 
           <button
             onClick={submit}
-            disabled={!text.trim() || submitting}
+            disabled={!text.trim() || submitting || webSearchMutationPending}
             className={cn(
               "btn-primary h-12 px-5",
-              (!text.trim() || submitting) && "opacity-50 cursor-not-allowed",
+              (!text.trim() || submitting || webSearchMutationPending) &&
+                "opacity-50 cursor-not-allowed",
             )}
             title="发送 (Enter) — 异步执行,不阻塞 UI"
           >

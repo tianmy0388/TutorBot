@@ -94,6 +94,7 @@ from tutor.services.resource_package.store import (
     ResourcePackageStore,
     get_resource_package_store,
 )
+from tutor.services.search import SearchExecutor, SearchOutcome
 
 
 class ResourceGenerationCapability(BaseCapability):
@@ -106,6 +107,7 @@ class ResourceGenerationCapability(BaseCapability):
             "intent_understanding",
             "profile_loading",
             "knowledge_graph_query",
+            "web_search",
             "resource_planning",
             "content_and_pedagogy",
             "parallel_resource_generation",
@@ -136,6 +138,7 @@ class ResourceGenerationCapability(BaseCapability):
         ppt_generator: PPTGeneratorAgent | None = None,
         package_store: ResourcePackageStore | None = None,
         settings: Settings | None = None,
+        search_executor: SearchExecutor | None = None,
     ) -> None:
         super().__init__()
         self.builder = builder
@@ -152,6 +155,7 @@ class ResourceGenerationCapability(BaseCapability):
         self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
         self.ppt_generator = ppt_generator or PPTGeneratorAgent()
         self.package_store = package_store
+        self.search_executor = search_executor
 
     @property
     def _builder(self) -> ProfileBuilder:
@@ -164,6 +168,12 @@ class ResourceGenerationCapability(BaseCapability):
         if self.package_store is None:
             self.package_store = get_resource_package_store()
         return self.package_store
+
+    @property
+    def _search(self) -> SearchExecutor:
+        if self.search_executor is None:
+            self.search_executor = SearchExecutor()
+        return self.search_executor
 
     # ------------------------------------------------------------------
     # Entry point
@@ -266,6 +276,34 @@ class ResourceGenerationCapability(BaseCapability):
         ) -> ResourceSourceNodeOutput:
             profile_output = inputs.profile_snapshot
             intent = self._intent_from_contract(profile_output.intent)
+            web_outcome = SearchOutcome()
+            async with stream.stage("web_search", source="resource_capability"):
+                try:
+                    web_outcome = await self._search.execute(
+                        intent.topic,
+                        conversation_enabled=context.web_search_enabled,
+                    )
+                except Exception:  # noqa: BLE001 - project only stable details
+                    web_outcome = SearchOutcome(
+                        unavailable=True,
+                        degradation_code="WEB_SEARCH_UNAVAILABLE",
+                    )
+                if web_outcome.unavailable:
+                    await report_degraded(
+                        stream,
+                        code="WEB_SEARCH_UNAVAILABLE",
+                        summary="联网搜索暂不可用，将使用知识库和模型知识继续生成",
+                        source="resource_capability",
+                        stage="web_search",
+                    )
+            web_sources = [item.to_dict() for item in web_outcome.sources]
+            web_snippets = [
+                f"[Web: {item.title}]({item.url})\n{item.excerpt}"
+                for item in web_outcome.sources
+            ]
+            context.metadata["search_used"] = web_outcome.search_used
+            context.metadata["web_search_sources"] = web_sources
+            context.metadata["web_search_context"] = "\n\n".join(web_snippets)
             kg_summary = await self._load_kg_summary(context, stream)
             planned_types = self._plan_resources(
                 intent=intent,
@@ -293,6 +331,7 @@ class ResourceGenerationCapability(BaseCapability):
                         stream=stream,
                         topic=intent.topic,
                         profile=dict(profile_output.profile_snapshot),
+                        rag_snippets=web_snippets,
                     )
                 else:
                     await stream.observation(
@@ -844,6 +883,8 @@ class ResourceGenerationCapability(BaseCapability):
         quality = safety_output.quality
         source = quality.pedagogy.source
         intent = self._intent_from_contract(source.profile.intent)
+        web_sources = list(context.metadata.get("web_search_sources") or [])
+        search_used = bool(context.metadata.get("search_used"))
         package = ResourcePackage(
             topic=intent.topic,
             resources=list(safety_output.resources),
@@ -871,6 +912,8 @@ class ResourceGenerationCapability(BaseCapability):
                 "filtered_failed": list(quality.filtered_failed),
                 "filtered_reviews": list(quality.filtered_reviews),
                 "filtered_safety": list(safety_output.filtered_safety),
+                "search_used": search_used,
+                "web_search_sources": web_sources,
             },
         )
         package.associate_originating_job(context.job_id)
@@ -879,6 +922,8 @@ class ResourceGenerationCapability(BaseCapability):
             package.metadata["session_id"] = session_id
         for resource in package.resources:
             resource.metadata.setdefault("package_id", package.package_id)
+            resource.metadata["search_used"] = search_used
+            resource.metadata["web_search_sources"] = web_sources
             if session_id:
                 resource.metadata.setdefault("session_id", session_id)
             self._canonicalize_resource_artifacts(resource)
@@ -980,6 +1025,8 @@ class ResourceGenerationCapability(BaseCapability):
                 ],
                 "kg_summary": dict(source.kg_summary),
                 "next_step": "open_resource_cards",
+                "search_used": search_used,
+                "sources": web_sources,
             },
             artifacts=tuple(artifact_refs),
             follow_up_tasks=follow_up_tasks,

@@ -137,6 +137,22 @@ describe("video render retry", () => {
   });
 });
 
+describe("conversation web-search settings", () => {
+  it("PATCHes the narrow typed settings endpoint", async () => {
+    const { setConversationWebSearch } = await import("./api");
+
+    await setConversationWebSearch("local user", "session/1", true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      "/api/v1/conversations/session%2F1/settings?user_id=local%20user",
+    );
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({ web_search_enabled: true });
+  });
+});
+
 describe("conversation recovery hydration", () => {
   it("hydrates all recovery state atomically from one aggregate request", async () => {
     const aggregate = {
@@ -146,6 +162,7 @@ describe("conversation recovery hydration", () => {
         title: "Recovered",
         message_count: 1,
         last_message_preview: "hello",
+        web_search_enabled: true,
         created_at: "2026-07-17T00:00:00Z",
         updated_at: "2026-07-17T00:00:00Z",
         messages: [
@@ -230,6 +247,7 @@ describe("conversation recovery hydration", () => {
     );
     const state = useTutorStore.getState();
     expect(state.sessionId).toBe("session-recovery");
+    expect(state.webSearchEnabled).toBe(true);
     expect(state.messages.map((message) => message.content)).toEqual(["hello"]);
     expect(state.latestPackage?.package_id).toBe("package-2");
     expect(state.profileSummary).toEqual({ user_id: "local-user", version: 3 });

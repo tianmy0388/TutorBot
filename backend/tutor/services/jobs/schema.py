@@ -91,6 +91,7 @@ class Job(BaseModel):
     message: str = ""
     language: str = "zh"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    web_search_enabled: bool = False
 
     # Lifecycle
     status: JobStatus = JobStatus.PENDING
@@ -125,6 +126,8 @@ class Job(BaseModel):
             "status": self.status.value,
             "message_preview": (self.message[:60] + "…") if len(self.message) > 60 else self.message,
             "language": self.language,
+            "web_search_enabled": self.web_search_enabled,
+            "web_search_requested": self.web_search_enabled,
             "event_count": self.event_count,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,

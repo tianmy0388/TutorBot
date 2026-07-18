@@ -10,8 +10,7 @@
  *
  * Scope of this first cut:
  *   - One-shot list on mount + after each mutation (no polling).
- *   - New conversation creates an empty session on the server and
- *     switches the chat over to it.
+ *   - New conversation stays a local draft until the first message.
  *   - Switch loads the conversation's messages into the chat store
  *     so the user sees their previous turns.
  *   - Delete cascades server-side; the local session clears.
@@ -24,7 +23,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  createConversation,
   deleteConversation,
   listConversations,
   renameConversation,
@@ -68,10 +66,12 @@ export function ConversationSidebar() {
     if (!userId || busy) return;
     setBusy(true);
     try {
-      const conv = await createConversation(userId, {});
-      setSessionId(conv.session_id);
+      const draftId =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `s_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      setSessionId(draftId);
       resetSession();
-      await refresh();
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {

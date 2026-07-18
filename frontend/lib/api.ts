@@ -512,6 +512,7 @@ export interface ConversationSummary {
   title: string;
   message_count: number;
   last_message_preview: string;
+  web_search_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -611,6 +612,19 @@ export const renameConversation = (
     {
       method: "PATCH",
       body: JSON.stringify({ title }),
+    },
+  );
+
+export const setConversationWebSearch = (
+  userId: string,
+  sessionId: string,
+  enabled: boolean,
+) =>
+  request<ConversationSummary>(
+    `/conversations/${encodeURIComponent(sessionId)}/settings?user_id=${encodeURIComponent(userId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ web_search_enabled: enabled }),
     },
   );
 

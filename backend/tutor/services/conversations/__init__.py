@@ -10,6 +10,7 @@ from .schema import (
     Message,
     RecoveryWarning,
     UpdateConversationRequest,
+    UpdateConversationSettingsRequest,
 )
 from .store import (
     ConversationStore,
@@ -28,6 +29,7 @@ __all__ = [
     "Message",
     "RecoveryWarning",
     "UpdateConversationRequest",
+    "UpdateConversationSettingsRequest",
     "get_conversation_store",
     "reset_conversation_store",
 ]

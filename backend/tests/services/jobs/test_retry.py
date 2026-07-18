@@ -51,6 +51,7 @@ async def _seed_parent_job(
     assistant_message: str = "部分完成",
     row_status: SchemaJobStatus = SchemaJobStatus.PARTIAL,
     session_id: str | None = None,
+    web_search_enabled: bool = False,
 ) -> str:
     """Insert a job row directly, bypassing the runner's background task.
 
@@ -80,9 +81,38 @@ async def _seed_parent_job(
         started_at=now,
         finished_at=now,
         result=contract.model_dump(mode="json"),
+        web_search_enabled=web_search_enabled,
     )
     await store.save(job)
     return job_id
+
+
+@pytest.mark.asyncio
+async def test_rest_retry_inherits_parent_web_search_snapshot(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
+    async with _client() as client:
+        store = get_job_store()
+        await store.init()
+        parent_id = await _seed_parent_job(
+            store,
+            user_id="u1",
+            capability="resource_generation",
+            metadata={"selected_resource_types": ["video"]},
+            contract_status="partial",
+            artifacts=[{"resource_type": "video", "status": "failed"}],
+            session_id="missing-conversation-row",
+            web_search_enabled=True,
+        )
+
+        response = await client.post(
+            f"/api/v1/jobs/u1/{parent_id}/retry",
+            json={"resource_types": ["video"]},
+        )
+
+        assert response.status_code == 200, response.text
+        child = await store.get(response.json()["job_id"])
+        assert child is not None
+        assert child.web_search_enabled is True
 
 
 @pytest.mark.asyncio

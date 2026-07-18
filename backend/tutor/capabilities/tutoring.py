@@ -68,6 +68,7 @@ from tutor.services.retrieval import (
     RetrievalService,
     get_retrieval_service,
 )
+from tutor.services.search import SearchExecutor, SearchOutcome
 from tutor.services.tutor.service import TutorService, get_tutor_service
 
 
@@ -80,11 +81,12 @@ class TutoringCapability(BaseCapability):
         stages=[
             "question_understanding",
             "context_retrieval",
+            "web_search",
             "answer_generation",
             "multi_modal_enrichment",
             "session_recording",
         ],
-        tools_used=["rag"],
+        tools_used=["rag", "web_search"],
         cli_aliases=["tutor", "ask", "question"],
         tags=["tutoring", "qa"],
     )
@@ -98,6 +100,7 @@ class TutoringCapability(BaseCapability):
         tutoring_agent: TutoringAgent | None = None,
         enrichment_agent: MultiModalEnrichmentAgent | None = None,
         retrieval_service: RetrievalService | None = None,
+        search_executor: SearchExecutor | None = None,
     ) -> None:
         super().__init__()
         self.builder = builder
@@ -107,6 +110,7 @@ class TutoringCapability(BaseCapability):
         self.tutoring_agent = tutoring_agent or TutoringAgent()
         self.enrichment_agent = enrichment_agent or MultiModalEnrichmentAgent()
         self.retrieval_service = retrieval_service  # set by tests
+        self.search_executor = search_executor
 
     @property
     def _builder(self) -> ProfileBuilder:
@@ -117,6 +121,12 @@ class TutoringCapability(BaseCapability):
     @property
     def _retrieval(self) -> RetrievalService:
         return self.retrieval_service or get_retrieval_service()
+
+    @property
+    def _search(self) -> SearchExecutor:
+        if self.search_executor is None:
+            self.search_executor = SearchExecutor()
+        return self.search_executor
 
     async def _emit_retrieval_observation(
         self, stream: StreamBus, rag: RAGContext | None
@@ -212,12 +222,14 @@ class TutoringCapability(BaseCapability):
         # prebuilt Markdown — that was the root cause of "RAG is
         # not actually using uploaded documents".
         rag_context: RAGContext | None = None
+        search_query = context.user_message
         scope = (context.metadata or {}).get("retrieval_scope") or "all"
         async with stream.stage("context_retrieval", source="tutoring_capability"):
             try:
                 enriched_q = context.user_message
                 if understanding and understanding.concepts:
                     enriched_q += "\n\n相关概念：" + "、".join(understanding.concepts)
+                search_query = enriched_q
                 rag_context = await self._retrieval.retrieve(
                     query=enriched_q,
                     scope=scope,
@@ -248,6 +260,39 @@ class TutoringCapability(BaseCapability):
             rag_context.status if rag_context else "error"
         )
 
+        web_outcome = SearchOutcome()
+        async with stream.stage("web_search", source="tutoring_capability"):
+            try:
+                web_outcome = await self._search.execute(
+                    search_query,
+                    conversation_enabled=context.web_search_enabled,
+                )
+            except Exception:  # noqa: BLE001 - report only stable public details
+                web_outcome = SearchOutcome(
+                    unavailable=True,
+                    degradation_code="WEB_SEARCH_UNAVAILABLE",
+                )
+            if web_outcome.unavailable:
+                await report_degraded(
+                    stream,
+                    code="WEB_SEARCH_UNAVAILABLE",
+                    summary="联网搜索暂不可用，将使用知识库和模型知识继续回答",
+                    source="tutoring_capability",
+                    stage="web_search",
+                )
+
+        web_sources = [source.to_dict() for source in web_outcome.sources]
+        web_text = "\n\n".join(
+            f"[Web: {source.title}]({source.url})\n{source.excerpt}"
+            for source in web_outcome.sources
+        )
+        answer_context = "\n\n--- Web evidence ---\n\n".join(
+            part for part in (rag_text, web_text) if part
+        )
+        context.metadata["search_used"] = web_outcome.search_used
+        context.metadata["web_search_sources"] = web_sources
+        context.metadata["answer_context"] = answer_context
+
         # ------------------------------------------------------------------
         # Stage 3: answer generation
         # ------------------------------------------------------------------
@@ -274,7 +319,7 @@ class TutoringCapability(BaseCapability):
                         context,
                         stream=stream,
                         understanding=understanding,
-                        rag_context=rag_context,
+                        rag_context=answer_context,
                         profile=profile_snapshot,
                     )
                     context.metadata["tutor_answer"] = answer
@@ -349,6 +394,8 @@ class TutoringCapability(BaseCapability):
                     if (understanding and understanding.follow_up_questions)
                     else "ask_another"
                 ),
+                "search_used": web_outcome.search_used,
+                "sources": web_sources,
             }
         return CapabilityResult(
             assistant_message=(answer.tldr if answer and answer.tldr else "答疑已完成"),

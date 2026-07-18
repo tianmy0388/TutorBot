@@ -26,6 +26,7 @@ from loguru import logger
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     Index,
@@ -178,6 +179,7 @@ class JobRow(_Base):
     message = Column(String, nullable=False, default="")
     language = Column(String(8), nullable=False, default="zh")
     metadata_json = Column(JSON, nullable=False, default=dict)
+    web_search_enabled = Column(Boolean, nullable=False, default=False)
 
     # Lifecycle
     error = Column(String, nullable=True)
@@ -266,6 +268,11 @@ class JobStore:
             if "claim_generation" not in columns:
                 await conn.exec_driver_sql(
                     "ALTER TABLE jobs ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0"
+                )
+            if "web_search_enabled" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE jobs ADD COLUMN "
+                    "web_search_enabled BOOLEAN NOT NULL DEFAULT 0"
                 )
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_jobs_parent_job_id "
@@ -403,6 +410,7 @@ class JobStore:
                 message=parent.message or "",
                 language=parent.language or "zh",
                 metadata=dict(payload),
+                web_search_enabled=bool(parent.web_search_enabled),
                 status=JobStatus.PENDING,
             )
             child_row = self._to_row(child)
@@ -955,6 +963,7 @@ class JobStore:
             message=job.message or "",
             language=job.language,
             metadata_json=dict(job.metadata or {}),
+            web_search_enabled=bool(job.web_search_enabled),
             error=job.error,
             error_log_ref=(
                 job.error_log_ref.model_dump(mode="json")
@@ -1017,6 +1026,7 @@ class JobStore:
             message=row.message or "",
             language=row.language or "zh",
             metadata=dict(row.metadata_json or {}),
+            web_search_enabled=bool(row.web_search_enabled),
             error=row.error,
             error_log_ref=(
                 ArtifactRef.model_validate(row.error_log_ref)

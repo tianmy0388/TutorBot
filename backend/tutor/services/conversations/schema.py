@@ -73,6 +73,7 @@ class Conversation(BaseModel):
     title: str = ""
     message_count: int = 0
     last_message_preview: str = ""
+    web_search_enabled: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -137,6 +138,14 @@ class UpdateConversationRequest(BaseModel):
     title: str | None = None
 
 
+class UpdateConversationSettingsRequest(BaseModel):
+    """Narrow per-conversation settings mutation contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    web_search_enabled: bool
+
+
 __all__ = [
     "AppendMessageRequest",
     "Conversation",
@@ -147,4 +156,5 @@ __all__ = [
     "Message",
     "RecoveryWarning",
     "UpdateConversationRequest",
+    "UpdateConversationSettingsRequest",
 ]

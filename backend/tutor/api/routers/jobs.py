@@ -205,7 +205,8 @@ async def retry_job(user_id: str, job_id: str, req: RetryRequest, request: Reque
             language=parent.language,
             session_id=parent.session_id,
             metadata=child_meta,
-        )
+        ),
+        trusted_web_search_snapshot=parent.web_search_enabled,
     )
     return {
         "job_id": child.job_id,

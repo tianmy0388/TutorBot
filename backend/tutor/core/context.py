@@ -62,6 +62,7 @@ class UnifiedContext:
     tool_choice: list[str] = field(default_factory=list)
     model_override: dict[str, Any] | None = None
     language: str = "zh"
+    web_search_enabled: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     stream: StreamBus | None = None
 
@@ -102,6 +103,7 @@ class UnifiedContext:
             "tool_choice": self.tool_choice,
             "model_override": self.model_override,
             "language": self.language,
+            "web_search_enabled": self.web_search_enabled,
             "metadata_keys": list(self.metadata.keys()),
         }
 

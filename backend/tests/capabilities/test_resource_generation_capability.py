@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -35,6 +36,7 @@ from tutor.services.resource_package.schema import (
     ResourceType,
     ReviewVerdict,
 )
+from tutor.services.search import SearchOutcome, SearchSource
 
 # ---------------------------------------------------------------------------
 # Smart mock LLM
@@ -480,6 +482,116 @@ async def test_persisted_marker_is_saved_and_survives_store_restart(
         for resource in restored.resources
     )
     await restarted_store.close()
+
+
+class _FakeSearchExecutor:
+    def __init__(self, outcome: SearchOutcome) -> None:
+        self.outcome = outcome
+        self.calls: list[tuple[str, bool]] = []
+
+    async def execute(self, query: str, *, conversation_enabled: bool):
+        self.calls.append((query, conversation_enabled))
+        return self.outcome
+
+
+@pytest.mark.asyncio
+async def test_web_sources_flow_into_resource_context_package_and_persistence(
+    capability, tmp_path
+) -> None:
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    source = SearchSource(
+        title="Current LSTM evidence",
+        url="https://example.com/current-lstm",
+        excerpt="Fresh evidence for resource generation",
+        provider="fake",
+        retrieved_at=datetime.now(UTC),
+    )
+    search = _FakeSearchExecutor(SearchOutcome(search_used=True, sources=(source,)))
+    capability.search_executor = search
+    db_path = tmp_path / "web-resource-packages.db"
+    store = ResourcePackageStore(db_path=db_path)
+    await store.init()
+    capability.package_store = store
+    context = UnifiedContext(
+        job_id="web-resource-job",
+        session_id="web-session",
+        user_id="alice",
+        user_message="系统学习 LSTM",
+        web_search_enabled=True,
+        metadata={"selected_resource_types": ["document"]},
+    )
+
+    result = await capability.run(context, StreamBus())
+
+    assert search.calls == [("LSTM", True)]
+    assert context.metadata["search_used"] is True
+    assert "Fresh evidence" in context.metadata["web_search_context"]
+    assert result.payload["search_used"] is True
+    assert result.payload["sources"][0]["url"] == source.url
+    package = result.payload["package"]
+    assert package["metadata"]["web_search_sources"][0]["url"] == source.url
+    assert all(
+        resource["metadata"]["web_search_sources"][0]["url"] == source.url
+        for resource in package["resources"]
+    )
+    persisted = await store.get(package["package_id"])
+    assert persisted is not None
+    assert persisted.metadata["web_search_sources"][0]["url"] == source.url
+    await store.close()
+    reopened = ResourcePackageStore(db_path=db_path)
+    await reopened.init()
+    restored = await reopened.get(package["package_id"])
+    assert restored is not None
+    assert restored.metadata["web_search_sources"][0]["url"] == source.url
+    assert all(
+        resource.metadata["web_search_sources"][0]["url"] == source.url
+        for resource in restored.resources
+    )
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_resource_web_search_unavailable_degrades_once_and_still_packages(
+    capability, tmp_path
+) -> None:
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    capability.search_executor = _FakeSearchExecutor(
+        SearchOutcome(
+            unavailable=True,
+            degradation_code="WEB_SEARCH_UNAVAILABLE",
+        )
+    )
+    store = ResourcePackageStore(db_path=tmp_path / "unavailable-resource-packages.db")
+    await store.init()
+    capability.package_store = store
+    bus = StreamBus()
+    queue = bus.subscribe()
+    result = await capability.run(
+        UnifiedContext(
+            job_id="unavailable-resource-job",
+            user_id="alice",
+            user_message="系统学习 LSTM",
+            web_search_enabled=True,
+            metadata={"selected_resource_types": ["document"]},
+        ),
+        bus,
+    )
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event)
+
+    assert [
+        event.metadata.get("code")
+        for event in events
+        if event.metadata.get("code") == "WEB_SEARCH_UNAVAILABLE"
+    ] == ["WEB_SEARCH_UNAVAILABLE"]
+    assert result.payload["package"]
+    assert result.payload["search_used"] is False
+    assert not result.payload["sources"]
+    await store.close()
 
 
 @pytest.mark.asyncio

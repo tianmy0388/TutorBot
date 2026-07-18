@@ -132,7 +132,11 @@ export interface TutorState {
     | { kind: "course"; id: string }
     | { kind: "library"; id: string }
     | { kind: "none" }
-    | null;
+      | null;
+  webSearchEnabled: boolean;
+  webSearchMutationPending: boolean;
+  webSearchError: string | null;
+  conversationMaterialized: boolean;
 
   // Assessment
   latestAssessment: AssessmentReport | null;
@@ -177,6 +181,13 @@ export interface TutorState {
       | { kind: "none" }
       | null,
   ) => void;
+  setDraftWebSearchEnabled: (enabled: boolean) => void;
+  setConversationMaterialized: (materialized: boolean) => void;
+  setConversationWebSearch: (
+    userId: string,
+    sessionId: string,
+    enabled: boolean,
+  ) => Promise<boolean>;
   setLatestAssessment: (a: AssessmentReport | null) => void;
   setLatestStrategy: (s: StrategyDecision | null) => void;
   setTutorResult: (
@@ -244,6 +255,9 @@ let messageCounter = 0;
 const nextMessageId = () =>
   `msg_${Date.now()}_${(messageCounter += 1).toString(36)}`;
 
+let webSearchMutationRevision = 0;
+let webSearchMutationChain: Promise<unknown> = Promise.resolve();
+
 export const useTutorStore = create<TutorState>()(
   subscribeWithSelector((set, get) => ({
     // --- state ---
@@ -285,6 +299,10 @@ export const useTutorStore = create<TutorState>()(
     // these on a per-turn basis.
     ragEnabled: true,
     retrievalScope: { kind: "all" },
+    webSearchEnabled: false,
+    webSearchMutationPending: false,
+    webSearchError: null,
+    conversationMaterialized: false,
 
     latestAssessment: null,
     latestStrategy: null,
@@ -369,6 +387,57 @@ export const useTutorStore = create<TutorState>()(
     setActiveKnowledgeBaseId: (id) => set({ activeKnowledgeBaseId: id }),
     setRagEnabled: (enabled) => set({ ragEnabled: enabled }),
     setRetrievalScope: (scope) => set({ retrievalScope: scope }),
+    setDraftWebSearchEnabled: (enabled) => {
+      webSearchMutationRevision += 1;
+      set({
+        webSearchEnabled: enabled,
+        webSearchMutationPending: false,
+        webSearchError: null,
+      });
+    },
+    setConversationMaterialized: (conversationMaterialized) =>
+      set({ conversationMaterialized }),
+    setConversationWebSearch: (userId, sessionId, enabled) => {
+      const previous = get().webSearchEnabled;
+      const revision = ++webSearchMutationRevision;
+      set({
+        webSearchEnabled: enabled,
+        webSearchMutationPending: true,
+        webSearchError: null,
+      });
+
+      const operation = webSearchMutationChain.then(async () => {
+        try {
+          const { setConversationWebSearch } = await import("./api");
+          const persisted = await setConversationWebSearch(
+            userId,
+            sessionId,
+            enabled,
+          );
+          if (revision === webSearchMutationRevision) {
+            set({
+              webSearchEnabled: Boolean(persisted.web_search_enabled),
+              webSearchError: null,
+            });
+          }
+          return true;
+        } catch {
+          if (revision === webSearchMutationRevision) {
+            set({
+              webSearchEnabled: previous,
+              webSearchError: "设置保存失败，已恢复先前状态",
+            });
+          }
+          return false;
+        } finally {
+          if (revision === webSearchMutationRevision) {
+            set({ webSearchMutationPending: false });
+          }
+        }
+      });
+      webSearchMutationChain = operation.then(() => undefined);
+      return operation;
+    },
     setLatestAssessment: (a) => set({ latestAssessment: a }),
     setLatestStrategy: (s) => set({ latestStrategy: s }),
     setTutorResult: (understanding, answer, enrichments) =>
@@ -486,7 +555,9 @@ export const useTutorStore = create<TutorState>()(
       }),
 
     resetSession: () =>
-      set({
+      set(() => {
+        webSearchMutationRevision += 1;
+        return {
         // 2026-06-21 plan: resetSession clears the visible UI state
         // (messages, jobs, right-pane panels) but DOES NOT touch
         // ``sessionId``. The caller is responsible for assigning a
@@ -510,6 +581,11 @@ export const useTutorStore = create<TutorState>()(
         latestUnderstanding: null,
         latestTutorAnswer: null,
         latestEnrichments: [],
+        webSearchEnabled: false,
+        webSearchMutationPending: false,
+        webSearchError: null,
+        conversationMaterialized: false,
+        };
       }),
     /**
      * Hydrate the active session id on first mount. Order:
@@ -575,8 +651,13 @@ export const useTutorStore = create<TutorState>()(
         timestamp: new Date(m.created_at).getTime(),
         metadata: m.metadata ?? {},
       }));
+      webSearchMutationRevision += 1;
       set({
         sessionId,
+        webSearchEnabled: detail.web_search_enabled ?? false,
+        webSearchMutationPending: false,
+        webSearchError: null,
+        conversationMaterialized: true,
         messages,
         activeTurn: newActiveTurn(),
         jobsById: {},
@@ -676,8 +757,13 @@ export const useTutorStore = create<TutorState>()(
         ? agg.packages[agg.packages.length - 1]
         : null;
 
+      webSearchMutationRevision += 1;
       set({
         sessionId,
+        webSearchEnabled: conv.web_search_enabled ?? false,
+        webSearchMutationPending: false,
+        webSearchError: null,
+        conversationMaterialized: true,
         messages,
         activeTurn: newActiveTurn(),
         jobsById,

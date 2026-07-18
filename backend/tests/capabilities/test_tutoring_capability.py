@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,6 +23,7 @@ from tutor.services.learner_profile.builder import (
 )
 from tutor.services.learner_profile.store import ProfileStore
 from tutor.services.llm.base import LLMResponse
+from tutor.services.search import SearchOutcome, SearchSource
 from tutor.services.tutor.service import TutorService, reset_tutor_service
 
 
@@ -102,6 +104,78 @@ def tutor_capability(fresh_builder):
         tutoring_agent=TutoringAgent(llm=llm),
         enrichment_agent=MultiModalEnrichmentAgent(llm=llm),
     )
+
+
+class _SearchExecutor:
+    def __init__(self, outcome: SearchOutcome) -> None:
+        self.outcome = outcome
+        self.calls: list[tuple[str, bool]] = []
+
+    async def execute(self, query: str, *, conversation_enabled: bool):
+        self.calls.append((query, conversation_enabled))
+        return self.outcome
+
+
+@pytest.mark.asyncio
+async def test_web_sources_are_added_to_answer_context_and_result(tutor_capability) -> None:
+    source = SearchSource(
+        title="Current LSTM source",
+        url="https://example.com/lstm",
+        excerpt="Current evidence",
+        provider="fake",
+        retrieved_at=datetime.now(UTC),
+    )
+    search = _SearchExecutor(SearchOutcome(search_used=True, sources=(source,)))
+    tutor_capability.search_executor = search
+    context = UnifiedContext(
+        user_id="web-user",
+        user_message="LSTM 最近有什么进展？",
+        web_search_enabled=True,
+    )
+
+    result = await tutor_capability.run(context, StreamBus())
+
+    assert search.calls == [("LSTM 最近有什么进展？\n\n相关概念：LSTM", True)]
+    assert context.metadata["search_used"] is True
+    assert "Current evidence" in context.metadata["answer_context"]
+    assert result.payload["search_used"] is True
+    assert result.payload["sources"][0]["url"] == "https://example.com/lstm"
+
+
+@pytest.mark.asyncio
+async def test_web_search_unavailable_emits_one_degradation_and_continues(
+    tutor_capability,
+) -> None:
+    tutor_capability.search_executor = _SearchExecutor(
+        SearchOutcome(
+            unavailable=True,
+            degradation_code="WEB_SEARCH_UNAVAILABLE",
+        )
+    )
+    bus = StreamBus()
+    queue = bus.subscribe()
+    result = await tutor_capability.run(
+        UnifiedContext(
+            user_id="web-user",
+            user_message="current question",
+            web_search_enabled=True,
+        ),
+        bus,
+    )
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event)
+    codes = [
+        event.metadata.get("code")
+        for event in events
+        if event.metadata.get("code") == "WEB_SEARCH_UNAVAILABLE"
+    ]
+
+    assert codes == ["WEB_SEARCH_UNAVAILABLE"]
+    assert result.assistant_message
+    assert result.payload["search_used"] is False
+    assert result.payload["sources"] == []
 
 
 @pytest.mark.asyncio
