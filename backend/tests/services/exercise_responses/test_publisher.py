@@ -10,7 +10,10 @@ from tutor.services.exercise_responses.publisher import (
     publish_submission_event,
     repair_unpublished_submission_events,
 )
-from tutor.services.exercise_responses.schema import ExerciseSubmission
+from tutor.services.exercise_responses.schema import (
+    ExerciseGradingStatus,
+    ExerciseSubmission,
+)
 from tutor.services.exercise_responses.store import ExerciseResponseStore
 from tutor.services.learning_events.schema import EventType
 from tutor.services.learning_events.store import LearningEventStore
@@ -71,7 +74,7 @@ async def test_startup_repair_pages_past_failure_without_starving_tail() -> None
 
         async def append(self, event) -> None:
             self.appended.append(event.event_id)
-            if event.event_id == "exercise-submission:submission-0":
+            if event.event_id == "exercise-response:submission-0":
                 raise RuntimeError("persistent first-row failure")
 
     store = FakeResponseStore()
@@ -82,7 +85,7 @@ async def test_startup_repair_pages_past_failure_without_starving_tail() -> None
     )
 
     assert repaired == 1001
-    assert "exercise-submission:submission-1001" in event_store.appended
+    assert "exercise-response:submission-1001" in event_store.appended
     assert "submission-1001" in store.marked
     assert store.page_cursors[:2] == [0, 1000]
 
@@ -179,8 +182,49 @@ async def test_real_store_repairs_append_then_mark_crash_exactly_once(
             durable.user_id, event_types=[EventType.EXERCISE_SCORED]
         )
         assert [event.event_id for event in events] == [
-            f"exercise-submission:{durable.submission_id}"
+            f"exercise-response:{durable.submission_id}"
         ]
+    finally:
+        await response_store.close()
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_review_submission_closes_without_scored_event(tmp_path) -> None:
+    response_store = ExerciseResponseStore(tmp_path / "manual-responses.db")
+    event_store = LearningEventStore(tmp_path / "manual-events.db")
+    await response_store.init()
+    await event_store.init()
+    manual = ExerciseSubmission(
+        submission_id="manual-review",
+        user_id="local-user",
+        session_id="sess-general",
+        package_id="pkg-general",
+        resource_id="resource-general",
+        question_id="q-manual",
+        question_type="short_answer",
+        answer_json="private submitted answer",
+        grading_status=ExerciseGradingStatus.MANUAL_REVIEW,
+        correct=None,
+        score=None,
+        concept_id="selection",
+        course="python",
+    )
+    durable = await response_store.save_submission(manual)
+    try:
+        assert await publish_submission_event(
+            durable,
+            response_store=response_store,
+            workflow=SimpleNamespace(event_store=event_store),  # type: ignore[arg-type]
+            reconcile=False,
+        )
+        assert await event_store.query(
+            durable.user_id, event_types=[EventType.EXERCISE_SCORED]
+        ) == []
+        persisted = await response_store.get_submission_for_user(
+            durable.submission_id, durable.user_id
+        )
+        assert persisted is not None and persisted.event_published
     finally:
         await response_store.close()
         await event_store.close()

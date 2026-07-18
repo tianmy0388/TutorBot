@@ -22,6 +22,8 @@ from tutor.services.learner_profile.builder import (
     get_profile_builder,
 )
 from tutor.services.learner_profile.store import ProfileStore
+from tutor.services.learning_events.schema import EventType, LearningEvent
+from tutor.services.learning_events.store import LearningEventStore
 from tutor.services.llm.base import LLMResponse
 from tutor.services.search import SearchOutcome, SearchSource
 from tutor.services.tutor.service import TutorService, reset_tutor_service
@@ -114,6 +116,55 @@ class _SearchExecutor:
     async def execute(self, query: str, *, conversation_enabled: bool):
         self.calls.append((query, conversation_enabled))
         return self.outcome
+
+
+@pytest.mark.asyncio
+async def test_tutoring_receives_answer_safe_recent_exercises_without_profile(
+    tutor_capability,
+    tmp_path,
+) -> None:
+    event_store = LearningEventStore(tmp_path / "tutoring-events.db")
+    await event_store.init()
+    await event_store.append(
+        LearningEvent(
+            event_id="exercise-response:tutoring-evidence",
+            user_id="evidence-user",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="chain_rule",
+            score=0.0,
+            metadata={
+                "question_type": "short_answer",
+                "answer_json": "private response",
+                "canonical_answer": "private key",
+            },
+        )
+    )
+
+    class CapturingTutoringAgent:
+        last_profile: dict | None = None
+
+        async def process(self, *args, profile, **kwargs):  # type: ignore[no-untyped-def]
+            self.last_profile = profile
+            return __import__(
+                "tutor.agents.tutor.tutoring", fromlist=["TutoringAnswer"]
+            ).TutoringAnswer(tldr="captured")
+
+    capturing_agent = CapturingTutoringAgent()
+    tutor_capability.tutoring_agent = capturing_agent
+    tutor_capability.event_store = event_store
+    try:
+        await tutor_capability.run(
+            UnifiedContext(user_id="evidence-user", user_message="解释链式法则"),
+            StreamBus(),
+        )
+        assert capturing_agent.last_profile is not None
+        assert capturing_agent.last_profile["recent_exercises"][0][
+            "concept_id"
+        ] == "chain_rule"
+        assert capturing_agent.last_profile["recent_exercises"][0]["score"] == 0.0
+        assert "private" not in str(capturing_agent.last_profile)
+    finally:
+        await event_store.close()
 
 
 @pytest.mark.asyncio

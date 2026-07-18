@@ -7,6 +7,7 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,6 +17,9 @@ from tutor.capabilities.assessment import AssessmentCapability
 from tutor.core.context import UnifiedContext
 from tutor.core.stream import StreamEventType
 from tutor.core.stream_bus import StreamBus
+from tutor.services.exercise_responses.publisher import publish_submission_event
+from tutor.services.exercise_responses.schema import ExerciseSubmission
+from tutor.services.exercise_responses.store import ExerciseResponseStore
 from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.learner_profile.builder import (
     get_profile_builder,
@@ -113,6 +117,56 @@ def capability(env_setup):
         strategy_engine=AdaptiveStrategyEngine(),
         window_hours=168,
     )
+
+
+@pytest.mark.asyncio
+async def test_assessment_sees_published_submission_immediately_once(
+    capability,
+    env_setup,
+    workdir,
+) -> None:
+    response_store = ExerciseResponseStore(workdir / "assessment-responses.db")
+    await response_store.init()
+    durable = await response_store.save_submission(
+        ExerciseSubmission(
+            submission_id="assessment-visible",
+            user_id="alice",
+            session_id="sess-assessment-visible",
+            package_id="pkg-assessment",
+            resource_id="resource-assessment",
+            question_id="q-assessment",
+            question_type="single_choice",
+            answer_json="B",
+            correct=False,
+            score=0.0,
+            concept_id="LSTM",
+        )
+    )
+    try:
+        assert await publish_submission_event(
+            durable,
+            response_store=response_store,
+            workflow=SimpleNamespace(event_store=env_setup["event_store"]),  # type: ignore[arg-type]
+            reconcile=False,
+        )
+
+        result = await capability.run(
+            UnifiedContext(user_id="alice", user_message="评估"),
+            StreamBus(),
+        )
+
+        assert result.payload["stats_summary"]["events_analyzed"] == 4
+        assert "exercise_scored" in result.payload["stats_summary"]["event_types"]
+        stats = await env_setup["event_store"].stats("alice")
+        assert stats["exercise_score_avg"] == 0.25
+        scored = await env_setup["event_store"].query(
+            "alice", event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert [event.event_id for event in scored] == [
+            "exercise-response:assessment-visible"
+        ]
+    finally:
+        await response_store.close()
 
 
 @pytest.mark.asyncio

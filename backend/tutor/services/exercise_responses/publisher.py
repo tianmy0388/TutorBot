@@ -57,7 +57,7 @@ async def publish_submission_event(
         )
 
     event = LearningEvent(
-        event_id=f"exercise-submission:{submission.submission_id}",
+        event_id=f"exercise-response:{submission.submission_id}",
         user_id=submission.user_id,
         session_id=submission.session_id,
         course=submission.course,

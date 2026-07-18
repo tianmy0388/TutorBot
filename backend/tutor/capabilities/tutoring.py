@@ -63,6 +63,10 @@ from tutor.services.learner_profile.builder import (
     ProfileBuilder,
     get_profile_builder,
 )
+from tutor.services.learning_events.store import (
+    LearningEventStore,
+    get_learning_event_store,
+)
 from tutor.services.retrieval import (
     RAGContext,
     RetrievalService,
@@ -101,6 +105,7 @@ class TutoringCapability(BaseCapability):
         enrichment_agent: MultiModalEnrichmentAgent | None = None,
         retrieval_service: RetrievalService | None = None,
         search_executor: SearchExecutor | None = None,
+        event_store: LearningEventStore | None = None,
     ) -> None:
         super().__init__()
         self.builder = builder
@@ -111,6 +116,7 @@ class TutoringCapability(BaseCapability):
         self.enrichment_agent = enrichment_agent or MultiModalEnrichmentAgent()
         self.retrieval_service = retrieval_service  # set by tests
         self.search_executor = search_executor
+        self.event_store = event_store or get_learning_event_store()
 
     @property
     def _builder(self) -> ProfileBuilder:
@@ -300,8 +306,12 @@ class TutoringCapability(BaseCapability):
         async with stream.stage("answer_generation", source="tutoring_capability"):
             try:
                 profile = await self._builder.get(context.user_id)
-                profile_snapshot = (
-                    profile.to_summary() if profile else {}
+                profile_snapshot = dict(profile.to_summary()) if profile else {}
+                profile_snapshot["recent_exercises"] = (
+                    await self.event_store.recent_exercise_evidence(
+                        context.user_id,
+                        limit=10,
+                    )
                 )
                 context.metadata["learner_profile"] = profile
             except Exception:

@@ -57,7 +57,7 @@ class LearningWorkflow:
             user_id,
             watermark,
             through_sequence=scan_through,
-            scored_threshold=PROFILE_EVENT_THRESHOLD,
+            scored_threshold=(1 if profile is None else PROFILE_EVENT_THRESHOLD),
         )
         if through is None:
             if profile is None or await self.profile_store.get_path(

@@ -319,6 +319,44 @@ class LearningEventStore:
                 self._row_to_event(r) for r in rows
             ]
 
+    async def recent_exercise_evidence(
+        self,
+        user_id: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded, answer-safe projection of recent scored evidence."""
+        bounded_limit = max(0, min(int(limit), 100))
+        if bounded_limit == 0:
+            return []
+        self._ensure_engine()
+        async with self._with_session() as session:
+            stmt = (
+                select(EventRow)
+                .where(
+                    EventRow.user_id == user_id,
+                    EventRow.event_type == EventType.EXERCISE_SCORED.value,
+                    EventRow.score.is_not(None),
+                )
+                .order_by(EventRow.created_at.desc(), EventRow.id.desc())
+                .limit(bounded_limit)
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            evidence = []
+            for row in rows:
+                event = self._row_to_event(row)
+                evidence.append(
+                    {
+                        "event_id": event.event_id,
+                        "concept_id": event.concept_id,
+                        "score": event.score,
+                        "question_type": str(
+                            event.metadata.get("question_type") or ""
+                        ),
+                        "created_at": event.created_at.isoformat(),
+                    }
+                )
+            return evidence
+
     async def stats(
         self,
         user_id: str,
@@ -344,7 +382,11 @@ class LearningEventStore:
 
         exercise_scores = [
             e.score for e in events
-            if e.event_type in (EventType.EXERCISE_ATTEMPTED, EventType.EXERCISE_COMPLETED)
+            if e.event_type in (
+                EventType.EXERCISE_ATTEMPTED,
+                EventType.EXERCISE_COMPLETED,
+                EventType.EXERCISE_SCORED,
+            )
             and e.score is not None
         ]
         avg_score = (

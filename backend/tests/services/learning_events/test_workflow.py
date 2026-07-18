@@ -34,8 +34,47 @@ async def workflow(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_five_scored_events_create_one_watermark_deduped_profile_child(workflow):
+async def test_first_scored_event_without_profile_schedules_profile_update(workflow):
     service, events, _, jobs = workflow
+    appended = await events.append(
+        LearningEvent(
+            event_id="first-score",
+            user_id="local-user",
+            session_id="sess-loop",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="backprop",
+            score=0.0,
+        )
+    )
+
+    children = await service.reconcile_user(
+        "local-user",
+        session_id="sess-loop",
+        through_sequence=appended.event.sequence,
+    )
+
+    assert len(children) == 1
+    assert children[0].task_kind == "profile_update"
+    assert children[0].dedupe_key == "profile_update:0"
+    assert children[0].metadata["through_sequence"] == appended.event.sequence
+    root = await jobs.get(service.root_job_id("local-user"))
+    assert root is not None
+
+
+@pytest.mark.asyncio
+async def test_profile_watermark_retains_five_score_batching(workflow):
+    from tutor.services.learner_profile.schema import (
+        PersistedLearningPath,
+        empty_profile,
+    )
+
+    service, events, profiles, jobs = workflow
+    profile = empty_profile("local-user")
+    profile.version = 1
+    await profiles.replace(profile, source="existing-profile")
+    await profiles.save_path(
+        PersistedLearningPath(user_id="local-user", profile_version=1)
+    )
     for index in range(1, 7):
         appended = await events.append(
             LearningEvent(
@@ -60,6 +99,59 @@ async def test_five_scored_events_create_one_watermark_deduped_profile_child(wor
     assert children[0].task_kind == "profile_update"
     assert children[0].dedupe_key == "profile_update:0"
     assert children[0].metadata["through_sequence"] == 5
+
+
+@pytest.mark.asyncio
+async def test_recent_exercise_evidence_is_bounded_scored_and_answer_safe(workflow):
+    _, events, _, _ = workflow
+    await events.append(
+        LearningEvent(
+            event_id="old-score",
+            user_id="local-user",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="chain_rule",
+            score=0.25,
+            metadata={
+                "question_type": "short_answer",
+                "answer_json": "private answer",
+                "canonical_answer": "hidden answer",
+                "hidden_tests": ["secret"],
+            },
+        )
+    )
+    await events.append(
+        LearningEvent(
+            event_id="not-scored",
+            user_id="local-user",
+            event_type=EventType.RESOURCE_VIEWED,
+            concept_id="ignored",
+            score=0.9,
+        )
+    )
+    await events.append(
+        LearningEvent(
+            event_id="new-score",
+            user_id="local-user",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="backprop",
+            score=0.0,
+            metadata={"question_type": "single_choice", "answer_json": "B"},
+        )
+    )
+
+    evidence = await events.recent_exercise_evidence("local-user", limit=1)
+
+    assert evidence == [
+        {
+            "event_id": "new-score",
+            "concept_id": "backprop",
+            "score": 0.0,
+            "question_type": "single_choice",
+            "created_at": evidence[0]["created_at"],
+        }
+    ]
+    assert "answer" not in str(evidence).casefold()
+    assert "hidden" not in str(evidence).casefold()
 
 
 @pytest.mark.asyncio
@@ -239,7 +331,17 @@ async def test_path_child_is_globally_deduped_by_user_and_profile_version(workfl
 async def test_default_reconcile_stops_at_earliest_threshold_in_latest_snapshot(
     workflow,
 ):
-    service, events, _, jobs = workflow
+    from tutor.services.learner_profile.schema import (
+        PersistedLearningPath,
+        empty_profile,
+    )
+
+    service, events, profiles, jobs = workflow
+    profile = empty_profile("local-user")
+    await profiles.replace(profile, source="existing-profile")
+    await profiles.save_path(
+        PersistedLearningPath(user_id="local-user", profile_version=1)
+    )
     sequences = []
     for index in range(6):
         appended = await events.append(
@@ -262,7 +364,17 @@ async def test_default_reconcile_stops_at_earliest_threshold_in_latest_snapshot(
 
 @pytest.mark.asyncio
 async def test_explicit_reconcile_boundary_never_absorbs_later_events(workflow):
-    service, events, _, jobs = workflow
+    from tutor.services.learner_profile.schema import (
+        PersistedLearningPath,
+        empty_profile,
+    )
+
+    service, events, profiles, jobs = workflow
+    profile = empty_profile("local-user")
+    await profiles.replace(profile, source="existing-profile")
+    await profiles.save_path(
+        PersistedLearningPath(user_id="local-user", profile_version=1)
+    )
     sequences = []
     for index in range(6):
         appended = await events.append(
@@ -361,6 +473,6 @@ async def test_profile_child_chains_next_fixed_window_without_eleventh_event(wor
         spec for spec in result.follow_up_tasks if spec.kind == "profile_update"
     ]
     assert len(next_profiles) == 1
-    assert next_profiles[0].dedupe_key == "profile_update:5"
-    assert next_profiles[0].payload["from_watermark"] == 5
-    assert next_profiles[0].payload["through_sequence"] == 10
+    assert next_profiles[0].dedupe_key == "profile_update:1"
+    assert next_profiles[0].payload["from_watermark"] == 1
+    assert next_profiles[0].payload["through_sequence"] == 6

@@ -48,8 +48,13 @@ async def _wait_terminal(store, job_id):
 
 
 @pytest.mark.asyncio
-async def test_five_scores_persist_profile_then_version_bound_path(tmp_path, monkeypatch):
+async def test_first_submission_persists_profile_then_version_bound_path(
+    tmp_path, monkeypatch
+):
     import networkx as nx
+    from tutor.services.exercise_responses.publisher import publish_submission_event
+    from tutor.services.exercise_responses.schema import ExerciseSubmission
+    from tutor.services.exercise_responses.store import ExerciseResponseStore
     from tutor.services.jobs import follow_up as follow_up_module
     from tutor.services.jobs.follow_up import (
         PathRebuildFollowUpCapability,
@@ -60,14 +65,16 @@ async def test_five_scores_persist_profile_then_version_bound_path(tmp_path, mon
     from tutor.services.knowledge_graph.planner import KGPathPlanner
     from tutor.services.knowledge_graph.schema import EdgeType, KGEdge, KGNode, KnowledgeGraph
     from tutor.services.learner_profile.store import ProfileStore
-    from tutor.services.learning_events.schema import EventType, LearningEvent
+    from tutor.services.learning_events.schema import EventType
     from tutor.services.learning_events.store import LearningEventStore
     from tutor.services.learning_events.workflow import LearningWorkflow
 
     events = LearningEventStore(tmp_path / "events.db")
+    responses = ExerciseResponseStore(tmp_path / "responses.db")
     profiles = ProfileStore(tmp_path / "profiles.db")
     jobs = JobStore(tmp_path / "jobs.db")
     await events.init()
+    await responses.init()
     await profiles.init()
     await jobs.init()
 
@@ -106,15 +113,33 @@ async def test_five_scores_persist_profile_then_version_bound_path(tmp_path, mon
 
     runner = JobRunner(job_store=jobs, capability_registry=Registry())
     workflow = LearningWorkflow(event_store=events, profile_store=profiles, job_store=jobs)
-    for index, score in enumerate((0.4, 0.5, 0.6, 0.7, 0.8), start=1):
-        appended = await events.append(LearningEvent(
-            event_id=f"score-{index}", user_id="local-user", session_id="sess-loop",
-            event_type=EventType.EXERCISE_SCORED, concept_id="attention", score=score,
-        ))
-        await workflow.reconcile_user(
-            "local-user", session_id="sess-loop",
-            through_sequence=appended.event.sequence, course="test-course",
+    durable = await responses.save_submission(
+        ExerciseSubmission(
+            submission_id="first-loop-response",
+            user_id="local-user",
+            session_id="sess-loop",
+            package_id="pkg-loop",
+            resource_id="resource-loop",
+            question_id="q-attention",
+            question_type="single_choice",
+            answer_json="B",
+            correct=False,
+            score=0.0,
+            concept_id="attention",
+            course="test-course",
         )
+    )
+    assert await publish_submission_event(
+        durable,
+        response_store=responses,
+        workflow=workflow,
+    )
+    scored = await events.query(
+        "local-user", event_types=[EventType.EXERCISE_SCORED]
+    )
+    assert [event.event_id for event in scored] == [
+        "exercise-response:first-loop-response"
+    ]
 
     assert await runner.resume_pending() == 1
     root = await jobs.get(workflow.root_job_id("local-user"))
@@ -126,13 +151,14 @@ async def test_five_scores_persist_profile_then_version_bound_path(tmp_path, mon
 
     profile = await profiles.get("local-user")
     path = await profiles.get_latest_path("local-user")
-    assert profile.version == 2 and profile.event_watermark == 5
-    assert profile.knowledge_map.get("attention") > 0
+    assert profile.version == 2 and profile.event_watermark == 1
+    assert profile.knowledge_map.get("attention") == 0.0
     assert path.profile_version == profile.version
     assert [node["id"] for node in path.nodes] == ["attention", "transformer"]
     assert {edge["from"] for edge in path.edges} <= {node["id"] for node in path.nodes}
     await runner.shutdown()
     await events.close()
+    await responses.close()
     await profiles.close()
     await jobs.close()
 
