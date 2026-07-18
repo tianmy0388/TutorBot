@@ -140,7 +140,15 @@ class DemoService:
             ),
         )
         updated_mastery = float(updated.knowledge_map.scores.get(concept, 0.0))
-        if correct:
+        course = str((raw.get("scenario") or {}).get("course") or "")
+        if course == "computer_network":
+            if correct:
+                recommendation = "掌握度提升，下一步进入 Wireshark 抓包实践，观察 Flags、Seq 和 Ack。"
+                next_path_node = "wireshark"
+            else:
+                recommendation = "继续复盘 TCP 三次握手时序图，并重做确认号专项练习。"
+                next_path_node = concept
+        elif correct:
             recommendation = "掌握度提升，下一步进入 Transformer 编码器结构。"
             next_path_node = "transformer"
         else:

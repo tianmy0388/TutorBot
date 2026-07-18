@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -231,9 +232,24 @@ class RetrievalService:
     def __init__(
         self,
         *,
-        score_threshold: float = DEFAULT_SCORE_THRESHOLD,
+        score_threshold: float | None = None,
         top_k: int = DEFAULT_TOP_K,
     ) -> None:
+        if score_threshold is None:
+            try:
+                from tutor.services.config.settings import get_settings
+
+                # The bundled ``local`` embedder is a deterministic demo
+                # hash, not a semantic embedding model. Its relative ranking
+                # is useful, but absolute cosine scores are not calibrated;
+                # filtering at 0.25 hides otherwise relevant course evidence.
+                score_threshold = (
+                    0.0
+                    if get_settings().embed_provider == "local"
+                    else DEFAULT_SCORE_THRESHOLD
+                )
+            except Exception:  # noqa: BLE001
+                score_threshold = DEFAULT_SCORE_THRESHOLD
         self.score_threshold = float(score_threshold)
         self.top_k = int(top_k)
 
@@ -370,10 +386,23 @@ class RetrievalService:
         # cosine similarity to the query vector.
         candidates = self._load_chunks(ready_libs, manifest_match)
         scored: list[EvidenceChunk] = []
+        local_rerank = str(manifest_match.get("provider") or "") == "local"
         for ch in candidates:
             score = _cosine(query_vec, ch["vector"])
             if math.isnan(score):
                 continue
+            if local_rerank:
+                lexical = _lexical_overlap(
+                    query,
+                    f"{ch.get('document_name', '')}\n{ch.get('anchor', '')}\n{ch.get('text', '')}",
+                )
+                # ``local`` is a deterministic hash embedder used for
+                # offline demos. Its cosine scores are useful for a rough
+                # ordering but poorly calibrated, so blend in lexical
+                # overlap to keep course-specific terms (TCP, DNS, CIDR,
+                # Wireshark, etc.) near the top without affecting cloud
+                # embedding providers.
+                score = max(float(score), 0.0) * 0.55 + lexical * 0.45
             scored.append(
                 EvidenceChunk(
                     chunk_id=ch["chunk_id"],
@@ -413,6 +442,16 @@ class RetrievalService:
             except Exception:  # noqa: BLE001
                 return []
             course = course_svc.get_course(scope.target_id or "")
+            # Accept both the persistent course id
+            # (``course_computer_network``) and the knowledge-graph id
+            # (``computer_network``). The UI, demo fixtures, and KG routes
+            # naturally speak in graph ids, while the CourseStore owns the
+            # persistent ids used for KB membership.
+            if course is None and scope.target_id:
+                for candidate in course_svc.list_courses():
+                    if candidate.knowledge_graph_id == scope.target_id:
+                        course = candidate
+                        break
             if course is None:
                 return []
             return [
@@ -628,6 +667,43 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if na == 0 or nb == 0:
         return float("nan")
     return dot / (na * nb)
+
+
+def _lexical_overlap(query: str, text: str) -> float:
+    """Small lexical score for the local hash embedder.
+
+    Chinese course queries often contain short domain tokens ("TCP",
+    "DNS", "三次握手", "证书链"). Character bigrams plus alphanumeric
+    tokens give a cheap, deterministic signal that complements the
+    offline hash vectors.
+    """
+    q_terms = _lexical_terms(query)
+    if not q_terms:
+        return 0.0
+    t_terms = _lexical_terms(text)
+    if not t_terms:
+        return 0.0
+    overlap = len(q_terms & t_terms)
+    return min(1.0, overlap / max(1, len(q_terms)))
+
+
+def _lexical_terms(value: str) -> set[str]:
+    s = value.lower()
+    terms = {
+        token
+        for token in re.findall(r"[a-z0-9_./+-]{2,}", s)
+        if token not in {"http", "https"} or token in s
+    }
+    cjk = re.findall(r"[\u4e00-\u9fff]+", s)
+    for block in cjk:
+        for n in (2, 3, 4):
+            if len(block) < n:
+                continue
+            for i in range(0, len(block) - n + 1):
+                gram = block[i : i + n]
+                if gram not in {"什么", "为什么", "如何", "哪些", "一个", "主要"}:
+                    terms.add(gram)
+    return terms
 
 
 __all__ = [

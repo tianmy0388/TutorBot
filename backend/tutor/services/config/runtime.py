@@ -28,6 +28,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tutor.services.config.settings import (
@@ -65,7 +66,7 @@ WEB_SEARCH_PROVIDERS: tuple[str, ...] = (
 )
 #: Allow-list of Embedding providers.
 EMBED_PROVIDERS: tuple[str, ...] = (
-    "openai", "openrouter", "azure_openai", "ollama", "custom",
+    "local", "openai", "openrouter", "azure_openai", "ollama", "custom",
     "deepseek", "zhipu", "zhipuai",
 )
 
@@ -328,7 +329,14 @@ class RuntimeConfigService:
         llm_secret = s.llm_api_key or os.environ.get("TUTOR_LLM_API_KEY", "")
         embed_secret = s.embed_api_key or os.environ.get("TUTOR_EMBED_API_KEY", "")
         embed_hint = ""
-        if s.llm_provider == "deepseek" and not embed_secret:
+        embed_key_required = s.embed_provider != "local"
+        if s.embed_provider == "local":
+            embed_hint = (
+                "Local hash embeddings run offline and are intended for seeded "
+                "courseware, demos, and smoke tests. Use a cloud embedding provider "
+                "for stronger semantic recall."
+            )
+        elif s.llm_provider == "deepseek" and not embed_secret:
             embed_hint = (
                 "DeepSeek is only used as the LLM provider here. Configure a separate "
                 "Embedding provider/key for knowledge-base indexing and retrieval."
@@ -367,7 +375,11 @@ class RuntimeConfigService:
                 "model": s.embed_model,
                 "base_url": s.embed_base_url,
                 "dimensions": s.embed_dimensions,
-                "api_key": mask_key(embed_secret, hint=embed_hint).model_dump(),
+                "api_key": mask_key(
+                    embed_secret,
+                    required=embed_key_required,
+                    hint=embed_hint,
+                ).model_dump(),
             },
             "web_search": {
                 "enabled": s.web_search_enabled,
@@ -496,6 +508,10 @@ class RuntimeConfigService:
 #: sets ``provider=zhipu`` AND ``model=embedding-2`` (deviance)
 #: keeps the manual override.
 _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    "local": {
+        "model": "local-hash-v1",
+        "base_url": "",
+    },
     "spark": {
         "model": "4.0Ultra",
         "base_url": "https://spark-api-open.xf-yun.com/v1",

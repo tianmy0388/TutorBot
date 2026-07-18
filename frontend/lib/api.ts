@@ -177,6 +177,49 @@ export const submitDemoCheckpoint = (
   );
 
 // ---------------------------------------------------------------------------
+// Learning events
+// ---------------------------------------------------------------------------
+
+export type LearningEventType =
+  | "resource_viewed"
+  | "resource_completed"
+  | "exercise_attempted"
+  | "exercise_completed"
+  | "tutoring_asked"
+  | "tutoring_followed"
+  | "path_advanced"
+  | "resource_rated"
+  | "profile_updated";
+
+export const recordLearningEvent = (body: {
+  user_id: string;
+  event_type: LearningEventType;
+  target_id?: string;
+  concept_id?: string;
+  duration_seconds?: number;
+  score?: number | null;
+  correct?: boolean | null;
+  metadata?: Record<string, unknown>;
+}) =>
+  request<Record<string, unknown>>("/learning-events", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const getLearningEventStats = (userId: string, windowHours = 168) =>
+  request<Record<string, unknown>>(
+    `/learning-events/${encodeURIComponent(userId)}/stats?window_hours=${windowHours}`,
+  );
+
+export const getTeacherCourseAnalytics = (
+  courseId: string,
+  windowHours = 168,
+) =>
+  request<Record<string, unknown>>(
+    `/teacher/courses/${encodeURIComponent(courseId)}/analytics?window_hours=${windowHours}`,
+  );
+
+// ---------------------------------------------------------------------------
 // Profile
 // ---------------------------------------------------------------------------
 

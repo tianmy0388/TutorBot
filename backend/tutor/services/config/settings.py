@@ -158,13 +158,13 @@ class Settings(BaseSettings):
     # ``base_url`` + ``model`` (``embedding-3``) when env doesn't
     # override them.
     embed_provider: Literal[
-        "openai", "openrouter", "ollama", "custom", "deepseek",
+        "local", "openai", "openrouter", "ollama", "custom", "deepseek",
         "azure_openai", "zhipu", "zhipuai",
-    ] = "openai"
-    embed_model: str = "text-embedding-3-small"
+    ] = "local"
+    embed_model: str = "local-hash-v1"
     embed_api_key: str = ""
-    embed_base_url: str = "https://api.openai.com/v1"
-    embed_dimensions: int = 0  # 0 = use provider default; only some models support override
+    embed_base_url: str = ""
+    embed_dimensions: int = 384  # 0 = use provider default; only some models support override
 
     # 2026-06-21 plan (D12): explicit keyword-only fallback policy.
     # The pre-fix behaviour silently fell back to text-only

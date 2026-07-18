@@ -22,6 +22,8 @@ numbers in one round-trip.
 from __future__ import annotations
 
 import uuid
+import json
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -180,7 +182,7 @@ class CourseService:
 # ---------------------------------------------------------------------------
 
 
-def seed_default_courses(service: CourseService) -> None:
+def _legacy_seed_ai_intro_course(service: CourseService) -> None:
     """Create the prebuilt ``AI 导论`` course on first startup.
 
     The 2026-06-21 plan says: "the prebuilt AI 导论 is created
@@ -213,6 +215,84 @@ def seed_default_courses(service: CourseService) -> None:
     if lib is not None and lib.course_id is None:
         service.attach_library("course_ai_intro", "ai_introduction")
     logger.info("seeded default course 'course_ai_intro'")
+
+
+def _builtin_course_dirs() -> list[Path]:
+    from tutor.services.config.settings import get_settings
+
+    kb_dir = Path(get_settings().kb_dir)
+    if not kb_dir.exists():
+        return []
+    return [
+        child
+        for child in sorted(kb_dir.iterdir())
+        if child.is_dir() and (child / "metadata.json").exists()
+    ]
+
+
+def _read_course_metadata(course_dir: Path) -> dict[str, Any]:
+    try:
+        return json.loads((course_dir / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _seed_course_id(lib_id: str) -> str:
+    if lib_id == "ai_introduction":
+        return "course_ai_intro"
+    return f"course_{lib_id}"
+
+
+def seed_default_courses(service: CourseService) -> None:
+    """Create persistent Course rows for every bundled course directory."""
+    try:
+        from tutor.services.knowledge_base.service import (
+            KnowledgeBaseService,
+            seed_default_libraries,
+        )
+
+        seed_default_libraries(KnowledgeBaseService(store=service.kb_store))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("seed_default_courses: library seed skipped: {err}", err=exc)
+
+    course_dirs = _builtin_course_dirs()
+    if not course_dirs:
+        course_dirs = []
+
+    for course_dir in course_dirs:
+        metadata = _read_course_metadata(course_dir)
+        lib_id = str(metadata.get("name") or course_dir.name)
+        course_id = _seed_course_id(lib_id)
+        display_name = str(metadata.get("display_name") or metadata.get("name") or course_dir.name)
+        description = str(metadata.get("description") or "")
+        course = Course(
+            id=course_id,
+            name=display_name,
+            description=description,
+            knowledge_graph_id=course_dir.name,
+            is_seeded=True,
+            extra_metadata=metadata,
+        )
+        service.store.upsert_course(course)
+        lib = service.kb_store.get_library(lib_id)
+        if lib is not None and lib.course_id != course_id:
+            service.attach_library(course_id, lib_id)
+        else:
+            service._recompute_aggregates(course_id)
+        logger.info("seeded default course {course_id}", course_id=course_id)
+
+    if not service.get_course("course_ai_intro"):
+        fallback = Course(
+            id="course_ai_intro",
+            name="AI Introduction",
+            description="Bundled AI introduction course.",
+            knowledge_graph_id="ai_introduction",
+            is_seeded=True,
+        )
+        service.store.upsert_course(fallback)
+        lib = service.kb_store.get_library("ai_introduction")
+        if lib is not None and lib.course_id is None:
+            service.attach_library("course_ai_intro", "ai_introduction")
 
 
 __all__ = ["CourseService", "seed_default_courses"]

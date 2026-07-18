@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -76,6 +77,32 @@ def _checksum(path: Path) -> str:
         for chunk in iter(lambda: f.read(64 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _run_coroutine_from_sync(coro_factory):
+    """Run a coroutine from sync code, even if the caller owns a loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro_factory())
+
+    import threading
+
+    result_box: list[Any] = []
+    error_box: list[BaseException] = []
+
+    def _worker() -> None:
+        try:
+            result_box.append(asyncio.run(coro_factory()))
+        except BaseException as exc:  # noqa: BLE001
+            error_box.append(exc)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join()
+    if error_box:
+        raise error_box[0]
+    return result_box[0] if result_box else None
 
 
 # Default concurrency cap for the in-app ingestion queue. Two
@@ -549,7 +576,7 @@ class KnowledgeBaseService:
                 resp = await embedder.embed(req)
                 return list(resp.vectors)
 
-            vectors = asyncio.run(_call())
+            vectors = _run_coroutine_from_sync(_call)
             # Recover the actual dimension from the response so a
             # provider that ignores our ``dimensions`` param still
             # records the right value.
@@ -661,7 +688,7 @@ class KnowledgeBaseService:
 # ---------------------------------------------------------------------------
 
 
-def seed_default_libraries(service: KnowledgeBaseService) -> None:
+def _legacy_seed_ai_introduction_library(service: KnowledgeBaseService) -> None:
     """Create the prebuilt ``ai_introduction`` library on first startup."""
     if service.get_library("ai_introduction") is not None:
         return
@@ -672,6 +699,159 @@ def seed_default_libraries(service: KnowledgeBaseService) -> None:
         is_seeded=True,
     )
     service.store.upsert_library(lib)
+
+
+def _builtin_course_dirs(settings: Settings) -> list[Path]:
+    kb_dir = Path(settings.kb_dir)
+    if not kb_dir.exists():
+        return []
+    return [
+        child
+        for child in sorted(kb_dir.iterdir())
+        if child.is_dir() and (child / "metadata.json").exists()
+    ]
+
+
+def _read_course_metadata(course_dir: Path) -> dict[str, Any]:
+    try:
+        return json.loads((course_dir / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _library_record_from_course_dir(
+    course_dir: Path,
+    service: KnowledgeBaseService,
+) -> KnowledgeBaseRecord:
+    metadata = _read_course_metadata(course_dir)
+    lib_id = str(metadata.get("name") or course_dir.name)
+    existing = service.get_library(lib_id)
+    name = str(metadata.get("display_name") or metadata.get("name") or course_dir.name)
+    description = str(metadata.get("description") or "")
+    if existing is not None:
+        return existing.model_copy(
+            update={
+                "name": name,
+                "description": description,
+                "is_seeded": True,
+            }
+        )
+    return KnowledgeBaseRecord(
+        id=lib_id,
+        name=name,
+        description=description,
+        is_seeded=True,
+    )
+
+
+def _seed_builtin_markdown_documents(
+    service: KnowledgeBaseService,
+    *,
+    lib_id: str,
+    course_dir: Path,
+) -> int:
+    """Build ready vector indexes for bundled Markdown lessons.
+
+    This runs only for the local hash embedder. That gives demos and
+    smoke tests a real RAG corpus without surprising operators with
+    startup-time cloud embedding calls.
+    """
+    settings = service.settings
+    if settings.embed_provider != "local":
+        return 0
+    raw_dir = course_dir / "raw"
+    if not raw_dir.exists():
+        return 0
+
+    from tutor.services.knowledge_base.loaders import extract_text
+    from tutor.services.knowledge_base.sqlite_store import INDEX_VERSION
+
+    seeded = 0
+    for source in sorted(raw_dir.glob("*.md")):
+        stable = hashlib.sha1(f"{lib_id}/{source.name}".encode("utf-8")).hexdigest()[:12]
+        doc_id = f"doc_seed_{stable}"
+        target = service._library_source_dir(lib_id) / f"{doc_id}.md"
+        index_path = (
+            service._library_source_dir(lib_id)
+            / "indexes"
+            / doc_id
+            / "chunks.json"
+        )
+        existing = service.get_document(doc_id)
+        if (
+            existing is not None
+            and existing.status == IngestionStatus.READY
+            and existing.embedder_provider == settings.embed_provider
+            and existing.embedder_model == settings.embed_model
+            and int(existing.embedder_dimension or 0) == int(settings.embed_dimensions or 0)
+            and existing.index_version == INDEX_VERSION
+            and index_path.exists()
+        ):
+            continue
+
+        shutil.copy2(source, target)
+        chunks = service._chunk(extract_text(target))
+        if not chunks:
+            continue
+        embedding_model, provider, dimension, vectors = service._embed(chunks)
+        doc = KnowledgeDocument(
+            id=doc_id,
+            knowledge_base_id=lib_id,
+            display_name=source.name,
+            source_filename=source.name,
+            extension=".md",
+            size_bytes=target.stat().st_size,
+            checksum=_checksum(target),
+            status=IngestionStatus.READY,
+            chunk_count=len(chunks),
+            embedding_model=embedding_model,
+            embedder_provider=provider,
+            embedder_model=embedding_model,
+            embedder_dimension=dimension,
+            index_version=INDEX_VERSION,
+            reindex_required=False,
+        )
+        service._write_chunk_index(
+            doc,
+            chunks,
+            vectors,
+            provider=provider,
+            dimension=dimension,
+        )
+        service.store.upsert_document(doc)
+        seeded += 1
+    return seeded
+
+
+def seed_default_libraries(service: KnowledgeBaseService) -> None:
+    """Create bundled course libraries and local demo indexes."""
+    course_dirs = _builtin_course_dirs(service.settings)
+    if not course_dirs:
+        if service.get_library("ai_introduction") is None:
+            service.store.upsert_library(
+                KnowledgeBaseRecord(
+                    id="ai_introduction",
+                    name="AI Introduction",
+                    description="Bundled AI introduction courseware.",
+                    is_seeded=True,
+                )
+            )
+        return
+
+    for course_dir in course_dirs:
+        lib = _library_record_from_course_dir(course_dir, service)
+        service.store.upsert_library(lib)
+        seeded = _seed_builtin_markdown_documents(
+            service,
+            lib_id=lib.id,
+            course_dir=course_dir,
+        )
+        if seeded:
+            logger.info(
+                "seeded {n} builtin markdown documents for library {lib_id}",
+                n=seeded,
+                lib_id=lib.id,
+            )
 
 
 __all__ = ["KnowledgeBaseService", "seed_default_libraries"]

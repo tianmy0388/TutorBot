@@ -1,0 +1,28 @@
+{
+  "course": "computer_network",
+  "topic": "传输层 TCP 与 UDP",
+  "questions": [
+    {
+      "id": "transport-001",
+      "type": "single_choice",
+      "difficulty": 2,
+      "question": "TCP 三次握手的主要目标不包括哪一项？",
+      "options": [
+        "A. 同步双方初始序列号",
+        "B. 确认双方基本收发能力",
+        "C. 为连接建立必要状态",
+        "D. 保证后续所有数据永不丢失"
+      ],
+      "answer": "D",
+      "explanation": "三次握手建立连接并同步状态，但后续可靠性仍依赖序列号、ACK、重传和窗口机制。"
+    },
+    {
+      "id": "transport-002",
+      "type": "short_answer",
+      "difficulty": 3,
+      "question": "简述 TCP 流量控制和拥塞控制的区别。",
+      "answer": "流量控制保护接收端，依据接收窗口避免发送方压垮接收缓冲区；拥塞控制保护网络，依据拥塞窗口和丢包、RTT 等反馈调整发送速率。",
+      "explanation": "两者作用对象不同，实际发送窗口通常取接收窗口和拥塞窗口中的较小值。"
+    }
+  ]
+}

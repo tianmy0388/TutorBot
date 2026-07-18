@@ -28,6 +28,9 @@ import {
   Tag,
   ShieldCheck,
 } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { recordLearningEvent } from "@/lib/api";
+import { useTutorStore } from "@/lib/store";
 import type { Resource } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { DocumentViewer } from "./DocumentViewer";
@@ -156,6 +159,53 @@ export function ResourceCard({
 export function ResourceDetail({ resource }: { resource: Resource }) {
   const meta = TYPE_META[resource.type];
   const Icon = meta.icon;
+  const userId = useTutorStore((s) => s.userId);
+  const latestPackage = useTutorStore((s) => s.latestPackage);
+  const startRef = useRef<number>(Date.now());
+
+  useEffect(() => {
+    startRef.current = Date.now();
+    const packageId = latestPackage?.package_id || "";
+    void recordLearningEvent({
+      user_id: userId || "anonymous",
+      event_type: "resource_viewed",
+      target_id: resource.resource_id,
+      concept_id: resource.topic || "",
+      metadata: {
+        resource_type: resource.type,
+        resource_title: resource.title,
+        package_id: packageId,
+      },
+    }).catch(() => undefined);
+
+    return () => {
+      const duration = Math.max(
+        0,
+        Math.round((Date.now() - startRef.current) / 1000),
+      );
+      if (duration < 8) return;
+      void recordLearningEvent({
+        user_id: userId || "anonymous",
+        event_type: "resource_completed",
+        target_id: resource.resource_id,
+        concept_id: resource.topic || "",
+        duration_seconds: duration,
+        metadata: {
+          resource_type: resource.type,
+          resource_title: resource.title,
+          package_id: packageId,
+          completion_signal: "detail_view_duration",
+        },
+      }).catch(() => undefined);
+    };
+  }, [
+    latestPackage?.package_id,
+    resource.resource_id,
+    resource.title,
+    resource.topic,
+    resource.type,
+    userId,
+  ]);
 
   return (
     <div className="h-full flex flex-col overflow-hidden">

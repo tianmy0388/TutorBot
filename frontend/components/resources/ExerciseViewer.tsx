@@ -22,6 +22,8 @@ import {
   CheckCircle2,
   AlertCircle,
 } from "lucide-react";
+import { recordLearningEvent } from "@/lib/api";
+import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { Resource } from "@/lib/types";
 
@@ -65,6 +67,8 @@ const TYPE_LABELS: Record<string, string> = {
 
 export function ExerciseViewer({ resource }: { resource: Resource }) {
   const questions = parseQuestions(resource);
+  const userId = useTutorStore((s) => s.userId);
+  const latestPackage = useTutorStore((s) => s.latestPackage);
   const [answers, setAnswers] = useState<Record<string, any>>({});
   const [submitted, setSubmitted] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState<string>("all");
@@ -108,7 +112,26 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
   };
 
   const submit = (qid: string) => {
+    const q = questions.find((item) => item.id === qid);
+    const ok = q ? isCorrect(q, answers[q.id]) : undefined;
     setSubmitted((s) => ({ ...s, [qid]: true }));
+    if (q) {
+      void recordLearningEvent({
+        user_id: userId || "anonymous",
+        event_type: "exercise_attempted",
+        target_id: `${resource.resource_id}:${q.id}`,
+        concept_id: q.knowledge_point || resource.topic || "",
+        score: ok === undefined ? null : ok ? 1 : 0,
+        correct: ok,
+        metadata: {
+          resource_id: resource.resource_id,
+          resource_title: resource.title,
+          package_id: latestPackage?.package_id || "",
+          question_type: q.type,
+          difficulty: q.difficulty,
+        },
+      }).catch(() => undefined);
+    }
   };
 
   const reset = (qid: string) => {
@@ -130,6 +153,29 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
       if (answers[q.id] !== undefined) next[q.id] = true;
     });
     setSubmitted(next);
+    const attempted = questions.filter((q) => answers[q.id] !== undefined);
+    if (attempted.length > 0) {
+      const correct = attempted.filter((q) => isCorrect(q, answers[q.id])).length;
+      void recordLearningEvent({
+        user_id: userId || "anonymous",
+        event_type: "exercise_completed",
+        target_id: resource.resource_id,
+        concept_id: resource.topic || "",
+        score: correct / attempted.length,
+        correct: correct === attempted.length,
+        metadata: {
+          resource_title: resource.title,
+          package_id: latestPackage?.package_id || "",
+          attempted: attempted.length,
+          total: questions.length,
+          correct,
+          weak_concepts: attempted
+            .filter((q) => !isCorrect(q, answers[q.id]))
+            .map((q) => q.knowledge_point)
+            .filter(Boolean),
+        },
+      }).catch(() => undefined);
+    }
   };
 
   const resetAll = () => {

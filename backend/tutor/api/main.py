@@ -84,6 +84,14 @@ async def lifespan(app: FastAPI):
         logger.exception(f"ResourcePackageStore init failed: {exc!r}")
 
     try:
+        from tutor.services.learning_events.store import get_learning_event_store
+
+        await get_learning_event_store().init()
+        logger.info("LearningEventStore initialised")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"LearningEventStore init failed: {exc!r}")
+
+    try:
         from tutor.services.jobs import get_job_runner, get_job_store
 
         await get_job_store().init()
@@ -190,10 +198,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from tutor.api.routers.demo import router as demo_router
     from tutor.api.routers.health import router as health_router
     from tutor.api.routers.jobs import router as jobs_router
+    from tutor.api.routers.learning_events import router as learning_events_router
     from tutor.api.routers.knowledge_bases import router as kb_router
     from tutor.api.routers.knowledge_graph import router as kg_router
     from tutor.api.routers.plans import router as plans_router
     from tutor.api.routers.resources import router as resources_router
+    from tutor.api.routers.teacher import router as teacher_router
     from tutor.api.routers.unified_ws import router as ws_router
 
     app.include_router(health_router, prefix="/api/v1", tags=["health"])
@@ -203,9 +213,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(demo_router, prefix="/api/v1", tags=["demo"])
     app.include_router(resources_router, prefix="/api/v1", tags=["resources"])
     app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
+    app.include_router(learning_events_router, prefix="/api/v1", tags=["learning-events"])
     app.include_router(plans_router, prefix="/api/v1", tags=["plans"])
     app.include_router(config_router, prefix="/api/v1", tags=["config"])
     app.include_router(conversations_router, prefix="/api/v1", tags=["conversations"])
+    app.include_router(teacher_router, prefix="/api/v1", tags=["teacher"])
     app.include_router(ws_router, prefix="/api/v1", tags=["websocket"])
 
     # Root info

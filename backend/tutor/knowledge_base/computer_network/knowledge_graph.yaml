@@ -1,0 +1,195 @@
+course: computer_network
+version: "1.0.0"
+description: 计算机网络本科课程知识图谱
+
+nodes:
+  - id: network_overview
+    name: 网络体系结构与分层模型
+    category: foundation
+    difficulty: 1
+    prerequisites: []
+    estimated_hours: 4
+    learning_outcomes:
+      - 理解协议、服务、接口与分层抽象
+      - 区分 OSI 模型与 TCP/IP 模型的职责边界
+      - 能用封装与解封装解释一次端到端通信
+    source_file: 01_网络体系结构与分层模型.md
+
+  - id: link_layer
+    name: 物理层与数据链路层
+    category: link
+    difficulty: 2
+    prerequisites: [network_overview]
+    estimated_hours: 8
+    learning_outcomes:
+      - 理解编码、带宽、时延、差错检测和帧
+      - 掌握 MAC 地址、以太网交换与 ARP
+      - 能分析局域网中的广播域与冲突域
+    source_file: 02_物理层与数据链路层.md
+
+  - id: network_layer
+    name: 网络层 IP 与路由
+    category: network
+    difficulty: 3
+    prerequisites: [link_layer]
+    estimated_hours: 10
+    learning_outcomes:
+      - 掌握 IPv4 地址、CIDR、子网划分和转发表
+      - 理解路由选择、最长前缀匹配和 ICMP
+      - 能解释 NAT 与基本路由协议的作用
+    source_file: 03_网络层IP与路由.md
+
+  - id: transport_layer
+    name: 传输层 TCP 与 UDP
+    category: transport
+    difficulty: 4
+    prerequisites: [network_layer]
+    estimated_hours: 12
+    learning_outcomes:
+      - 理解端口、多路复用、可靠传输和流量控制
+      - 掌握 TCP 三次握手、四次挥手、重传与拥塞控制
+      - 能判断 UDP 更适合的应用场景
+    source_file: 04_传输层TCP与UDP.md
+
+  - id: application_layer
+    name: 应用层协议 DNS、HTTP 与邮件
+    category: application
+    difficulty: 3
+    prerequisites: [transport_layer]
+    estimated_hours: 10
+    learning_outcomes:
+      - 理解 DNS 解析过程、HTTP 请求响应与缓存
+      - 区分 HTTP/1.1、HTTP/2 和 HTTP/3 的核心差异
+      - 能描述 SMTP、POP3、IMAP 的角色
+    source_file: 05_应用层协议DNS_HTTP与邮件.md
+
+  - id: network_security
+    name: 网络安全基础
+    category: security
+    difficulty: 4
+    prerequisites: [transport_layer, application_layer]
+    estimated_hours: 8
+    learning_outcomes:
+      - 理解机密性、完整性、认证与可用性
+      - 掌握 TLS 握手的基本目标和证书链作用
+      - 能说明防火墙、VPN 与常见攻击防护思路
+    source_file: 06_网络安全基础.md
+
+  - id: performance_troubleshooting
+    name: 网络性能与故障排查
+    category: engineering
+    difficulty: 4
+    prerequisites: [network_layer, transport_layer, application_layer]
+    estimated_hours: 6
+    learning_outcomes:
+      - 能用带宽、时延、吞吐量、丢包率和抖动定位问题
+      - 掌握 ping、traceroute、nslookup、curl 等基础工具
+      - 能按层次化方法排查网络故障
+    source_file: 07_网络性能与故障排查.md
+
+  - id: packet_analysis
+    name: Wireshark 抓包实践
+    category: lab
+    difficulty: 3
+    prerequisites: [network_overview, network_layer, transport_layer, application_layer]
+    estimated_hours: 6
+    learning_outcomes:
+      - 能抓取并过滤 DNS、TCP、HTTP、TLS 报文
+      - 能从报文序列中识别握手、重传和状态码
+      - 能把抓包观察转化为可复现的排障报告
+    source_file: 08_Wireshark抓包实践.md
+
+  - id: socket_programming
+    name: Socket 编程与应用实践
+    category: lab
+    difficulty: 4
+    prerequisites: [transport_layer, application_layer]
+    estimated_hours: 6
+    learning_outcomes:
+      - 能实现 TCP/UDP 客户端与服务端
+      - 能解释 TCP 字节流、消息边界、粘包与拆包
+      - 能结合抓包说明 Socket 调用与协议报文的关系
+    source_file: 09_Socket编程与应用实践.md
+
+  - id: protocol_project
+    name: 协议设计与综合项目
+    category: project
+    difficulty: 5
+    prerequisites: [socket_programming, packet_analysis, network_security]
+    estimated_hours: 8
+    learning_outcomes:
+      - 能设计一个简单应用层协议并写出协议说明书
+      - 能实现可运行的客户端与服务端并完成测试
+      - 能用抓包和日志证明协议交互过程
+    source_file: 10_协议设计与综合项目.md
+
+  - id: final_review
+    name: 期末复习与能力自测
+    category: assessment
+    difficulty: 3
+    prerequisites: [network_overview, link_layer, network_layer, transport_layer, application_layer]
+    estimated_hours: 4
+    learning_outcomes:
+      - 能跨层解释典型网络故障和网页访问流程
+      - 能识别高频误区并完成综合分析题
+      - 能根据自测结果规划复习路径
+    source_file: 11_期末复习与能力自测.md
+
+  - id: teacher_intervention
+    name: 教师教学与干预指南
+    category: teacher
+    difficulty: 3
+    prerequisites: [final_review]
+    estimated_hours: 2
+    learning_outcomes:
+      - 能基于学习事件识别班级薄弱点
+      - 能为不同学生制定资源推送和教学干预策略
+      - 能审核生成资源的 citation、review 与 safety 字段
+    source_file: 12_教师教学与干预指南.md
+
+edges:
+  - { from: network_overview, to: link_layer, type: prerequisite }
+  - { from: link_layer, to: network_layer, type: prerequisite }
+  - { from: network_layer, to: transport_layer, type: prerequisite }
+  - { from: transport_layer, to: application_layer, type: prerequisite }
+  - { from: transport_layer, to: network_security, type: prerequisite }
+  - { from: application_layer, to: network_security, type: prerequisite }
+  - { from: network_layer, to: performance_troubleshooting, type: prerequisite }
+  - { from: transport_layer, to: performance_troubleshooting, type: prerequisite }
+  - { from: application_layer, to: performance_troubleshooting, type: prerequisite }
+  - { from: application_layer, to: packet_analysis, type: related }
+  - { from: transport_layer, to: packet_analysis, type: related }
+  - { from: transport_layer, to: socket_programming, type: prerequisite }
+  - { from: application_layer, to: socket_programming, type: prerequisite }
+  - { from: socket_programming, to: protocol_project, type: prerequisite }
+  - { from: packet_analysis, to: protocol_project, type: prerequisite }
+  - { from: network_security, to: protocol_project, type: related }
+  - { from: application_layer, to: final_review, type: related }
+  - { from: performance_troubleshooting, to: final_review, type: related }
+  - { from: final_review, to: teacher_intervention, type: related }
+
+learning_paths:
+  - id: foundation_path
+    name: 零基础入门路径
+    description: 从分层模型到应用协议，建立完整的网络知识框架。
+    sequence: [network_overview, link_layer, network_layer, transport_layer, application_layer]
+
+  - id: engineering_path
+    name: 网络工程排障路径
+    description: 面向网络配置、性能分析和抓包排障的实践路径。
+    sequence: [network_overview, link_layer, network_layer, transport_layer, application_layer, performance_troubleshooting, packet_analysis, socket_programming]
+
+  - id: security_path
+    name: 网络安全基础路径
+    description: 在掌握 TCP/IP 与应用协议后理解 TLS、防火墙和常见攻防。
+    sequence: [network_overview, network_layer, transport_layer, application_layer, network_security, packet_analysis]
+
+  - id: project_path
+    name: 课程项目实践路径
+    description: 从 TCP/IP 基础到 Socket 编程与自定义协议项目。
+    sequence: [network_overview, network_layer, transport_layer, application_layer, packet_analysis, socket_programming, protocol_project, final_review]
+
+  - id: teacher_path
+    name: 教师干预与评估路径
+    description: 面向教师的课程分析、薄弱点识别和可信资源审核路径。
+    sequence: [network_overview, transport_layer, packet_analysis, final_review, teacher_intervention]

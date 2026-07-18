@@ -20,11 +20,13 @@ from typing import Any
 
 from tutor.services.config.settings import Settings
 from tutor.services.embeddings.base import Embedder
+from tutor.services.embeddings.local_hash import LocalHashEmbedder
 from tutor.services.embeddings.openai_compat import OpenAICompatEmbedder
 
 # All currently-supported embedder providers are OpenAI-compatible.
 # Future: add cohere, jina, voyage, etc. here as their own classes.
 _PROVIDERS: dict[str, type[Embedder]] = {
+    "local": LocalHashEmbedder,
     "openai": OpenAICompatEmbedder,
     "openrouter": OpenAICompatEmbedder,
     "ollama": OpenAICompatEmbedder,
@@ -43,6 +45,10 @@ _PROVIDERS: dict[str, type[Embedder]] = {
 # lowercase provider name. Each entry is a partial kwargs dict
 # passed straight into the embedder constructor.
 _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
+    "local": {
+        "model": "local-hash-v1",
+        "base_url": "",
+    },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
     },

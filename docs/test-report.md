@@ -45,3 +45,21 @@ npm run build --workspace frontend
 ## 6. 尚需补充的量化评测
 
 正式答辩材料应增加至少 30 个问题的正确率、引用忠实度、未验证声明比例、平均/P95 延迟、失败率，以及“单智能体、无画像、无 RAG”基线对比。该部分属于效果评测，不以单元测试替代。
+
+### 6.1 《计算机网络》RAG 检索评测
+
+已补充脚本：
+
+```powershell
+.venv\Scripts\python scripts\evaluate_computer_network_rag.py
+```
+
+如需生成 Markdown 报告：
+
+```powershell
+.venv\Scripts\python scripts\evaluate_computer_network_rag.py --write docs\rag-evaluation-computer-network.md
+```
+
+该脚本覆盖 30 个《计算机网络》问题，统计课程知识库 Top-K 预期文档命中率、Citation 覆盖率、平均延迟和 P95 延迟。它只评估检索阶段；正式答辩仍建议人工抽查最终回答的正确率、引用忠实度和未验证声明比例。
+
+当前《计算机网络》课程库已扩展为 13 份 Markdown 课程材料，并补充 80 题综合题库；最新评测报告见 `docs/rag-evaluation-computer-network.md`。本地 `local-hash-v1` 演示检索采用向量相似度 + 词面重排的混合策略，以保证无云端 Embedding 密钥时仍能稳定展示课程 citation。

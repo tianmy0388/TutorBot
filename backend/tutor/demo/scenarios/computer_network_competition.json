@@ -1,0 +1,514 @@
+{
+  "scenario": {
+    "id": "computer_network_competition",
+    "title": "计算机网络 RAG 个性化学习闭环",
+    "course": "computer_network",
+    "topic": "TCP 三次握手与可靠传输",
+    "description": "面向软件杯 A3 赛题的计算机网络课程演示：以课程知识库 RAG 为依据，生成讲解、思维导图、题库、拓展阅读和 Wireshark 实操，并用学习事件驱动评估与路径调整。",
+    "persona": "计算机专业大二学生，能背 TCP/UDP 定义，但容易混淆握手、确认号、重传和流量控制。",
+    "goal": "在 1 周内掌握 TCP 建连、可靠传输和抓包分析，能完成课程实验报告。",
+    "estimated_minutes": 10,
+    "tags": ["A3", "RAG", "计算机网络", "multi-agent", "personalized-learning"],
+    "live_prompt": "我是计算机专业大二学生，正在学《计算机网络》。请基于课程知识库，为 TCP 三次握手与可靠传输生成一套个性化学习资源，包含讲解、思维导图、练习、拓展阅读和 Wireshark 实操。"
+  },
+  "user_id": "competition-demo",
+  "session_id": "demo-computer-network",
+  "checkpoint": {
+    "id": "tcp-handshake-purpose",
+    "concept": "transport_tcp",
+    "question": "TCP 三次握手最核心的目标是什么？",
+    "options": [
+      {"value": "A", "label": "压缩 HTTP 报文，减少应用层开销"},
+      {"value": "B", "label": "确认双方收发能力并同步初始序列号"},
+      {"value": "C", "label": "为所有数据包预留固定带宽"},
+      {"value": "D", "label": "替代 IP 路由选择"}
+    ],
+    "answer": "B",
+    "difficulty": 3
+  },
+  "profile": {
+    "knowledge_map": {
+      "scores": {
+        "network_architecture": 0.78,
+        "data_link": 0.62,
+        "network_ip": 0.58,
+        "transport_tcp": 0.32,
+        "application_http": 0.48,
+        "network_security": 0.36,
+        "wireshark": 0.28
+      }
+    },
+    "cognitive_style": "active",
+    "error_patterns": [
+      {
+        "concept": "transport_tcp",
+        "mistake_type": "sequence_ack_confusion",
+        "frequency": 3,
+        "examples": ["能说出 SYN/ACK，但解释不清确认号为什么是对方序列号加一。"],
+        "notes": "需要结合时序图和抓包字段解释。"
+      },
+      {
+        "concept": "wireshark",
+        "mistake_type": "tool_to_concept_gap",
+        "frequency": 2,
+        "examples": ["看到 TCP flags 字段，但不知道如何定位握手和重传。"],
+        "notes": "适合用实操任务和观察清单。"
+      }
+    ],
+    "learning_pace": {
+      "avg_session_duration_min": 35,
+      "preferred_chunk_size_min": 12,
+      "review_interval_hours": 24,
+      "daily_time_budget_min": 45,
+      "sessions_per_week": 5
+    },
+    "motivation": {
+      "goal_type": "exam_prep",
+      "goal_description": "准备计算机网络期末与实验验收，重点补 TCP 和抓包分析。",
+      "urgency": "high",
+      "self_efficacy": 0.58,
+      "target_completion_date": null,
+      "stakes": "希望能独立完成 TCP 抓包实验并解释现象。"
+    },
+    "modality": {
+      "text": 0.62,
+      "video": 0.55,
+      "interactive": 0.78,
+      "diagram": 0.86,
+      "code": 0.52,
+      "audio": 0.15,
+      "exercise": 0.88
+    },
+    "version": 4,
+    "metadata": {
+      "demo": true,
+      "school_stage": "undergraduate",
+      "competition_track": "A3",
+      "course": "computer_network"
+    }
+  },
+  "path": {
+    "path_id": "demo_path_tcp",
+    "course": "computer_network",
+    "name": "TCP 可靠传输与抓包冲刺路径",
+    "description": "先复习分层与网络层，再聚焦 TCP 建连、可靠传输，最后用 Wireshark 验证。",
+    "nodes": [
+      {
+        "id": "network_architecture",
+        "node_id": "network_architecture",
+        "name": "网络体系结构",
+        "category": "foundation",
+        "difficulty": 2,
+        "estimated_hours": 1,
+        "prerequisites": [],
+        "status": "completed"
+      },
+      {
+        "id": "network_ip",
+        "node_id": "network_ip",
+        "name": "IP 与路由",
+        "category": "foundation",
+        "difficulty": 3,
+        "estimated_hours": 1.5,
+        "prerequisites": ["network_architecture"],
+        "status": "in_progress"
+      },
+      {
+        "id": "transport_tcp",
+        "node_id": "transport_tcp",
+        "name": "TCP 与 UDP",
+        "category": "core",
+        "difficulty": 4,
+        "estimated_hours": 2.5,
+        "prerequisites": ["network_ip"],
+        "status": "recommended"
+      },
+      {
+        "id": "wireshark",
+        "node_id": "wireshark",
+        "name": "Wireshark 抓包实践",
+        "category": "practice",
+        "difficulty": 3,
+        "estimated_hours": 2,
+        "prerequisites": ["transport_tcp"],
+        "status": "locked"
+      }
+    ],
+    "rationale": [
+      "画像显示 transport_tcp 与 wireshark 掌握度低，优先安排 TCP 概念与抓包验证。",
+      "学生偏好图示、练习和动手实践，因此路径中加入时序图、题库和 Wireshark 观察任务。",
+      "先补 IP/路由上下文，避免把 TCP 可靠传输误解为网络层功能。"
+    ],
+    "estimated_total_hours": 7
+  },
+  "package": {
+    "package_id": "demo_pkg_computer_network_tcp",
+    "topic": "TCP 三次握手与可靠传输",
+    "resources": [
+      {
+        "resource_id": "cn_tcp_doc",
+        "type": "document",
+        "title": "TCP 三次握手：从目标到字段",
+        "content": "# TCP 三次握手：从目标到字段\n\nTCP 建立连接不是为了“多发几次包”，而是为了让通信双方确认彼此的发送与接收能力，并同步初始序列号 ISN。三次握手的典型过程是：客户端发送 SYN，服务端回复 SYN+ACK，客户端再回复 ACK。\n\n## 为什么需要三次\n\n一次握手无法确认双向通信；两次握手容易让服务端在旧 SYN 报文到达时误以为连接成立。第三次 ACK 让服务端确认客户端已经收到了自己的 SYN+ACK。\n\n## 学习抓手\n\n观察 Wireshark 中 Flags、Seq、Ack 三个字段：SYN 消耗一个序列号，所以确认号通常是对方初始序列号加一。",
+        "format_specific": {
+          "sections": [
+            {"title": "建连目标", "content": "确认双方收发能力并同步初始序列号。", "key_points": ["双向确认", "ISN 同步"]},
+            {"title": "字段观察", "content": "抓包时重点看 Flags、Seq、Ack。", "key_points": ["SYN", "ACK", "Seq/Ack"]}
+          ],
+          "has_math": false,
+          "has_diagrams": true
+        },
+        "difficulty": 3,
+        "estimated_minutes": 12,
+        "prerequisites": ["network_ip"],
+        "generated_by": ["content_expert", "pedagogy"],
+        "confidence_score": 0.88,
+        "topic": "transport_tcp",
+        "tags": ["TCP", "三次握手", "可靠传输"],
+        "metadata": {
+          "rag": {"status": "ok", "scope": "course:computer_network", "citation_count": 2}
+        },
+        "citations": [
+          {
+            "chunk_id": "cn_tcp_raw_04",
+            "knowledge_base_id": "computer_network",
+            "knowledge_base_name": "计算机网络",
+            "document_id": "04_传输层TCP与UDP.md",
+            "document_name": "04_传输层TCP与UDP.md",
+            "anchor": "TCP 建连与可靠传输",
+            "score": 0.91
+          },
+          {
+            "chunk_id": "cn_wireshark_raw_08",
+            "knowledge_base_id": "computer_network",
+            "knowledge_base_name": "计算机网络",
+            "document_id": "08_Wireshark抓包实践.md",
+            "document_name": "08_Wireshark抓包实践.md",
+            "anchor": "TCP 握手抓包",
+            "score": 0.84
+          }
+        ],
+        "review": {"verdict": "pass", "quality_score": 0.9, "issues": [], "suggestions": ["可在课堂中配合抓包截图讲解。"]},
+        "safety": {"verdict": "safe", "overall_verdict": "safe", "risk_level": "low"},
+        "unverified_claims": []
+      },
+      {
+        "resource_id": "cn_tcp_mindmap",
+        "type": "mindmap",
+        "title": "TCP 可靠传输思维导图",
+        "content": "mindmap\n  root((TCP 可靠传输))\n    建立连接\n      SYN\n      SYN ACK\n      ACK\n    可靠性\n      序列号\n      确认号\n      超时重传\n    控制机制\n      流量控制\n      拥塞控制\n    实验观察\n      Flags\n      Seq\n      Ack",
+        "format_specific": {
+          "mermaid_dsl": "mindmap\n  root((TCP 可靠传输))\n    建立连接\n      SYN\n      SYN ACK\n      ACK\n    可靠性\n      序列号\n      确认号\n      超时重传\n    控制机制\n      流量控制\n      拥塞控制\n    实验观察\n      Flags\n      Seq\n      Ack",
+          "central_topic": "TCP 可靠传输",
+          "branch_count": 4
+        },
+        "difficulty": 2,
+        "estimated_minutes": 6,
+        "prerequisites": ["network_ip"],
+        "generated_by": ["multimedia"],
+        "confidence_score": 0.84,
+        "topic": "transport_tcp",
+        "tags": ["mindmap", "TCP"],
+        "metadata": {"rag": {"status": "ok", "scope": "course:computer_network", "citation_count": 1}},
+        "citations": [
+          {"chunk_id": "cn_tcp_raw_04", "knowledge_base_id": "computer_network", "knowledge_base_name": "计算机网络", "document_id": "04_传输层TCP与UDP.md", "document_name": "04_传输层TCP与UDP.md", "anchor": "TCP 可靠传输", "score": 0.89}
+        ],
+        "review": {"verdict": "pass", "quality_score": 0.86, "issues": [], "suggestions": []},
+        "safety": {"verdict": "safe", "overall_verdict": "safe", "risk_level": "low"},
+        "unverified_claims": []
+      },
+      {
+        "resource_id": "cn_tcp_exercise",
+        "type": "exercise",
+        "title": "TCP 三次握手诊断练习",
+        "content": "完成以下题目后，系统会记录 exercise_completed 事件并更新评估依据。",
+        "format_specific": {
+          "questions": [
+            {
+              "id": "q1",
+              "type": "single_choice",
+              "difficulty": 3,
+              "knowledge_point": "transport_tcp",
+              "question": "TCP 三次握手中第三次 ACK 的主要作用是什么？",
+              "options": [
+                {"label": "A", "text": "确认客户端已经收到服务端的 SYN+ACK"},
+                {"label": "B", "text": "通知路由器建立专用路径"},
+                {"label": "C", "text": "压缩后续数据报文"},
+                {"label": "D", "text": "替代应用层认证"}
+              ],
+              "answer": "A",
+              "explanation": "第三次 ACK 让服务端确认客户端能收到服务端的响应，从而完成双向能力确认。",
+              "estimated_seconds": 60
+            },
+            {
+              "id": "q2",
+              "type": "true_false",
+              "difficulty": 2,
+              "knowledge_point": "transport_tcp",
+              "question": "SYN 报文会消耗一个序列号。",
+              "options": [],
+              "answer": true,
+              "explanation": "SYN 和 FIN 都会消耗一个序列号，因此 ACK 通常会对 ISN 加一确认。",
+              "estimated_seconds": 45
+            },
+            {
+              "id": "q3",
+              "type": "short_answer",
+              "difficulty": 4,
+              "knowledge_point": "wireshark",
+              "question": "在 Wireshark 中定位三次握手时，应重点观察哪些字段？",
+              "options": [],
+              "answer": "Flags Seq Ack",
+              "explanation": "重点观察 TCP Flags 中的 SYN/ACK，以及 Seq 和 Ack 的变化。",
+              "estimated_seconds": 120
+            }
+          ],
+          "total_questions": 3,
+          "difficulty_breakdown": {"basic": 1, "advanced": 2}
+        },
+        "difficulty": 3,
+        "estimated_minutes": 8,
+        "prerequisites": ["network_ip"],
+        "generated_by": ["exercise_generator"],
+        "confidence_score": 0.86,
+        "topic": "transport_tcp",
+        "tags": ["exercise", "TCP"],
+        "metadata": {"rag": {"status": "ok", "scope": "course:computer_network", "citation_count": 2}},
+        "citations": [
+          {"chunk_id": "cn_tcp_raw_04", "knowledge_base_id": "computer_network", "knowledge_base_name": "计算机网络", "document_id": "04_传输层TCP与UDP.md", "document_name": "04_传输层TCP与UDP.md", "anchor": "TCP 三次握手", "score": 0.9}
+        ],
+        "review": {"verdict": "pass", "quality_score": 0.88, "issues": [], "suggestions": ["简答题可在教师端人工复核。"]},
+        "safety": {"verdict": "safe", "overall_verdict": "safe", "risk_level": "low"},
+        "unverified_claims": []
+      },
+      {
+        "resource_id": "cn_tcp_reading",
+        "type": "reading",
+        "title": "TCP 可靠传输拓展阅读",
+        "content": "# TCP 可靠传输拓展阅读\n\n建议按“问题—机制—抓包验证”的顺序阅读：先理解为什么要建连，再阅读序列号、确认号、超时重传和窗口机制，最后用 Wireshark 验证 SYN、ACK、Seq、Ack 的变化。\n\n## 课程依据\n\n1. 计算机网络 / 04_传输层TCP与UDP.md（TCP 可靠传输）\n2. 计算机网络 / 08_Wireshark抓包实践.md（TCP 握手抓包）",
+        "format_specific": {
+          "citations": [
+            {"title": "04_传输层TCP与UDP.md", "url": "course://computer_network/04_传输层TCP与UDP.md", "author": "TutorBot course seed", "year": 2026},
+            {"title": "08_Wireshark抓包实践.md", "url": "course://computer_network/08_Wireshark抓包实践.md", "author": "TutorBot course seed", "year": 2026}
+          ],
+          "estimated_reading_minutes": 7
+        },
+        "difficulty": 3,
+        "estimated_minutes": 7,
+        "prerequisites": ["network_ip"],
+        "generated_by": ["reading_compiler", "pedagogy"],
+        "confidence_score": 0.82,
+        "topic": "transport_tcp",
+        "tags": ["reading", "RAG"],
+        "metadata": {"rag": {"status": "ok", "scope": "course:computer_network", "citation_count": 2}},
+        "citations": [
+          {"chunk_id": "cn_tcp_raw_04", "knowledge_base_id": "computer_network", "knowledge_base_name": "计算机网络", "document_id": "04_传输层TCP与UDP.md", "document_name": "04_传输层TCP与UDP.md", "anchor": "TCP 可靠传输", "score": 0.88},
+          {"chunk_id": "cn_wireshark_raw_08", "knowledge_base_id": "computer_network", "knowledge_base_name": "计算机网络", "document_id": "08_Wireshark抓包实践.md", "document_name": "08_Wireshark抓包实践.md", "anchor": "抓包观察字段", "score": 0.81}
+        ],
+        "review": {"verdict": "pass", "quality_score": 0.84, "issues": [], "suggestions": []},
+        "safety": {"verdict": "safe", "overall_verdict": "safe", "risk_level": "low"},
+        "unverified_claims": []
+      },
+      {
+        "resource_id": "cn_tcp_code",
+        "type": "code",
+        "title": "Socket 建连观察小实验",
+        "content": "用 Python socket 启动一个最小 TCP 服务端和客户端，然后配合 Wireshark 观察三次握手。",
+        "format_specific": {
+          "language": "python",
+          "code": "import socket\\n\\n# server.py\\nserver = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\\nserver.bind(('127.0.0.1', 8080))\\nserver.listen(1)\\nprint('listening on 127.0.0.1:8080')\\nconn, addr = server.accept()\\nprint('connected by', addr)\\nconn.sendall(b'hello tcp')\\nconn.close()\\nserver.close()\\n",
+          "explanation": "先运行服务端，再用浏览器或客户端连接 127.0.0.1:8080。抓包过滤条件可使用 tcp.port == 8080。",
+          "execution_status": "not_run",
+          "stdout": "",
+          "stderr": "",
+          "sandbox_url": null,
+          "error_code": null,
+          "execution_python": "",
+          "dependency_versions": {},
+          "duration_seconds": 0,
+          "artifacts": []
+        },
+        "difficulty": 3,
+        "estimated_minutes": 15,
+        "prerequisites": ["transport_tcp"],
+        "generated_by": ["code_sandbox"],
+        "confidence_score": 0.8,
+        "topic": "wireshark",
+        "tags": ["socket", "Wireshark", "practice"],
+        "metadata": {"rag": {"status": "ok", "scope": "course:computer_network", "citation_count": 1}},
+        "citations": [
+          {"chunk_id": "cn_wireshark_raw_08", "knowledge_base_id": "computer_network", "knowledge_base_name": "计算机网络", "document_id": "08_Wireshark抓包实践.md", "document_name": "08_Wireshark抓包实践.md", "anchor": "TCP 抓包实验", "score": 0.83}
+        ],
+        "review": {"verdict": "pass", "quality_score": 0.8, "issues": [], "suggestions": ["现场演示时建议使用预置抓包截图或本地回环接口。"]},
+        "safety": {"verdict": "safe", "overall_verdict": "safe", "risk_level": "low"},
+        "unverified_claims": []
+      }
+    ],
+    "target_profile_snapshot": {
+      "user_id": "competition-demo",
+      "avg_mastery": 0.49,
+      "weak_concepts": ["transport_tcp", "wireshark", "network_security"],
+      "strong_concepts": [],
+      "cognitive_style": "active",
+      "modality_dominant": "exercise",
+      "version": 4
+    },
+    "learning_path_summary": {
+      "course": "computer_network",
+      "mastered_count": 1,
+      "unmastered_count": 6,
+      "next_targets": ["transport_tcp", "wireshark"]
+    },
+    "generated_by": ["intent_understanding", "content_expert", "pedagogy", "multimedia", "exercise_generator", "reading_compiler", "code_sandbox", "quality_reviewer", "anti_hallucination"],
+    "metadata": {
+      "user_id": "competition-demo",
+      "session_id": "demo-computer-network",
+      "intent_scope": "deep_dive",
+      "rag_status": "ok",
+      "rag_citation_count": 5,
+      "source": "computer_network_competition_demo"
+    }
+  },
+  "assessment": {
+    "user_id": "competition-demo",
+    "dimension_scores": {
+      "knowledge_mastery": {"dimension": "knowledge_mastery", "score": 0.54, "evidence": ["TCP 题目正确率 67%", "transport_tcp 掌握度低于课程平均"], "notes": "需要继续区分建连、可靠传输和拥塞控制。"},
+      "engagement": {"dimension": "engagement", "score": 0.72, "evidence": ["查看 4 类资源", "完成 Wireshark 实操计划"], "notes": "动手型资源参与度较高。"},
+      "comprehension": {"dimension": "comprehension", "score": 0.58, "evidence": ["能解释 SYN/ACK 顺序，但确认号迁移仍不稳"], "notes": "建议结合抓包字段复述。"},
+      "pace": {"dimension": "pace", "score": 0.7, "evidence": ["单资源时长 6-15 分钟，匹配画像偏好"], "notes": "保持短块学习。"},
+      "gaps": {"dimension": "gaps", "score": 0.42, "evidence": ["薄弱点集中在 transport_tcp 与 wireshark"], "notes": "下一轮优先安排重传与窗口机制。"},
+      "trajectory": {"dimension": "trajectory", "score": 0.63, "evidence": ["完成学习后路径从 TCP 概念推进到抓包实践"], "notes": "趋势改善。"}
+    },
+    "overall_score": 0.6,
+    "trajectory": "improving",
+    "weak_concepts": ["transport_tcp", "wireshark"],
+    "strong_concepts": ["network_architecture"],
+    "recommendations": ["先复盘三次握手时序图，再完成 tcp.port == 8080 抓包观察。", "下一轮生成“超时重传与滑动窗口”专项练习。"],
+    "notes": "评估依据来自资源查看、练习提交和路径推进事件。",
+    "event_window_hours": 168,
+    "events_analyzed": 4
+  },
+  "strategy": {
+    "actions": [
+      {
+        "type": "prioritize_concept",
+        "target": "transport_tcp",
+        "reason": "TCP 建连与可靠传输是后续 Wireshark 实验前置知识。",
+        "priority": 0.92
+      },
+      {
+        "type": "switch_modality",
+        "target": "diagram+exercise+practice",
+        "reason": "画像显示图示、练习和交互偏好最高。",
+        "priority": 0.82
+      }
+    ],
+    "next_resource_types": ["mindmap", "exercise", "code"],
+    "explanation": "根据薄弱概念和学习偏好，下轮减少长文阅读，增加抓包任务和诊断题。"
+  },
+  "agent_trace": [
+    {
+      "id": "trace_profile",
+      "agent": "ProfileBuilder",
+      "role": "学习画像 Agent",
+      "stage": "profile_loading",
+      "status": "succeeded",
+      "input_summary": "读取学生目标、历史薄弱点和偏好。",
+      "output_summary": "识别 transport_tcp、wireshark 为优先补救概念。",
+      "duration_ms": 420,
+      "confidence": 0.86,
+      "artifacts": ["profile_snapshot"]
+    },
+    {
+      "id": "trace_rag",
+      "agent": "RetrievalService",
+      "role": "课程 RAG 工具",
+      "stage": "rag_retrieval",
+      "status": "succeeded",
+      "input_summary": "scope=course:computer_network, query=TCP 三次握手与可靠传输。",
+      "output_summary": "命中传输层讲义和 Wireshark 实验材料。",
+      "duration_ms": 180,
+      "confidence": 0.91,
+      "artifacts": ["citations"]
+    },
+    {
+      "id": "trace_resource",
+      "agent": "ResourceGenerationCapability",
+      "role": "多智能体资源编排",
+      "stage": "parallel_resource_generation",
+      "status": "succeeded",
+      "input_summary": "画像 + 知识图谱 + RAG 证据。",
+      "output_summary": "生成 5 类资源：讲解、导图、练习、阅读、实操。",
+      "duration_ms": 2450,
+      "confidence": 0.88,
+      "artifacts": ["resource_package", "review", "safety"]
+    },
+    {
+      "id": "trace_assessment",
+      "agent": "AssessmentAgent",
+      "role": "学习评估 Agent",
+      "stage": "assessment",
+      "status": "succeeded",
+      "input_summary": "资源查看、练习结果和路径推进事件。",
+      "output_summary": "综合得分 60%，建议继续强化 TCP 与抓包。",
+      "duration_ms": 760,
+      "confidence": 0.82,
+      "artifacts": ["assessment_report", "strategy"]
+    }
+  ],
+  "learning_loop": [
+    {"step": "诊断", "description": "画像发现 TCP 确认号和抓包字段薄弱。"},
+    {"step": "生成", "description": "多智能体基于计算机网络课程 RAG 生成 5 类资源。"},
+    {"step": "学习", "description": "学生查看讲解、导图，并完成 TCP 诊断题。"},
+    {"step": "评估", "description": "系统记录 learning_events，输出多维评估和下一步策略。"},
+    {"step": "调整", "description": "后续路径优先进入 Wireshark 抓包和重传机制。"}
+  ],
+  "teacher_panel": {
+    "course": "计算机网络",
+    "class_summary": {
+      "students": 36,
+      "weakest_concepts": [
+        {"concept": "transport_tcp", "label": "TCP 可靠传输", "risk": 0.71},
+        {"concept": "wireshark", "label": "抓包实践", "risk": 0.64},
+        {"concept": "network_security", "label": "网络安全", "risk": 0.48}
+      ],
+      "recommended_intervention": "本周安排一次 20 分钟 TCP 时序图讲解和一次 Wireshark 抓包小实验。"
+    },
+    "student_focus": {
+      "user_id": "competition-demo",
+      "status": "needs_practice",
+      "evidence": ["TCP 练习正确率未达 80%", "抓包字段解释不完整", "图示资源停留时间较长"],
+      "next_action": "推送重传与滑动窗口专项练习。"
+    }
+  },
+  "events": [
+    {
+      "event_type": "resource_viewed",
+      "target_id": "cn_tcp_doc",
+      "concept_id": "transport_tcp",
+      "duration_seconds": 220,
+      "metadata": {"resource_type": "document", "package_id": "demo_pkg_computer_network_tcp"}
+    },
+    {
+      "event_type": "resource_completed",
+      "target_id": "cn_tcp_mindmap",
+      "concept_id": "transport_tcp",
+      "duration_seconds": 160,
+      "metadata": {"resource_type": "mindmap", "package_id": "demo_pkg_computer_network_tcp"}
+    },
+    {
+      "event_type": "exercise_completed",
+      "target_id": "cn_tcp_exercise",
+      "concept_id": "transport_tcp",
+      "score": 0.67,
+      "correct": false,
+      "metadata": {"correct": 2, "total": 3, "package_id": "demo_pkg_computer_network_tcp"}
+    },
+    {
+      "event_type": "path_advanced",
+      "target_id": "transport_tcp",
+      "concept_id": "transport_tcp",
+      "metadata": {"next": "wireshark"}
+    }
+  ]
+}

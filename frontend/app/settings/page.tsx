@@ -41,6 +41,7 @@ const LLM_PROVIDERS = [
   "custom",
 ];
 const EMBED_PROVIDERS = [
+  "local",
   "openai",
   "openrouter",
   "azure_openai",
@@ -179,6 +180,8 @@ export default function SettingsPage() {
         apiKey={config.embedding.api_key}
         providerOptions={EMBED_PROVIDERS}
         providerHelp={{
+          local:
+            "Local hash embedding runs offline without an API key. It is suitable for course demos and smoke tests; use a cloud embedding model for stronger semantic recall.",
           openrouter:
             "OpenRouter 可作为 OpenAI 兼容向量端点使用，需填写独立的 Embedding API Key 和 Base URL。",
           zhipu:

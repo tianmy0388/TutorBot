@@ -70,6 +70,11 @@ from tutor.services.resource_package.store import (
     ResourcePackageStore,
     get_resource_package_store,
 )
+from tutor.services.retrieval import (
+    RAGContext,
+    RetrievalService,
+    get_retrieval_service,
+)
 
 
 class ResourceGenerationCapability(BaseCapability):
@@ -111,6 +116,7 @@ class ResourceGenerationCapability(BaseCapability):
         anti_hallucination: AntiHallucinationAgent | None = None,
         ppt_generator: PPTGeneratorAgent | None = None,
         package_store: ResourcePackageStore | None = None,
+        retrieval_service: RetrievalService | None = None,
     ) -> None:
         super().__init__()
         self.builder = builder
@@ -126,6 +132,7 @@ class ResourceGenerationCapability(BaseCapability):
         self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
         self.ppt_generator = ppt_generator or PPTGeneratorAgent()
         self.package_store = package_store
+        self.retrieval_service = retrieval_service
         # **2026-07-08 fix (fdb26152):** strong references to
         # fire-and-forget video render tasks. Without this, asyncio
         # GC's the task as soon as ``_start_pending_video_renders``
@@ -143,6 +150,10 @@ class ResourceGenerationCapability(BaseCapability):
         if self.package_store is None:
             self.package_store = get_resource_package_store()
         return self.package_store
+
+    @property
+    def _retrieval(self) -> RetrievalService:
+        return self.retrieval_service or get_retrieval_service()
 
     # ------------------------------------------------------------------
     # Entry point
@@ -236,6 +247,64 @@ class ResourceGenerationCapability(BaseCapability):
                 )
 
         # ------------------------------------------------------------------
+        # Stage 3.5: Course-scoped RAG retrieval
+        # ------------------------------------------------------------------
+        rag_context: RAGContext | None = None
+        rag_snippets: list[str] = []
+        rag_citations: list[dict[str, Any]] = []
+        async with stream.stage("rag_retrieval", source="resource_capability"):
+            try:
+                scope = (context.metadata or {}).get("retrieval_scope") or "all"
+                if (context.metadata or {}).get("rag_enabled") is False:
+                    scope = "none"
+                rag_query = f"{intent.topic}\n{context.user_message}"
+                retrieval_result = await self._retrieval.retrieve(
+                    query=rag_query,
+                    user_id=context.user_id,
+                    scope=scope,
+                )
+                rag_context = RAGContext.from_result(
+                    retrieval_result,
+                    query=rag_query,
+                )
+                rag_citations = [c.to_dict() for c in rag_context.chunks]
+                rag_snippets = [
+                    (
+                        f"[{idx}] {c.knowledge_base_name} / {c.document_name}"
+                        f"{' (' + c.anchor + ')' if c.anchor else ''}"
+                        f" — score={c.score:.3f}\n{c.text}"
+                    )
+                    for idx, c in enumerate(rag_context.chunks, 1)
+                ]
+                context.metadata["rag_context"] = (
+                    RAGContext.to_plain_text(rag_context)
+                    if rag_context.chunks
+                    else ""
+                )
+                context.metadata["rag_citations"] = rag_citations
+                await stream.observation(
+                    (
+                        f"RAG 检索完成：{len(rag_citations)} 条证据"
+                        if rag_context.status == "ok"
+                        else f"RAG 状态：{rag_context.status}"
+                    ),
+                    source="resource_capability",
+                    stage="rag_retrieval",
+                    metadata={
+                        "status": rag_context.status,
+                        "scope": scope,
+                        "citation_count": len(rag_citations),
+                        "error_code": rag_context.error_code,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(f"Resource RAG retrieval failed: {exc!r}")
+                await stream.error(
+                    f"RAG 检索失败，本轮将降级生成: {exc}",
+                    source="resource_capability",
+                )
+
+        # ------------------------------------------------------------------
         # Stage 4: Resource planning
         # ------------------------------------------------------------------
         async with stream.stage("resource_planning", source="resource_capability"):
@@ -268,6 +337,13 @@ class ResourceGenerationCapability(BaseCapability):
                         stream=stream,
                         topic=intent.topic,
                         profile=profile_snapshot,
+                        rag_snippets=rag_snippets,
+                    )
+                    self._attach_rag_evidence(
+                        document_resource,
+                        rag_citations,
+                        rag_context,
+                        source="content_expert",
                     )
                     # Pedagogy rewrites ContentExpert output
                     pedagogy_resource = await self.pedagogy.process(
@@ -280,6 +356,12 @@ class ResourceGenerationCapability(BaseCapability):
                     pedagogy_resource.confidence_score = max(
                         pedagogy_resource.confidence_score,
                         document_resource.confidence_score,
+                    )
+                    self._attach_rag_evidence(
+                        pedagogy_resource,
+                        rag_citations,
+                        rag_context,
+                        source="pedagogy",
                     )
                     # **2026-07-08 fix (187b2955):** emit a ``RESOURCE``
                     # event for the pedagogy output *before* the slower
@@ -317,6 +399,8 @@ class ResourceGenerationCapability(BaseCapability):
                 source_content=pedagogy_resource.content if pedagogy_resource else "",
                 planned_types=planned_types,
                 stream=stream,
+                rag_context=rag_context,
+                rag_citations=rag_citations,
             )
             resources.extend(parallel_resources)
 
@@ -400,6 +484,8 @@ class ResourceGenerationCapability(BaseCapability):
                 "safety_blocked": sum(
                     1 for s in safety_reports if s.overall_verdict == OverallVerdict.UNSAFE
                 ),
+                "rag_status": rag_context.status if rag_context else "not_run",
+                "rag_citation_count": len(rag_citations),
             },
         )
         # Attach review + safety to each resource
@@ -933,6 +1019,8 @@ class ResourceGenerationCapability(BaseCapability):
         source_content: str,
         planned_types: list[ResourceType],
         stream: StreamBus,
+        rag_context: RAGContext | None = None,
+        rag_citations: list[dict[str, Any]] | None = None,
     ) -> list[Resource]:
         """Run the type-specific agents in parallel."""
         tasks: list[tuple[ResourceType, asyncio.Task]] = []
@@ -1046,6 +1134,8 @@ class ResourceGenerationCapability(BaseCapability):
                         profile_snapshot=profile_snapshot,
                         source_content=source_content,
                         stream=stream,
+                        rag_context=rag_context,
+                        rag_citations=rag_citations or [],
                     ),
                     ResourceType.READING,
                )),
@@ -1082,6 +1172,12 @@ class ResourceGenerationCapability(BaseCapability):
             r = await fut
             if r is None:
                 continue
+            self._attach_rag_evidence(
+                r,
+                rag_citations or [],
+                rag_context,
+                source=f"{r.type.value}_generator",
+            )
             finished.append(r)
             try:
                 await stream.resource(
@@ -1103,12 +1199,10 @@ class ResourceGenerationCapability(BaseCapability):
         profile_snapshot: dict[str, Any],
         source_content: str,
         stream: StreamBus,
+        rag_context: RAGContext | None = None,
+        rag_citations: list[dict[str, Any]] | None = None,
     ) -> Resource:
-        """Build a reading resource from the pedagogy output + RAG context.
-
-        Uses PedagogyAgent to rewrite as a 'further reading' piece with
-        citations inferred from the source content (no real RAG in MVP).
-        """
+        """Build a reading resource from the pedagogy output + real RAG evidence."""
         from tutor.services.resource_package.schema import (
             ReadingResource,
             build_resource,
@@ -1136,20 +1230,23 @@ class ResourceGenerationCapability(BaseCapability):
             except Exception:
                 improved = source_resource
 
+        rag_citations = rag_citations or []
+
         # Build ReadingResource payload
         payload = ReadingResource(
-            citations=[],  # RAG integration in Phase 5
+            citations=rag_citations,
             estimated_reading_minutes=max(5, improved.estimated_minutes // 2),
         )
+        citation_lines = self._format_citation_markdown(rag_citations)
 
         content = (
             f"# {topic} — 拓展阅读\n\n"
             f"{improved.content}\n\n"
-            f"## 推荐资源\n\n"
-            f"（Phase 5 将接入 RAG 自动检索相关论文和资料）\n"
+            f"## 推荐阅读与课程依据\n\n"
+            f"{citation_lines or '本轮未检索到可用课程证据，建议先检查知识库索引。'}\n"
         )
 
-        return build_resource(
+        resource = build_resource(
             type=ResourceType.READING,
             title=f"{topic} — 拓展阅读",
             content=content,
@@ -1162,6 +1259,78 @@ class ResourceGenerationCapability(BaseCapability):
             topic=topic,
             tags=["reading", "further"],
         )
+        self._attach_rag_evidence(
+            resource,
+            rag_citations,
+            rag_context,
+            source="reading_compiler",
+        )
+        return resource
+
+    # ------------------------------------------------------------------
+    # RAG evidence helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _attach_rag_evidence(
+        resource: Resource,
+        citations: list[dict[str, Any]],
+        rag_context: RAGContext | None = None,
+        *,
+        source: str = "resource_generation",
+    ) -> None:
+        """Attach course-RAG provenance to every generated resource.
+
+        A3 的可信生成要求资源能解释“依据来自哪里”。这里不重写
+        各个 Agent 的正文，只把同一轮检索证据归一化写入 Resource
+        的 evidence fields，前端现有 ResourceEvidence 面板会直接展示。
+        """
+        if citations:
+            existing = resource.citations or []
+            seen = {
+                str(c.get("chunk_id") or c.get("document_id") or c)
+                for c in existing
+                if isinstance(c, dict)
+            }
+            merged = list(existing)
+            for citation in citations:
+                key = str(
+                    citation.get("chunk_id")
+                    or citation.get("document_id")
+                    or citation
+                )
+                if key not in seen:
+                    merged.append(citation)
+                    seen.add(key)
+            resource.citations = merged
+            resource.metadata.setdefault("citations", merged)
+        resource.metadata.setdefault(
+            "rag",
+            {
+                "status": rag_context.status if rag_context else "not_run",
+                "query": rag_context.query if rag_context else "",
+                "source": source,
+                "citation_count": len(citations),
+                "scope": (
+                    rag_context.scope.raw
+                    if rag_context and rag_context.scope
+                    else ""
+                ),
+                "error_code": rag_context.error_code if rag_context else None,
+            },
+        )
+
+    @staticmethod
+    def _format_citation_markdown(citations: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for idx, c in enumerate(citations[:8], 1):
+            kb = c.get("knowledge_base_name") or c.get("knowledge_base_id") or "知识库"
+            doc = c.get("document_name") or c.get("document_id") or "文档"
+            anchor = c.get("anchor") or ""
+            score = c.get("score")
+            suffix = f"，相关度 {score}" if score is not None else ""
+            lines.append(f"{idx}. {kb} / {doc}{f'（{anchor}）' if anchor else ''}{suffix}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Quality review
