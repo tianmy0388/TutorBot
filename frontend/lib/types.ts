@@ -740,6 +740,8 @@ export interface WebSearchConfig {
   enabled: boolean;
   provider: string;
   max_results: number;
+  mcp_server: string;
+  mcp_tool: string;
   api_key: MaskedSecret;
 }
 

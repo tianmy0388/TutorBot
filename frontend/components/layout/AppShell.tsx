@@ -83,11 +83,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           borderColor: "rgb(var(--color-rule) / 0.6)",
         }}
       >
-        <div className="h-14 px-5 flex items-center justify-between gap-6">
+        <div className="h-14 px-2 sm:px-5 flex items-center justify-between gap-1 sm:gap-6">
           {/* Brand */}
           <Link
             href="/"
-            className="group flex items-center"
+            className="group hidden sm:flex items-center"
             data-testid="app-logo"
           >
             <Logo size={26} showWordmark wordmarkSize="lg" />
@@ -95,7 +95,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
           {/* Primary nav */}
           <nav
-            className="flex items-center gap-1 flex-1 justify-center"
+            className="flex items-center gap-0 sm:gap-1 flex-1 justify-start sm:justify-center"
             data-testid="app-nav"
           >
             {NAV_ITEMS.map((item) => {
@@ -105,13 +105,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "relative inline-flex items-center gap-1.5 px-3 h-8 rounded-md text-[13px] font-medium",
+                    "relative inline-flex items-center gap-1.5 px-2 sm:px-3 h-8 rounded-md text-[13px] font-medium",
                     "transition-colors duration-150",
                     active
                       ? "text-fg"
                       : "text-fg-muted hover:text-fg",
                   )}
                   data-testid={`nav-${item.label}`}
+                  aria-label={item.label}
                 >
                   <item.icon
                     className={cn(
@@ -119,7 +120,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                       active ? "text-brand-400" : "text-fg-subtle",
                     )}
                   />
-                  <span>{item.label}</span>
+                  <span className="hidden min-[480px]:inline">{item.label}</span>
                   {active && (
                     <span
                       className="absolute -bottom-[1px] left-3 right-3 h-[2px] rounded-full"

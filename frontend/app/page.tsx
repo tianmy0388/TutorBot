@@ -53,6 +53,19 @@ export default function HomePage() {
     hydrateTheme();
   }, [hydrateTheme]);
 
+  useEffect(() => {
+    const mobile = typeof window.matchMedia === "function"
+      ? window.matchMedia("(max-width: 767px)")
+      : null;
+    const collapseSidebar = () => {
+      if (mobile?.matches ?? window.innerWidth <= 767) setSidebarOpen(false);
+    };
+    collapseSidebar();
+    if (!mobile) return;
+    mobile.addEventListener("change", collapseSidebar);
+    return () => mobile.removeEventListener("change", collapseSidebar);
+  }, []);
+
   const hydrateSessionId = useTutorStore((s) => s.hydrateSessionId);
   const sessionIdRestored = useTutorStore((s) => s.sessionId);
   const userIdRestored = useTutorStore((s) => s.userId);
@@ -149,7 +162,7 @@ export default function HomePage() {
   };
 
   return (
-    <div className="flex h-full overflow-hidden bg-bg">
+    <div className="relative flex h-full overflow-hidden bg-bg">
       <Sidebar
         sessionId={sessionId}
         onNewSession={() => {
@@ -165,7 +178,7 @@ export default function HomePage() {
       <main className="flex-1 flex flex-col min-w-0">
         {/* Workspace header — editorial, restrained */}
         <header
-          className="h-14 px-6 flex items-center justify-between shrink-0 animate-slide-down"
+          className="relative z-30 h-14 px-6 flex items-center justify-between shrink-0 animate-slide-down"
           style={{
             borderBottom: "1px solid rgb(var(--color-rule) / 0.6)",
             backgroundColor: "rgb(var(--color-bg-panel) / 0.4)",
@@ -212,10 +225,10 @@ export default function HomePage() {
         </header>
 
         {/* Center + right split */}
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
           {/* Center: chat */}
           <section
-            className="flex-1 flex flex-col min-w-0"
+            className="flex-1 flex flex-col min-w-0 min-h-0"
             style={{ borderRight: "1px solid rgb(var(--color-rule) / 0.6)" }}
           >
             <ChatMessages />
@@ -223,7 +236,7 @@ export default function HomePage() {
           </section>
 
           {/* Right: tabs */}
-          <aside className="flex-1 bg-bg-subtle flex flex-col overflow-hidden min-w-[360px]">
+          <aside className="flex-1 bg-bg-subtle flex flex-col overflow-hidden min-w-0 min-h-0 md:min-w-[360px]">
             {/* Tab bar — editorial contents-page feel */}
             <div
               className="flex items-center gap-0.5 px-2 py-2 shrink-0 overflow-x-auto"

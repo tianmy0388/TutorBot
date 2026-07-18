@@ -372,7 +372,7 @@ async def retry_video_render(
                 else None
             ),
         },
-        "resource": current_resource.model_dump(mode="json"),
+        "resource": public_resource_dump(current_resource),
     }
 
 

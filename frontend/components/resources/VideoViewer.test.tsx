@@ -212,6 +212,26 @@ describe("VideoViewer durable render lifecycle", () => {
     );
   });
 
+  it("never renders a legacy raw traceback as the failure summary", () => {
+    const legacyFailure = {
+      ...baseResource,
+      format_specific: {
+        render_status: "failed",
+        render_error:
+          "+--- Traceback (most recent call last) ---+ E:\\private\\scene.py",
+        manim_code:
+          'from manim import *\nclass MainScene(Scene):\n    pass\n',
+      },
+    } satisfies Resource;
+    setCanonicalResource(legacyFailure);
+
+    render(<VideoViewer resource={legacyFailure} />);
+
+    expect(screen.getByText("渲染流程未生成可播放视频。")).toBeInTheDocument();
+    expect(screen.queryByText(/Traceback \(most recent call last\)/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/E:\\private/)).not.toBeInTheDocument();
+  });
+
   it("shows a spinner only when a canonical resource or child is non-terminal", () => {
     render(<VideoViewer resource={baseResource} />);
     expect(screen.getByText("视频渲染中…")).toBeInTheDocument();

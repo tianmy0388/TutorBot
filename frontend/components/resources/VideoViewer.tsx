@@ -180,7 +180,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   const failure = formatSpec.render_failure;
   const failureSummary = videoLoadFailed
     ? "视频文件无法加载"
-    : failure?.summary || formatSpec.render_error || "渲染流程未生成可播放视频。";
+    : failure?.summary || "渲染流程未生成可播放视频。";
   const tracebackTail = Array.isArray(failure?.traceback_tail)
     ? failure.traceback_tail.join("\n")
     : failure?.traceback_tail || "";

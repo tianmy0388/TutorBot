@@ -562,6 +562,40 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
     expected values while retaining enough metadata to render the editor.
     """
     data = resource.model_dump(mode="json")
+    if resource.type == ResourceType.VIDEO:
+        from tutor.services.manim_render.executor import (
+            safe_failure_summary,
+            tail_lines,
+        )
+
+        format_specific = dict(data.get("format_specific") or {})
+        failure = format_specific.get("render_failure")
+        if isinstance(failure, dict):
+            fallback = "渲染流程未生成可播放视频。"
+            summary = safe_failure_summary(
+                str(failure.get("summary") or fallback),
+                fallback=fallback,
+            )
+            raw_tail = failure.get("traceback_tail")
+            diagnostic_text = "\n".join(
+                str(line) for line in raw_tail
+            ) if isinstance(raw_tail, list) else str(raw_tail or "")
+            format_specific["render_failure"] = {
+                "error_code": str(failure.get("error_code") or "internal_error"),
+                "summary": summary,
+                "traceback_tail": list(tail_lines(diagnostic_text)),
+                "log_artifact_key": str(failure.get("log_artifact_key") or ""),
+            }
+            format_specific["render_error"] = summary
+        elif format_specific.get("render_status") == "failed":
+            # Pre-structured Manim records stored the complete host traceback
+            # in render_error. Never expose that legacy blob to a browser.
+            format_specific["render_error_code"] = str(
+                format_specific.get("render_error_code") or "legacy_render_failure"
+            )
+            format_specific["render_error"] = "渲染流程未生成可播放视频。"
+        data["format_specific"] = format_specific
+        return data
     if resource.type != ResourceType.EXERCISE:
         return data
     format_specific = dict(data.get("format_specific") or {})

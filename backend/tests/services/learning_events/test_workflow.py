@@ -131,6 +131,77 @@ async def test_reconcile_all_repairs_event_to_job_crash_window(workflow):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_repairs_missing_current_profile_path_once(workflow):
+    from tutor.core.capability_result import FollowUpTaskSpec
+    from tutor.services.jobs.follow_up import FollowUpScheduler
+    from tutor.services.jobs.schema import Job
+    from tutor.services.learner_profile.schema import empty_profile
+
+    service, _, profiles, jobs = workflow
+    profile = empty_profile("local-user")
+    profile.version = 2
+    profile.event_watermark = 6
+    profile.knowledge_map.set("attention", 0.6)
+    await profiles.replace(profile, source="migration-recovery-fixture")
+    root = await jobs.ensure_parent(
+        Job(
+            job_id=service.root_job_id("local-user"),
+            user_id="local-user",
+            session_id="sess-recovery",
+            capability="learning_loop",
+            status=JobStatus.SUCCEEDED,
+        )
+    )
+    failed = (
+        await FollowUpScheduler(jobs).enqueue(
+            root.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="path_rebuild",
+                    dedupe_key="path_rebuild:2",
+                    payload={
+                        "user_id": "local-user",
+                        "profile_version": 2,
+                        "profile": profile.model_dump(mode="json"),
+                    },
+                ),
+            ),
+        )
+    )[0]
+    await jobs.update_status(failed.job_id, status=JobStatus.FAILED, error="old failure")
+
+    first = await service.reconcile_user("local-user", session_id="sess-recovery")
+    second = await service.reconcile_user("local-user", session_id="sess-recovery")
+
+    assert len(first) == 1
+    assert first[0].dedupe_key == "path_rebuild:2:recovery-1"
+    assert first[0].status == JobStatus.PENDING
+    assert second[0].job_id == first[0].job_id
+    all_children = await jobs.get_children(root.job_id)
+    assert [child.dedupe_key for child in all_children] == [
+        "path_rebuild:2",
+        "path_rebuild:2:recovery-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_all_includes_profile_users_without_events(workflow):
+    from tutor.services.learner_profile.schema import empty_profile
+
+    service, _, profiles, jobs = workflow
+    profile = empty_profile("profile-only-user")
+    profile.version = 3
+    await profiles.replace(profile, source="profile-only-fixture")
+
+    assert await service.reconcile_all() == 1
+    root = await jobs.get(service.root_job_id("profile-only-user"))
+    assert root is not None
+    children = await jobs.get_children(root.job_id)
+    assert len(children) == 1
+    assert children[0].dedupe_key == "path_rebuild:3"
+
+
+@pytest.mark.asyncio
 async def test_path_child_is_globally_deduped_by_user_and_profile_version(workflow):
     from tutor.core.capability_result import FollowUpTaskSpec
     from tutor.services.jobs.follow_up import FollowUpScheduler

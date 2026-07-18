@@ -44,29 +44,49 @@ class MigrationReport:
     discovered_users: tuple[str, ...]
     written_files: int
     unresolved_paths: tuple[str, ...] = ()
+    relocation_roots: tuple[Path, ...] = ()
 
 
 class MigrationError(RuntimeError):
     """Raised when a migration cannot preserve its ownership guarantees."""
 
 
-def build_migration_report(repo_root: Path, target_user_id: str) -> MigrationReport:
+def build_migration_report(
+    repo_root: Path,
+    target_user_id: str,
+    *,
+    relocate_from: Iterable[Path] = (),
+) -> MigrationReport:
     """Inspect historical data roots without writing to either one."""
     _validate_target_user_id(target_user_id)
     root = Path(repo_root).resolve()
     candidates = (root / "data", root / "backend" / "data")
     sources = tuple(path.resolve() for path in candidates if path.is_dir())
     users = tuple(sorted(_discover_user_ids(sources)))
-    return MigrationReport(sources, (root / "data").resolve(), None, users, 0)
+    relocation_roots = tuple(Path(path).resolve() for path in relocate_from)
+    return MigrationReport(
+        sources,
+        (root / "data").resolve(),
+        None,
+        users,
+        0,
+        relocation_roots=relocation_roots,
+    )
 
 
 def run_local_migration(
     repo_root: Path,
     target_user_id: str,
     dry_run: bool,
+    *,
+    relocate_from: Iterable[Path] = (),
 ) -> MigrationReport:
     """Back up and consolidate local data, or return its read-only inventory."""
-    report = build_migration_report(repo_root, target_user_id)
+    report = build_migration_report(
+        repo_root,
+        target_user_id,
+        relocate_from=relocate_from,
+    )
     if dry_run:
         return report
 
@@ -181,6 +201,8 @@ def _merge_databases_and_artifacts(
             database,
             (*report.source_dirs, report.target_dir),
             unresolved_paths,
+            report.relocation_roots,
+            target_user_id,
         ):
             written.add(database)
     return len(written), tuple(sorted(unresolved_paths))
@@ -231,11 +253,68 @@ def _merge_sqlite_database(source: Path, target: Path, target_user_id: str) -> b
                 for ownership_index in ownership_indexes:
                     if values[ownership_index] is not None:
                         values[ownership_index] = target_user_id
+                profile_changed = _merge_profile_snapshot(
+                    target_connection,
+                    table,
+                    columns,
+                    values,
+                    target_user_id,
+                )
+                if profile_changed is not None:
+                    changed = changed or profile_changed
+                    continue
                 cursor = target_connection.execute(insert, values)
                 changed = changed or cursor.rowcount > 0
 
         target_connection.commit()
     return changed
+
+
+def _merge_profile_snapshot(
+    connection: sqlite3.Connection,
+    table: str,
+    columns: list[str],
+    values: list[object],
+    target_user_id: str,
+) -> bool | None:
+    """Merge a cross-root profile collision without discarding newer state."""
+    required = {"user_id", "version", "profile_data", "updated_at"}
+    if table != "profiles" or not required.issubset(columns):
+        return None
+
+    indexes = {column: columns.index(column) for column in required}
+    existing = connection.execute(
+        f"SELECT {_quote('version')}, {_quote('profile_data')}, {_quote('updated_at')} "
+        f"FROM {_quote(table)} WHERE {_quote('user_id')} = ?",
+        (target_user_id,),
+    ).fetchone()
+    if existing is None:
+        selected = ", ".join(_quote(column) for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        cursor = connection.execute(
+            f"INSERT INTO {_quote(table)} ({selected}) VALUES ({placeholders})",
+            values,
+        )
+        return cursor.rowcount > 0
+
+    candidate_rank = _profile_snapshot_rank(
+        values[indexes["version"]],
+        values[indexes["profile_data"]],
+        values[indexes["updated_at"]],
+    )
+    if candidate_rank <= _profile_snapshot_rank(*existing):
+        return False
+
+    snapshot_columns = [column for column in columns if column != "user_id"]
+    assignments = ", ".join(f"{_quote(column)} = ?" for column in snapshot_columns)
+    cursor = connection.execute(
+        f"UPDATE {_quote(table)} SET {assignments} WHERE {_quote('user_id')} = ?",
+        (
+            *(values[columns.index(column)] for column in snapshot_columns),
+            target_user_id,
+        ),
+    )
+    return cursor.rowcount > 0
 
 
 def _rewrite_user_ids(database: Path, target_user_id: str) -> bool:
@@ -267,8 +346,17 @@ def _rewrite_user_ids(database: Path, target_user_id: str) -> bool:
                         )
                     except sqlite3.IntegrityError:
                         # A canonical row already owns the same unique business
-                        # key. Keep that row and discard this migrated duplicate;
-                        # the pre-write backup retains the original source row.
+                        # key. Profiles are state snapshots, so preserve the
+                        # newest snapshot before collapsing the duplicate.
+                        _preserve_newest_profile_collision(
+                            connection,
+                            table,
+                            rowid,
+                            target_user_id,
+                            ownership_columns,
+                        )
+                        # Other tables keep the canonical row; the pre-write
+                        # backup retains every original source row.
                         cursor = connection.execute(
                             f"DELETE FROM {_quote(table)} WHERE rowid = ?",
                             (rowid,),
@@ -286,10 +374,72 @@ def _rewrite_user_ids(database: Path, target_user_id: str) -> bool:
     return changed
 
 
+def _preserve_newest_profile_collision(
+    connection: sqlite3.Connection,
+    table: str,
+    legacy_rowid: int,
+    target_user_id: str,
+    ownership_columns: tuple[str, ...],
+) -> bool:
+    """Keep the newest profile snapshot when owner normalisation collides."""
+    if table != "profiles" or ownership_columns != ("user_id",):
+        return False
+    columns = set(_table_columns(connection, table))
+    snapshot_columns = ("version", "profile_data", "created_at", "updated_at")
+    if not {"user_id", *snapshot_columns}.issubset(columns):
+        return False
+    selected = ", ".join(_quote(column) for column in snapshot_columns)
+    legacy = connection.execute(
+        f"SELECT {selected} FROM {_quote(table)} WHERE rowid = ?",
+        (legacy_rowid,),
+    ).fetchone()
+    canonical = connection.execute(
+        f"SELECT {selected} FROM {_quote(table)} WHERE {_quote('user_id')} = ?",
+        (target_user_id,),
+    ).fetchone()
+    if legacy is None or canonical is None:
+        return False
+    legacy_rank = _profile_snapshot_rank(legacy[0], legacy[1], legacy[3])
+    canonical_rank = _profile_snapshot_rank(canonical[0], canonical[1], canonical[3])
+    if legacy_rank <= canonical_rank:
+        return False
+    assignments = ", ".join(f"{_quote(column)} = ?" for column in snapshot_columns)
+    connection.execute(
+        f"UPDATE {_quote(table)} SET {assignments} WHERE {_quote('user_id')} = ?",
+        (*legacy, target_user_id),
+    )
+    return True
+
+
+def _profile_snapshot_rank(
+    version: object,
+    profile_data: object,
+    updated_at: object,
+) -> tuple[int, int, str]:
+    try:
+        payload = json.loads(str(profile_data or "{}"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        payload = {}
+
+    def as_int(value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return (
+        as_int(payload.get("event_watermark")),
+        as_int(version),
+        str(updated_at or ""),
+    )
+
+
 def _normalize_artifact_paths(
     database: Path,
     data_roots: tuple[Path, ...],
     unresolved_paths: set[str],
+    relocation_roots: tuple[Path, ...],
+    target_user_id: str,
 ) -> bool:
     changed = False
     try:
@@ -311,6 +461,7 @@ def _normalize_artifact_paths(
                                 column_name,
                                 data_roots,
                                 unresolved_paths,
+                                relocation_roots,
                             )
                             or changed
                         )
@@ -322,6 +473,8 @@ def _normalize_artifact_paths(
                                 column_name,
                                 data_roots,
                                 unresolved_paths,
+                                relocation_roots,
+                                target_user_id,
                             )
                             or changed
                         )
@@ -336,13 +489,19 @@ def _normalize_path_column(
     column: str,
     data_roots: tuple[Path, ...],
     unresolved_paths: set[str],
+    relocation_roots: tuple[Path, ...],
 ) -> bool:
     changed = False
     rows = connection.execute(
         f"SELECT rowid, {_quote(column)} FROM {_quote(table)} WHERE {_quote(column)} IS NOT NULL"
     ).fetchall()
     for rowid, value in rows:
-        normalized = _normalize_path_value(value, data_roots, unresolved_paths)
+        normalized = _normalize_path_value(
+            value,
+            data_roots,
+            unresolved_paths,
+            relocation_roots,
+        )
         if normalized != value:
             connection.execute(
                 f"UPDATE {_quote(table)} SET {_quote(column)} = ? WHERE rowid = ?",
@@ -358,6 +517,8 @@ def _normalize_json_column(
     column: str,
     data_roots: tuple[Path, ...],
     unresolved_paths: set[str],
+    relocation_roots: tuple[Path, ...],
+    target_user_id: str,
 ) -> bool:
     changed = False
     rows = connection.execute(
@@ -370,7 +531,13 @@ def _normalize_json_column(
             payload = json.loads(value)
         except json.JSONDecodeError:
             continue
-        normalized = _normalize_json_value(payload, data_roots, unresolved_paths)
+        normalized = _normalize_json_value(
+            payload,
+            data_roots,
+            unresolved_paths,
+            relocation_roots,
+            target_user_id,
+        )
         if normalized != payload:
             connection.execute(
                 f"UPDATE {_quote(table)} SET {_quote(column)} = ? WHERE rowid = ?",
@@ -384,18 +551,44 @@ def _normalize_json_value(
     value: object,
     data_roots: tuple[Path, ...],
     unresolved_paths: set[str],
+    relocation_roots: tuple[Path, ...],
+    target_user_id: str,
 ) -> object:
     if isinstance(value, dict):
         return {
             key: (
-                _normalize_path_value(item, data_roots, unresolved_paths)
+                target_user_id
+                if str(key).lower() in _OWNERSHIP_COLUMNS
+                and isinstance(item, str)
+                and item.strip()
+                else _normalize_path_value(
+                    item,
+                    data_roots,
+                    unresolved_paths,
+                    relocation_roots,
+                )
                 if str(key).lower() in _ARTIFACT_PATH_COLUMNS
-                else _normalize_json_value(item, data_roots, unresolved_paths)
+                else _normalize_json_value(
+                    item,
+                    data_roots,
+                    unresolved_paths,
+                    relocation_roots,
+                    target_user_id,
+                )
             )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_normalize_json_value(item, data_roots, unresolved_paths) for item in value]
+        return [
+            _normalize_json_value(
+                item,
+                data_roots,
+                unresolved_paths,
+                relocation_roots,
+                target_user_id,
+            )
+            for item in value
+        ]
     return value
 
 
@@ -403,6 +596,7 @@ def _normalize_path_value(
     value: object,
     data_roots: tuple[Path, ...],
     unresolved_paths: set[str],
+    relocation_roots: tuple[Path, ...],
 ) -> object:
     if not isinstance(value, str) or not value:
         return value
@@ -416,8 +610,47 @@ def _normalize_path_value(
             return resolved.relative_to(data_root.resolve()).as_posix()
         except ValueError:
             continue
+    relocated = _relocated_artifact_path(
+        resolved,
+        data_roots,
+        relocation_roots,
+    )
+    if relocated is not None:
+        return relocated
     unresolved_paths.add(value)
     return value
+
+
+def _relocated_artifact_path(
+    path: Path,
+    data_roots: tuple[Path, ...],
+    relocation_roots: tuple[Path, ...],
+) -> str | None:
+    """Recover an artifact whose absolute prefix predates a repo move/rename.
+
+    Relocation is opt-in through explicit former repository roots. Existing
+    external paths are never retargeted, even when allow-listed.
+    """
+    if path.exists():
+        return None
+    for former_repo in relocation_roots:
+        for former_data_root in (former_repo / "data", former_repo / "backend" / "data"):
+            try:
+                relative_path = path.relative_to(former_data_root.resolve())
+            except ValueError:
+                continue
+            if not relative_path.parts:
+                continue
+            for data_root in data_roots:
+                root = data_root.resolve()
+                candidate = (root / relative_path).resolve()
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    continue
+                if candidate.exists():
+                    return relative_path.as_posix()
+    return None
 
 
 def _iter_sqlite_files(source_dir: Path) -> Iterable[Path]:

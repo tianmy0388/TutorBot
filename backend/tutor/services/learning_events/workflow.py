@@ -9,6 +9,7 @@ from tutor.core.capability_result import FollowUpTaskSpec
 from tutor.services.jobs.follow_up import FollowUpScheduler
 from tutor.services.jobs.schema import Job, JobStatus
 from tutor.services.jobs.store import JobStore, get_job_store
+from tutor.services.learner_profile.schema import LearnerProfile
 from tutor.services.learner_profile.store import ProfileStore, get_profile_store
 from tutor.services.learning_events.store import (
     LearningEventStore,
@@ -59,7 +60,15 @@ class LearningWorkflow:
             scored_threshold=PROFILE_EVENT_THRESHOLD,
         )
         if through is None:
-            return []
+            if profile is None or await self.profile_store.get_path(
+                user_id, profile.version
+            ) is not None:
+                return []
+            return await self._schedule_missing_path(
+                profile,
+                session_id=session_id,
+                course=course,
+            )
         window = await self.event_store.list_since(
             user_id,
             watermark,
@@ -69,17 +78,7 @@ class LearningWorkflow:
             (event.course for event in reversed(window) if event.course),
             course,
         )
-        root = await self.job_store.ensure_parent(
-            Job(
-                job_id=self.root_job_id(user_id),
-                user_id=user_id,
-                session_id=session_id,
-                capability="learning_loop",
-                status=JobStatus.SUCCEEDED,
-                finished_at=datetime.now(UTC),
-                result={"status": "succeeded"},
-            )
-        )
+        root = await self._ensure_root(user_id, session_id=session_id)
         return await FollowUpScheduler(self.job_store).enqueue(
             root.job_id,
             (
@@ -96,10 +95,67 @@ class LearningWorkflow:
             ),
         )
 
+    async def _ensure_root(self, user_id: str, *, session_id: str) -> Job:
+        return await self.job_store.ensure_parent(
+            Job(
+                job_id=self.root_job_id(user_id),
+                user_id=user_id,
+                session_id=session_id,
+                capability="learning_loop",
+                status=JobStatus.SUCCEEDED,
+                finished_at=datetime.now(UTC),
+                result={"status": "succeeded"},
+            )
+        )
+
+    async def _schedule_missing_path(
+        self,
+        profile: LearnerProfile,
+        *,
+        session_id: str,
+        course: str,
+    ) -> list[Job]:
+        """Create one bounded recovery attempt for a missing current path."""
+        root = await self._ensure_root(profile.user_id, session_id=session_id)
+        scheduler = FollowUpScheduler(self.job_store)
+        payload = {
+            "user_id": profile.user_id,
+            "profile_version": profile.version,
+            "profile": profile.model_dump(mode="json"),
+            "course": course,
+        }
+        original = await scheduler.enqueue(
+            root.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="path_rebuild",
+                    dedupe_key=f"path_rebuild:{profile.version}",
+                    payload=payload,
+                ),
+            ),
+        )
+        if original[0].status in {JobStatus.PENDING, JobStatus.RUNNING}:
+            return original
+        # Preserve the first terminal attempt for diagnostics. One distinct,
+        # deterministic recovery key makes restart repair idempotent and
+        # prevents an unbounded retry loop when the underlying issue persists.
+        return await scheduler.enqueue(
+            root.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="path_rebuild",
+                    dedupe_key=f"path_rebuild:{profile.version}:recovery-1",
+                    payload=payload,
+                ),
+            ),
+        )
+
     async def reconcile_all(self) -> int:
         """Repair durable event→job gaps left by a prior process crash."""
         reconciled = 0
-        for user_id in await self.event_store.list_users():
+        users = set(await self.event_store.list_users())
+        users.update(await self.profile_store.list_users())
+        for user_id in sorted(users):
             if await self.reconcile_user(user_id):
                 reconciled += 1
         return reconciled

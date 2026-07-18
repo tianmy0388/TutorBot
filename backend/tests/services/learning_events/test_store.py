@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -38,6 +40,36 @@ async def test_record_and_query(store):
     assert len(events) == 1
     assert events[0].user_id == "alice"
     assert events[0].score == pytest.approx(0.85)
+
+
+@pytest.mark.asyncio
+async def test_event_row_owner_overrides_stale_json_owner(tmp_path):
+    database = tmp_path / "owner_events.db"
+    store = LearningEventStore(database)
+    await store.init()
+    event = LearningEvent(
+        event_id="migrated-event",
+        user_id="local-user",
+        event_type=EventType.RESOURCE_VIEWED,
+        target_id="resource",
+    )
+    await store.append(event)
+    await store.close()
+    payload = event.to_dict()
+    payload["user_id"] = "historical-user"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE learning_events SET event_data = ? WHERE event_id = ?",
+            (json.dumps(payload), event.event_id),
+        )
+
+    restarted = LearningEventStore(database)
+    await restarted.init()
+    try:
+        restored = await restarted.query("local-user")
+        assert restored[0].user_id == "local-user"
+    finally:
+        await restarted.close()
 
 
 @pytest.mark.asyncio

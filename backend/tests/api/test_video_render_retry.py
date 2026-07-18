@@ -19,7 +19,10 @@ from tutor.services.resource_package.schema import (
 from tutor.services.resource_package.store import ResourcePackageStore
 
 
-def test_video_retry_creates_one_new_durable_child_then_resets_pending(tmp_path):
+def test_video_retry_creates_one_new_durable_child_then_resets_pending(
+    tmp_path,
+    monkeypatch,
+):
     jobs = JobStore(tmp_path / "jobs.db")
     packages = ResourcePackageStore(tmp_path / "packages.db")
 
@@ -68,6 +71,16 @@ def test_video_retry_creates_one_new_durable_child_then_resets_pending(tmp_path)
 
     asyncio.run(seed())
     runner = SimpleNamespace(store=jobs, resume_pending=AsyncMock(return_value=1))
+    projected_resources: list[str] = []
+
+    def project_resource(resource):
+        projected_resources.append(resource.resource_id)
+        return {"resource_id": resource.resource_id, "public_projection": True}
+
+    monkeypatch.setattr(
+        "tutor.api.routers.resources.public_resource_dump",
+        project_resource,
+    )
     app = FastAPI()
     app.state.settings = SimpleNamespace(multi_user_enabled=True)
     app.state.resource_package_store = packages
@@ -84,6 +97,9 @@ def test_video_retry_creates_one_new_durable_child_then_resets_pending(tmp_path)
     assert first.json()["job_id"] == second.json()["job_id"]
     assert first.json()["job_id"] != "parent"
     assert first.json()["status"] == "pending"
+    assert first.json()["resource"]["public_projection"] is True
+    assert second.json()["resource"]["public_projection"] is True
+    assert projected_resources == ["video", "video"]
 
     async def verify():
         children = await jobs.get_children("parent")

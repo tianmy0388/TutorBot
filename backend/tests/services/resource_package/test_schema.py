@@ -16,6 +16,7 @@ from tutor.services.resource_package.schema import (
     ReviewVerdict,
     VideoResource,
     build_resource,
+    public_resource_dump,
 )
 
 
@@ -248,6 +249,57 @@ def test_legacy_video_without_render_job_id_still_parses():
 
     assert isinstance(parsed, VideoResource)
     assert parsed.render_job_id is None
+
+
+def test_public_video_projection_hides_legacy_raw_traceback() -> None:
+    raw = (
+        "+--- Traceback (most recent call last) ---+\n"
+        "E:\\private\\workspace\\scene.py API_KEY=secret-value"
+    )
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="legacy failed video",
+        format_specific={
+            "manim_code": "from manim import *\nclass MainScene(Scene): pass",
+            "render_status": "failed",
+            "render_error": raw,
+        },
+    )
+
+    public = public_resource_dump(resource)
+    serialized = str(public)
+
+    assert "Traceback" not in serialized
+    assert "E:\\private" not in serialized
+    assert "secret-value" not in serialized
+    assert public["format_specific"]["render_error"] == (
+        "渲染流程未生成可播放视频。"
+    )
+    assert public["format_specific"]["manim_code"] == resource.format_specific["manim_code"]
+
+
+def test_public_video_projection_resanitizes_structured_failure() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="structured failed video",
+        format_specific={
+            "render_status": "failed",
+            "render_failure": {
+                "error_code": "process_exit",
+                "summary": "Failed at E:\\private\\scene.py",
+                "traceback_tail": ["File E:\\private\\scene.py", "ValueError: bad input"],
+                "log_artifact_key": "manim_logs/job/error.log",
+            },
+        },
+    )
+
+    public = public_resource_dump(resource)
+    failure = public["format_specific"]["render_failure"]
+
+    assert "E:\\private" not in failure["summary"]
+    assert "E:\\private" not in "\n".join(failure["traceback_tail"])
+    assert "ValueError: bad input" in failure["traceback_tail"]
+    assert failure["log_artifact_key"] == "manim_logs/job/error.log"
 
 
 # ---------------------------------------------------------------------------

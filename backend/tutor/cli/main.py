@@ -164,16 +164,31 @@ def migrate_local_data_cmd(
         "--dry-run",
         help="只列出源数据，不创建备份或写入文件。",
     ),
+    relocate_from: list[Path] = typer.Option(
+        [],
+        "--relocate-from",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="允许恢复绝对产物路径的旧仓库根目录；可重复指定。",
+    ),
 ) -> None:
     """盘点或安全合并历史本地数据目录。"""
     try:
-        report = run_local_migration(repo_root, target_user_id, dry_run=dry_run)
+        report = run_local_migration(
+            repo_root,
+            target_user_id,
+            dry_run=dry_run,
+            relocate_from=relocate_from,
+        )
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2) from exc
     console.print(f"mode: {'dry-run' if dry_run else 'write'}")
     for source_dir in report.source_dirs:
         console.print(f"source: {source_dir}")
+    for relocation_root in report.relocation_roots:
+        console.print(f"relocate_from: {relocation_root}")
     console.print(f"target: {report.target_dir}")
     console.print(f"users: {', '.join(report.discovered_users) or '(none)'}")
     for unresolved_path in report.unresolved_paths:

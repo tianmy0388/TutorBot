@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -151,6 +153,36 @@ async def test_get_does_not_fabricate_an_empty_profile(store: ProfileStore):
 
 
 @pytest.mark.asyncio
+async def test_persisted_row_owner_overrides_stale_json_owner(tmp_path: Path):
+    database = tmp_path / "owner_profiles.db"
+    store = ProfileStore(database)
+    await store.init()
+    await store.close()
+    stale = empty_profile("historical-user").model_dump(mode="json")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO profiles (user_id, version, profile_data, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("local-user", 1, json.dumps(stale), "2026-01-01", "2026-01-01"),
+        )
+
+    restarted = ProfileStore(database)
+    await restarted.init()
+    try:
+        profile = await restarted.get("local-user")
+        assert profile is not None
+        assert profile.user_id == "local-user"
+        candidate = profile.model_copy(deep=True)
+        candidate.event_watermark = 5
+        saved = await restarted.save_event_profile(candidate, expected_watermark=0)
+        assert saved.applied is True
+        assert saved.profile.user_id == "local-user"
+        assert await restarted.list_users() == ["local-user"]
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
 async def test_event_profile_cas_advances_watermark_once(store: ProfileStore):
     candidate = LearnerProfile(user_id="u", event_watermark=5)
     candidate.knowledge_map.set("attention", 0.7)
@@ -207,3 +239,37 @@ async def test_path_is_unique_per_profile_version_and_latest_is_durable(
     assert (await store.save_path(duplicate)).rationale == first.rationale
     assert (await store.get_path("u", 2)).profile_version == 2
     assert (await store.get_latest_path("u")).nodes[0]["id"] == "attention"
+
+
+@pytest.mark.asyncio
+async def test_path_row_identity_overrides_stale_json_identity(tmp_path: Path):
+    from tutor.services.learner_profile.schema import PersistedLearningPath
+
+    database = tmp_path / "owner_paths.db"
+    store = ProfileStore(database)
+    await store.init()
+    path = PersistedLearningPath(
+        user_id="local-user",
+        profile_version=3,
+        nodes=[{"id": "attention", "status": "available"}],
+    )
+    await store.save_path(path)
+    await store.close()
+    stale = path.model_dump(mode="json")
+    stale["user_id"] = "historical-user"
+    stale["profile_version"] = 99
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE learning_paths SET path_data = ? WHERE user_id = ?",
+            (json.dumps(stale), "local-user"),
+        )
+
+    restarted = ProfileStore(database)
+    await restarted.init()
+    try:
+        restored = await restarted.get_latest_path("local-user")
+        assert restored is not None
+        assert restored.user_id == "local-user"
+        assert restored.profile_version == 3
+    finally:
+        await restarted.close()

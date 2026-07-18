@@ -202,3 +202,28 @@ async def test_store_normalizes_persisted_marker_and_backfills_legacy_rows(
         assert restored.resources[0].metadata["package_persisted"] is True
     finally:
         await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_package_row_owner_overrides_stale_metadata_owner(tmp_path) -> None:
+    db_path = tmp_path / "resource_packages.db"
+    store = ResourcePackageStore(db_path)
+    await store.init()
+    package = _build_pkg(
+        "historical-owner",
+        topic="migrated package",
+        types=[ResourceType.DOCUMENT],
+    )
+    try:
+        await store.save(package, user_id="local-user")
+    finally:
+        await store.close()
+
+    restarted = ResourcePackageStore(db_path)
+    await restarted.init()
+    try:
+        restored = await restarted.get(package.package_id)
+        assert restored is not None
+        assert restored.metadata["user_id"] == "local-user"
+    finally:
+        await restarted.close()

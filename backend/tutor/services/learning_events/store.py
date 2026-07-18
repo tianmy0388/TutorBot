@@ -426,6 +426,9 @@ class LearningEventStore:
                 data["created_at"] = datetime.now(UTC).isoformat()
         else:
             data["created_at"] = datetime.now(UTC).isoformat()
+        # Trust the indexed ownership column over a stale denormalized JSON
+        # value left by an earlier local single-user migration.
+        data["user_id"] = row.user_id
         data["sequence"] = int(row.id)
         data["session_id"] = row.session_id or data.get("session_id", "")
         return LearningEvent.from_dict(data)

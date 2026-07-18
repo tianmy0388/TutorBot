@@ -244,8 +244,11 @@ async def _get_or_create(self: ProfileStore, user_id: str) -> LearnerProfile:
     async def op(session: AsyncSession) -> LearnerProfile:
         row = await session.get(ProfileRow, user_id)
         if row is not None:
-            data = row.profile_data or {}
-            data.setdefault("user_id", user_id)
+            data = dict(row.profile_data or {})
+            # The indexed row owner is authoritative. Historical local-data
+            # migrations may leave a stale owner inside the JSON snapshot.
+            data["user_id"] = user_id
+            data["version"] = int(row.version)
             return LearnerProfile.model_validate(data)
         # Create new
         now = datetime.now(UTC)
@@ -282,7 +285,8 @@ async def _get(self: ProfileStore, user_id: str) -> LearnerProfile | None:
         if row is None:
             return None
         data = dict(row.profile_data or {})
-        data.setdefault("user_id", user_id)
+        data["user_id"] = user_id
+        data["version"] = int(row.version)
         return LearnerProfile.model_validate(data)
 
     return await self._with_session(op)
@@ -373,11 +377,13 @@ async def _save_event_profile(
         try:
             await session.execute(text("BEGIN IMMEDIATE"))
             row = await session.get(ProfileRow, candidate.user_id)
-            current = (
-                LearnerProfile.model_validate(dict(row.profile_data or {}))
-                if row is not None
-                else empty_profile(candidate.user_id)
-            )
+            if row is not None:
+                current_data = dict(row.profile_data or {})
+                current_data["user_id"] = candidate.user_id
+                current_data["version"] = int(row.version)
+                current = LearnerProfile.model_validate(current_data)
+            else:
+                current = empty_profile(candidate.user_id)
             if (
                 current.event_watermark != expected_watermark
                 or current.version != candidate.version
@@ -447,7 +453,10 @@ async def _save_path(
                 )
             ).scalar_one()
             await session.commit()
-            return PersistedLearningPath.model_validate(row.path_data)
+            data = dict(row.path_data or {})
+            data["user_id"] = row.user_id
+            data["profile_version"] = int(row.profile_version)
+            return PersistedLearningPath.model_validate(data)
         except Exception:
             await session.rollback()
             raise
@@ -465,7 +474,12 @@ async def _get_path(
                 )
             )
         ).scalar_one_or_none()
-        return PersistedLearningPath.model_validate(row.path_data) if row else None
+        if row is None:
+            return None
+        data = dict(row.path_data or {})
+        data["user_id"] = row.user_id
+        data["profile_version"] = int(row.profile_version)
+        return PersistedLearningPath.model_validate(data)
 
     return await self._with_session(op)
 
@@ -482,7 +496,12 @@ async def _get_latest_path(
                 .limit(1)
             )
         ).scalar_one_or_none()
-        return PersistedLearningPath.model_validate(row.path_data) if row else None
+        if row is None:
+            return None
+        data = dict(row.path_data or {})
+        data["user_id"] = row.user_id
+        data["profile_version"] = int(row.profile_version)
+        return PersistedLearningPath.model_validate(data)
 
     return await self._with_session(op)
 

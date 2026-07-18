@@ -7,10 +7,12 @@
     "dev": "next dev -p 3010",
     "build": "next build",
     "start": "next start -p 3010",
-    "lint": "next lint",
+    "lint": "eslint .",
     "type-check": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run --exclude e2e/**",
+    "test:watch": "vitest --exclude e2e/**",
+    "test:e2e": "playwright test",
+    "test:e2e:real": "playwright test --grep @real-data"
   },
   "dependencies": {
     "chart.js": "^4.5.1",
@@ -39,6 +41,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^22.0.0",

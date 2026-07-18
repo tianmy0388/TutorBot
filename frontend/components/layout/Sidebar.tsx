@@ -248,8 +248,15 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
   }
 
   return (
-    <aside
-      className="w-64 shrink-0 flex flex-col h-full animate-slide-down"
+    <>
+      <button
+        type="button"
+        aria-label="关闭侧栏遮罩"
+        onClick={onToggle}
+        className="fixed inset-x-0 top-14 bottom-0 z-30 bg-black/45 md:hidden"
+      />
+      <aside
+      className="fixed left-0 top-14 bottom-0 z-40 w-64 shrink-0 flex flex-col animate-slide-down md:static md:z-auto md:h-full"
       style={{
         backgroundColor: "rgb(var(--color-bg-subtle))",
         borderRight: "1px solid rgb(var(--color-rule) / 0.6)",
@@ -622,6 +629,7 @@ export function Sidebar({ sessionId, onNewSession, open, onToggle }: SidebarProp
           <Trash2 className="w-3.5 h-3.5" />
         </button>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

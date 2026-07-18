@@ -643,8 +643,9 @@ class ResourcePackageStore:
     @classmethod
     def _row_to_package(cls, row: PackageRow) -> ResourcePackage:
         resources = [cls._row_to_resource(r) for r in row.resources]
-        # Read user_id from metadata (denormalized); fall back to the row
-        user_id = (row.package_metadata or {}).get("user_id", row.user_id)
+        # The indexed row owner is authoritative. Old local migrations can
+        # leave a stale user_id inside the denormalized metadata JSON.
+        user_id = row.user_id
         return ResourcePackage(
             package_id=row.package_id,
             topic=row.topic or "",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 
@@ -216,6 +217,110 @@ def test_user_rewrite_deduplicates_composite_unique_collisions(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM memberships").fetchone() == (3,)
 
 
+def test_migration_rewrites_nested_json_owners_and_keeps_newest_profile(tmp_path):
+    from tutor.services.migration.local_single_user import run_local_migration
+
+    canonical = tmp_path / "data"
+    canonical.mkdir(exist_ok=True)
+    database = canonical / "profiles.db"
+    older = {
+        "user_id": "local-user",
+        "version": 1,
+        "event_watermark": 0,
+        "metadata": {"owner_user_id": "local-user"},
+    }
+    newer = {
+        "user_id": "legacy-user",
+        "version": 4,
+        "event_watermark": 12,
+        "metadata": {
+            "owner_user_id": "legacy-user",
+            "history": [{"user_id": "another-legacy-user"}],
+        },
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE profiles ("
+            "user_id TEXT PRIMARY KEY, version INTEGER NOT NULL, "
+            "profile_data JSON NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO profiles VALUES (?, ?, ?, ?, ?)",
+            (
+                ("local-user", 1, json.dumps(older), "2026-01-01", "2026-01-01"),
+                ("legacy-user", 4, json.dumps(newer), "2026-01-02", "2026-01-04"),
+            ),
+        )
+
+    run_local_migration(tmp_path, "local-user", dry_run=False)
+
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT user_id, version, profile_data, updated_at FROM profiles"
+        ).fetchall()
+    assert len(rows) == 1
+    user_id, version, profile_data, updated_at = rows[0]
+    assert (user_id, version, updated_at) == ("local-user", 4, "2026-01-04")
+    payload = json.loads(profile_data)
+    assert payload["user_id"] == "local-user"
+    assert payload["metadata"]["owner_user_id"] == "local-user"
+    assert payload["metadata"]["history"][0]["user_id"] == "local-user"
+
+
+def test_migration_keeps_newest_profile_when_collision_spans_data_roots(tmp_path):
+    from tutor.services.migration.local_single_user import run_local_migration
+
+    canonical = tmp_path / "data"
+    legacy = tmp_path / "backend" / "data"
+    canonical.mkdir(exist_ok=True)
+    legacy.mkdir(parents=True)
+    schema = (
+        "CREATE TABLE profiles ("
+        "user_id TEXT PRIMARY KEY, version INTEGER NOT NULL, "
+        "profile_data JSON NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    older = {
+        "user_id": "local-user",
+        "version": 1,
+        "event_watermark": 2,
+    }
+    newer = {
+        "user_id": "legacy-user",
+        "version": 4,
+        "event_watermark": 12,
+        "metadata": {"owner_user_id": "legacy-user"},
+    }
+    with sqlite3.connect(canonical / "profiles.db") as connection:
+        connection.execute(schema)
+        connection.execute(
+            "INSERT INTO profiles VALUES (?, ?, ?, ?, ?)",
+            ("local-user", 1, json.dumps(older), "2026-01-01", "2026-01-02"),
+        )
+    with sqlite3.connect(legacy / "profiles.db") as connection:
+        connection.execute(schema)
+        connection.execute(
+            "INSERT INTO profiles VALUES (?, ?, ?, ?, ?)",
+            ("legacy-user", 4, json.dumps(newer), "2026-01-03", "2026-01-04"),
+        )
+
+    run_local_migration(tmp_path, "local-user", dry_run=False)
+
+    with sqlite3.connect(canonical / "profiles.db") as connection:
+        row = connection.execute(
+            "SELECT user_id, version, profile_data, updated_at FROM profiles"
+        ).fetchone()
+    assert row is not None
+    user_id, version, profile_data, updated_at = row
+    assert (user_id, version, updated_at) == ("local-user", 4, "2026-01-04")
+    payload = json.loads(profile_data)
+    assert payload["user_id"] == "local-user"
+    assert payload["metadata"]["owner_user_id"] == "local-user"
+    with sqlite3.connect(legacy / "profiles.db") as connection:
+        assert connection.execute(
+            "SELECT user_id, version FROM profiles"
+        ).fetchone() == ("legacy-user", 4)
+
+
 @pytest.mark.parametrize("target_user_id", ["anonymous", "LOCAL-USER", " local-user "])
 def test_service_rejects_noncanonical_target_user_ids(tmp_path, target_user_id):
     from tutor.services.migration.local_single_user import build_migration_report
@@ -241,6 +346,31 @@ def test_cli_rejects_noncanonical_target_user_id(tmp_path):
 
     assert result.exit_code == 2
     assert "--target-user-id must be exactly 'local-user'" in result.output
+
+
+def test_cli_accepts_explicit_former_repo_root_for_path_relocation(tmp_path):
+    from tutor.cli.main import app
+
+    repo = tmp_path / "TutorBot"
+    old_repo = tmp_path / "Tutor"
+    (repo / "data").mkdir(parents=True)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "migrate-local-data",
+            "--repo-root",
+            str(repo),
+            "--target-user-id",
+            "local-user",
+            "--relocate-from",
+            str(old_repo),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "relocate_from:" in result.output
 
 
 def test_migration_normalizes_known_artifact_paths_and_reports_external_paths(tmp_path):
@@ -280,3 +410,80 @@ def test_migration_normalizes_known_artifact_paths_and_reports_external_paths(tm
         prose,
     )
     assert report.unresolved_paths == (str(external),)
+
+
+def test_migration_recovers_artifact_path_from_a_renamed_repo_root(tmp_path):
+    from tutor.services.migration.local_single_user import run_local_migration
+
+    canonical = tmp_path / "TutorBot" / "data"
+    legacy = tmp_path / "TutorBot" / "backend" / "data"
+    canonical.mkdir(parents=True)
+    legacy.mkdir(parents=True)
+    artifact = legacy / "code_runs" / "run-1" / "figure.png"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"png")
+    stale_repo = tmp_path / "Tutor"
+    stale_artifact = (
+        stale_repo / "backend" / "data" / "code_runs" / "run-1" / "figure.png"
+    ).resolve()
+
+    with sqlite3.connect(legacy / "resources.db") as connection:
+        connection.execute(
+            "CREATE TABLE resources ("
+            "resource_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, artifact_path TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO resources VALUES (?, ?, ?)",
+            ("resource-1", "u-legacy", str(stale_artifact)),
+        )
+
+    report = run_local_migration(
+        tmp_path / "TutorBot",
+        "local-user",
+        dry_run=False,
+        relocate_from=(stale_repo,),
+    )
+
+    with sqlite3.connect(canonical / "resources.db") as connection:
+        artifact_path = connection.execute("SELECT artifact_path FROM resources").fetchone()[0]
+    assert artifact_path == "code_runs/run-1/figure.png"
+    assert report.unresolved_paths == ()
+
+
+@pytest.mark.parametrize("allowlisted", [False, True])
+def test_migration_never_retargets_an_existing_external_artifact(tmp_path, allowlisted):
+    from tutor.services.migration.local_single_user import run_local_migration
+
+    repo = tmp_path / "TutorBot"
+    canonical = repo / "data"
+    legacy = repo / "backend" / "data"
+    canonical_artifact = canonical / "code_runs" / "run-1" / "figure.png"
+    canonical_artifact.parent.mkdir(parents=True)
+    canonical_artifact.write_bytes(b"canonical")
+    legacy.mkdir(parents=True)
+
+    external_repo = tmp_path / "archive"
+    external_artifact = external_repo / "data" / "code_runs" / "run-1" / "figure.png"
+    external_artifact.parent.mkdir(parents=True)
+    external_artifact.write_bytes(b"external")
+    with sqlite3.connect(legacy / "resources.db") as connection:
+        connection.execute(
+            "CREATE TABLE resources ("
+            "resource_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, artifact_path TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO resources VALUES (?, ?, ?)",
+            ("resource-1", "u-legacy", str(external_artifact.resolve())),
+        )
+
+    report = run_local_migration(
+        repo,
+        "local-user",
+        dry_run=False,
+        relocate_from=(external_repo,) if allowlisted else (),
+    )
+
+    with sqlite3.connect(canonical / "resources.db") as connection:
+        artifact_path = connection.execute("SELECT artifact_path FROM resources").fetchone()[0]
+    assert artifact_path == str(external_artifact.resolve())
+    assert report.unresolved_paths == (str(external_artifact.resolve()),)
