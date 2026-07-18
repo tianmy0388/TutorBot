@@ -1,57 +1,55 @@
-"""PathPlanningCapability — learning path planning & resource push.
-
-Placeholder for Phase 3.
-"""
+"""Path planning capability backed by the existing knowledge graph service."""
 
 from __future__ import annotations
 
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
+from tutor.services.knowledge_graph.service import get_knowledge_graph_service
+from tutor.services.learner_profile.builder import get_profile_builder
 
 
 class PathPlanningCapability(BaseCapability):
-    """Personalized learning path planning and resource push."""
+    """Plan an actionable course path from persisted learner state."""
 
     manifest = CapabilityManifest(
         name="path_planning",
-        description="基于知识图谱与画像的个性化学习路径规划与资源推送",
-        stages=["locate", "prune", "topo_sort", "match", "push"],
-        tools_used=["rag"],
+        description="根据当前学习状态整理下一步课程路径",
+        stages=["understand_goal", "read_progress", "organize_path", "prepare_next"],
+        tools_used=["knowledge_graph"],
         cli_aliases=["path", "plan"],
         tags=["path", "planning"],
     )
 
     async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
-        async with stream.stage("locate", source="path_capability"):
+        service = get_knowledge_graph_service()
+        course = str((context.metadata or {}).get("course") or service.default_course())
+        path_id = str((context.metadata or {}).get("path_id") or "")
+
+        async with stream.stage("understand_goal", source="path_capability"):
+            await stream.observation("正在确认课程目标", source="path_capability")
+
+        async with stream.stage("read_progress", source="path_capability"):
+            builder = get_profile_builder()
+            await builder.initialize()
+            profile = await builder.get(context.user_id)
+            await stream.observation("已读取当前学习记录", source="path_capability")
+
+        async with stream.stage("organize_path", source="path_capability"):
+            plan = service.plan_for_learner(course, profile, path_id=path_id)
             await stream.observation(
-                "在知识图谱中定位学生当前位置...",
+                f"已整理 {len(plan.nodes)} 个学习步骤",
                 source="path_capability",
             )
-        async with stream.stage("prune", source="path_capability"):
+
+        async with stream.stage("prepare_next", source="path_capability"):
+            next_node = plan.first_available()
             await stream.observation(
-                "已掌握节点标记为可跳过...",
+                f"下一步：{next_node.name}" if next_node else "当前路径已整理完成",
                 source="path_capability",
             )
-        async with stream.stage("topo_sort", source="path_capability"):
-            await stream.observation(
-                "拓扑排序 + 学习依赖 → 推荐顺序...",
-                source="path_capability",
-            )
-        async with stream.stage("match", source="path_capability"):
-            await stream.observation(
-                "为每个节点匹配已有/可生成的资源...",
-                source="path_capability",
-            )
-        async with stream.stage("push", source="path_capability"):
-            await stream.observation(
-                "按顺序 + 学习节奏推送资源...",
-                source="path_capability",
-            )
-        await stream.observation(
-            "(占位) PathPlanningCapability 完整实现将在 Phase 3",
-            source="path_capability",
-        )
+
+        await stream.result(plan.model_dump(mode="json"), source="path_capability")
         await stream.done(source="path_capability")
 
 

@@ -223,15 +223,14 @@ class ResourceGenerationCapability(BaseCapability):
                         else LearnerProfile()
                     )
                     locate = svc.locate(course, prof_obj)
+                    planned_path = svc.plan_for_learner(course, prof_obj)
                     kg_recommendations = svc.recommend_next(
                         course, prof_obj, limit=5
                     )
-                    kg_summary = {
-                        "course": course,
-                        "mastered_count": len(locate["mastered"]),
-                        "unmastered_count": len(locate["unmastered"]),
-                        "next_targets": locate["next_targets"][:5],
-                    }
+                    kg_summary = planned_path.model_dump(mode="json")
+                    kg_summary["mastered_count"] = len(locate["mastered"])
+                    kg_summary["unmastered_count"] = len(locate["unmastered"])
+                    kg_summary["next_targets"] = locate["next_targets"][:5]
                     await stream.observation(
                         f"知识图谱定位：掌握 {len(locate['mastered'])}，"
                         f"未掌握 {len(locate['unmastered'])}",

@@ -1,14 +1,14 @@
 import type { NextConfig } from "next";
 
-const BACKEND_PORT = process.env.BACKEND_PORT || "18000";
-const BACKEND_ORIGIN = `http://localhost:${BACKEND_PORT}`;
+const BACKEND_PORT = process.env.BACKEND_PORT || process.env.TUTOR_PORT || "8000";
+const BACKEND_ORIGIN = `http://127.0.0.1:${BACKEND_PORT}`;
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  // Backend is on a separate port — proxy REST API + WS in dev.
-  // Next.js 16 dev server forwards both HTTP and WebSocket upgrades for
-  // rewrite destinations that are absolute http(s) URLs, so the same
-  // rule handles /api/v1/ws without a separate ws:// entry.
+  allowedDevOrigins: ["127.0.0.1"],
+  // Backend is on a separate port — proxy REST API in development.
+  // WebSocket clients connect directly to the backend port because the
+  // development rewrite does not reliably forward upgrade requests.
   //
   // **2026-07-09 fix (38a445a1 trace):** the FastAPI app now mounts
   // ``StaticFiles`` at ``/static/manim`` so the rendered MP4 actually

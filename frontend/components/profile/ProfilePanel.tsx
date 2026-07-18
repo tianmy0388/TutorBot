@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * ProfilePanel — multi-dimensional learner profile visualization.
+ * ProfilePanel — learner progress and preference summary.
  *
  * Tabs:
  *  - Overview   : cognitive_style, modality (radar), pace, motivation
@@ -37,7 +37,6 @@ import {
   RefreshCw,
   TrendingUp,
   AlertCircle,
-  Sparkles,
 } from "lucide-react";
 import { useProfile } from "@/hooks/useProfile";
 import { useTutorStore } from "@/lib/store";
@@ -55,11 +54,11 @@ export function ProfilePanel() {
   const latestAssessment = useTutorStore((s) => s.latestAssessment);
 
   return (
-    <div className="p-5 border-b border-fg/10 h-full flex flex-col overflow-hidden">
+    <div className="p-4 h-full flex flex-col overflow-hidden">
       <div className="flex items-center justify-between mb-4 shrink-0">
         <h2 className="font-semibold flex items-center gap-2">
           <Brain className="w-4 h-4 text-brand-400" />
-          学习画像
+          学习状态
         </h2>
         <button
           onClick={refresh}
@@ -75,16 +74,16 @@ export function ProfilePanel() {
         <EmptyProfile loading={loading} error={error} onRefresh={refresh} />
       ) : (
         <>
-          <div className="flex gap-1 mb-3 text-xs shrink-0">
+          <div className="flex gap-4 mb-3 text-xs shrink-0 border-b border-border">
             {(["overview", "knowledge", "errors"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
                 className={cn(
-                  "px-2 py-1 rounded-md transition-colors",
+                  "px-0 pb-2 border-b-2 -mb-px transition-colors",
                   tab === t
-                    ? "bg-brand-600/30 text-brand-200"
-                    : "text-fg-muted hover:text-fg",
+                    ? "border-brand-500 text-brand-700 dark:border-fg-muted dark:text-fg"
+                    : "border-transparent text-fg-muted hover:text-fg",
                 )}
               >
                 {t === "overview" ? "概览" : t === "knowledge" ? "知识" : "错误"}
@@ -121,9 +120,9 @@ function EmptyProfile({
   return (
     <div className="flex-1 flex flex-col items-center justify-center text-center text-fg-muted text-xs space-y-2 px-2">
       <Brain className="w-8 h-8 opacity-30" />
-      <p>暂无画像数据</p>
+      <p>暂无学习状态</p>
       <p className="text-fg-subtle leading-relaxed">
-        完成一次"生成资源"或"即时答疑"后会建立画像
+        完成一次学习任务后，这里会逐步整理你的学习状态
       </p>
       {error && <p className="text-red-400">{error}</p>}
       <button
@@ -178,12 +177,12 @@ function OverviewTab({
     <div className="space-y-3">
       {/* Modality radar chart */}
       {radarData.length > 0 && (
-        <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+        <div className="py-3 border-t border-border">
           <div className="flex items-center gap-2 mb-2">
-            <Sparkles className="w-3.5 h-3.5 text-accent" />
+            <Target className="w-3.5 h-3.5 text-brand-600 dark:text-fg-muted" />
             <span className="text-xs font-medium">模态偏好雷达</span>
             {dominant && (
-              <span className="ml-auto text-[10px] text-accent">
+              <span className="ml-auto text-[10px] text-brand-600 dark:text-fg-muted">
                 主导: {dominant.subject} ({dominant.value}%)
               </span>
             )}
@@ -191,23 +190,23 @@ function OverviewTab({
           <div className="h-44 -mx-1">
             <ResponsiveContainer width="100%" height="100%">
               <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">
-                <PolarGrid stroke="#27272a" />
+                <PolarGrid stroke="rgb(var(--color-border))" />
                 <PolarAngleAxis
                   dataKey="subject"
-                  tick={{ fill: "#a1a1aa", fontSize: 10 }}
+                  tick={{ fill: "rgb(var(--color-fg-muted))", fontSize: 10 }}
                 />
                 <PolarRadiusAxis
                   angle={90}
                   domain={[0, 100]}
-                  tick={{ fill: "#52525b", fontSize: 9 }}
-                  stroke="#27272a"
+                  tick={{ fill: "rgb(var(--color-fg-subtle))", fontSize: 9 }}
+                  stroke="rgb(var(--color-border))"
                 />
                 <Radar
                   name="偏好"
                   dataKey="value"
-                  stroke="#3b5dff"
-                  fill="#3b5dff"
-                  fillOpacity={0.35}
+                  stroke="rgb(var(--color-accent))"
+                  fill="rgb(var(--color-accent))"
+                  fillOpacity={0.2}
                 />
               </RadarChart>
             </ResponsiveContainer>
@@ -280,11 +279,11 @@ function KnowledgeTab({
   // Build distribution: histogram of mastery buckets
   const distribution = useMemo(() => {
     const buckets = [
-      { range: "0-20%", count: 0, fill: "#ef4444" },
-      { range: "20-40%", count: 0, fill: "#f97316" },
-      { range: "40-60%", count: 0, fill: "#eab308" },
-      { range: "60-80%", count: 0, fill: "#3b5dff" },
-      { range: "80-100%", count: 0, fill: "#22c55e" },
+      { range: "0-20%", count: 0, fill: "rgb(var(--color-chart-1))" },
+      { range: "20-40%", count: 0, fill: "rgb(var(--color-chart-2))" },
+      { range: "40-60%", count: 0, fill: "rgb(var(--color-chart-3))" },
+      { range: "60-80%", count: 0, fill: "rgb(var(--color-chart-4))" },
+      { range: "80-100%", count: 0, fill: "rgb(var(--color-chart-5))" },
     ];
     entries.forEach(([, v]) => {
       const pct = (v as number) * 100;
@@ -308,7 +307,7 @@ function KnowledgeTab({
   return (
     <div className="space-y-3">
       {/* Summary header */}
-      <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+      <div className="py-3 border-t border-border">
         <div className="flex items-center justify-between text-xs">
           <span className="text-fg-muted flex items-center gap-1">
             <BookOpen className="w-3 h-3" />
@@ -326,27 +325,31 @@ function KnowledgeTab({
         <div className="h-24 mt-2 -mx-2">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={distribution}>
-              <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
+              <CartesianGrid
+                stroke="rgb(var(--color-border))"
+                strokeDasharray="3 3"
+                vertical={false}
+              />
               <XAxis
                 dataKey="range"
-                tick={{ fill: "#a1a1aa", fontSize: 9 }}
-                stroke="#27272a"
+                tick={{ fill: "rgb(var(--color-fg-muted))", fontSize: 9 }}
+                stroke="rgb(var(--color-border))"
               />
               <YAxis
-                tick={{ fill: "#52525b", fontSize: 9 }}
-                stroke="#27272a"
+                tick={{ fill: "rgb(var(--color-fg-subtle))", fontSize: 9 }}
+                stroke="rgb(var(--color-border))"
                 width={20}
                 allowDecimals={false}
               />
               <Tooltip
                 contentStyle={{
-                  background: "#171717",
-                  border: "1px solid #27272a",
-                  borderRadius: 8,
+                  background: "rgb(var(--color-bg-panel))",
+                  border: "1px solid rgb(var(--color-border))",
+                  borderRadius: 4,
                   fontSize: 11,
                 }}
-                labelStyle={{ color: "#fafafa" }}
-                cursor={{ fill: "#27272a" }}
+                labelStyle={{ color: "rgb(var(--color-fg))" }}
+                cursor={{ fill: "rgb(var(--color-bg-subtle))" }}
               />
               <Bar dataKey="count" radius={[4, 4, 0, 0]}>
                 {distribution.map((b, i) => (
@@ -379,12 +382,12 @@ function KnowledgeBar({ concept, mastery }: { concept: string; mastery: number }
   const pct = Math.round(mastery * 100);
   const color =
     pct >= 80
-      ? "from-green-500 to-emerald-400"
+      ? "bg-green-600 dark:bg-fg-muted"
       : pct >= 50
-      ? "from-brand-500 to-brand-400"
+      ? "bg-brand-500 dark:bg-fg-muted"
       : pct >= 30
-      ? "from-yellow-500 to-orange-400"
-      : "from-red-500 to-pink-400";
+      ? "bg-yellow-600 dark:bg-fg-muted"
+      : "bg-red-600 dark:bg-fg-muted";
   return (
     <div>
       <div className="flex items-baseline justify-between text-xs">
@@ -393,7 +396,7 @@ function KnowledgeBar({ concept, mastery }: { concept: string; mastery: number }
       </div>
       <div className="h-1.5 bg-bg-panel rounded-full overflow-hidden mt-0.5">
         <div
-          className={cn("h-full bg-gradient-to-r transition-all", color)}
+          className={cn("h-full transition-all", color)}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -426,11 +429,11 @@ function ErrorsTab({
       {sorted.map((e, i) => (
         <div
           key={i}
-          className="p-2.5 bg-bg-card rounded-lg border border-fg/5 hover:border-fg/10 transition-colors"
+          className="py-2.5 border-t border-border transition-colors"
         >
           <div className="flex items-center justify-between text-xs">
             <span className="text-fg font-medium truncate">{e.concept}</span>
-            <span className="px-1.5 py-0.5 rounded bg-orange-950/40 text-orange-300 border border-orange-800/40 text-[10px] shrink-0">
+            <span className="text-orange-700 dark:text-fg-muted text-[10px] shrink-0">
               ×{e.frequency}
             </span>
           </div>
@@ -470,7 +473,7 @@ function AssessmentSummary() {
       : "text-fg-subtle";
 
   return (
-    <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+    <div className="py-3 border-t border-border">
       <div className="flex items-center gap-2 mb-2">
         <TrendingUp className="w-3.5 h-3.5 text-brand-400" />
         <span className="text-xs font-medium">最近评估</span>
@@ -511,7 +514,7 @@ function DimensionCard({
   detail?: string;
 }) {
   return (
-    <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+    <div className="py-3 border-t border-border">
       <div className="flex items-center gap-2 mb-1">
         <Icon className="w-4 h-4 text-brand-400 shrink-0" />
         <span className="text-sm font-medium">{name}</span>
@@ -538,10 +541,10 @@ function StatBox({
   return (
     <div
       className={cn(
-        "p-2.5 rounded-lg border text-center",
+        "py-2.5 border-t border-border text-center",
         accent === "green"
-          ? "bg-green-950/30 border-green-800/40"
-          : "bg-orange-950/30 border-orange-800/40",
+          ? "text-green-800 dark:text-fg"
+          : "text-orange-800 dark:text-fg",
       )}
     >
       <div className="text-2xl font-bold text-fg">{value}</div>

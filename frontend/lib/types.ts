@@ -204,9 +204,16 @@ export interface KGNodeSummary {
   prerequisites: string[];
 }
 
-export interface PathStep extends KGNodeSummary {
+export interface PathStep {
+  node_id?: string;
+  id?: string;
+  name: string;
+  category: string;
+  difficulty: number;
   status: NodeStatus;
   estimated_hours: number;
+  matched_resources: string[];
+  prerequisites?: string[];
 }
 
 export interface PlannedPath {
@@ -658,83 +665,6 @@ export interface ConfigTestResult {
   latency_ms: number;
   message: string;
   code?: string;
-}
-
-// ============================================================================
-// Competition demo
-// ============================================================================
-
-export interface DemoScenario {
-  id: string;
-  title: string;
-  course: string;
-  topic: string;
-  description: string;
-  persona: string;
-  goal: string;
-  estimated_minutes: number;
-  tags: string[];
-  live_prompt: string;
-}
-
-export type AgentTraceStatus =
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "warning"
-  | "failed";
-
-export interface AgentTraceEvent {
-  id: string;
-  agent: string;
-  role: string;
-  stage: string;
-  status: AgentTraceStatus;
-  input_summary: string;
-  output_summary: string;
-  duration_ms: number;
-  confidence: number;
-  artifacts: string[];
-}
-
-export interface DemoCheckpoint {
-  id: string;
-  concept: string;
-  question: string;
-  options: Array<{ value: string; label: string }>;
-  answer: string;
-  difficulty: number;
-}
-
-export interface DemoCheckpointResult {
-  correct: boolean;
-  concept: string;
-  previous_mastery: number;
-  updated_mastery: number;
-  profile_version: number;
-  recommendation: string;
-  next_path_node: string;
-}
-
-export interface DemoLoadResult {
-  scenario: DemoScenario;
-  user_id: string;
-  session_id: string;
-  profile: LearnerProfileDetail;
-  path: PlannedPath;
-  package: ResourcePackage;
-  assessment: AssessmentReport;
-  strategy: StrategyDecision;
-  agent_trace: AgentTraceEvent[];
-  learning_loop: Array<Record<string, unknown>>;
-  teacher_panel: Record<string, unknown>;
-  runtime_warnings: string[];
-  live_prompt: string;
-  mode: "seeded" | "live";
-  live_job_id: string;
-  live_job_status: string;
-  checkpoint: DemoCheckpoint;
-  loaded_at: string;
 }
 
 // ============================================================================

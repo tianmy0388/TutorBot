@@ -18,6 +18,8 @@ import {
   ZoomOut,
   Maximize2,
   RotateCcw,
+  Network,
+  ListTree,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Resource } from "@/lib/types";
@@ -27,18 +29,18 @@ function ensureMermaid() {
   if (mermaidInitialized) return;
   mermaid.initialize({
     startOnLoad: false,
-    theme: "dark",
+    theme: "base",
     securityLevel: "loose",
     fontFamily:
-      "ui-sans-serif, system-ui, -apple-system, PingFang SC, Microsoft YaHei, sans-serif",
+      "var(--font-body), PingFang SC, Microsoft YaHei, sans-serif",
     themeVariables: {
-      background: "#171717",
-      primaryColor: "#3b5dff",
-      primaryTextColor: "#fafafa",
-      primaryBorderColor: "#6086ff",
-      lineColor: "#a1a1aa",
-      secondaryColor: "#1f1f1f",
-      tertiaryColor: "#0a0a0a",
+      background: "rgb(var(--color-bg-panel))",
+      primaryColor: "rgb(var(--color-brand-100))",
+      primaryTextColor: "rgb(var(--color-fg))",
+      primaryBorderColor: "rgb(var(--color-brand-500))",
+      lineColor: "rgb(var(--color-fg-muted))",
+      secondaryColor: "rgb(var(--color-bg-subtle))",
+      tertiaryColor: "rgb(var(--color-bg))",
     },
   });
   mermaidInitialized = true;
@@ -65,6 +67,7 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
     let cancelled = false;
     (async () => {
       try {
+        setError(null);
         const cleanDsl = dsl.trim();
         let finalDsl = cleanDsl;
         if (!/^\s*mindmap\b/i.test(finalDsl)) {
@@ -104,8 +107,9 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
     <div className="space-y-3">
       {/* Header: topic + zoom controls */}
       <div className="flex items-center gap-2 flex-wrap">
-        <div className="px-3 py-1.5 rounded-full bg-purple-950/40 border border-purple-800/40 text-purple-200 text-xs font-medium">
-          🧠 {central}
+        <div className="inline-flex items-center gap-2 border-b border-brand-500 pb-1 text-brand-700 dark:border-border dark:text-fg-muted text-xs font-medium">
+          <Network className="w-3.5 h-3.5" />
+          {central}
         </div>
         <div className="ml-auto flex items-center gap-1">
           <button
@@ -143,7 +147,7 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
       </div>
 
       {error && (
-        <div className="p-3 bg-red-950/30 border border-red-800/40 rounded-lg flex gap-2 text-xs text-red-300">
+        <div className="p-3 bg-red-50 dark:bg-bg-subtle border border-red-200 dark:border-border rounded flex gap-2 text-xs text-red-700 dark:text-fg">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <div>
             <div className="font-medium">Mermaid 渲染失败</div>
@@ -156,7 +160,7 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
 
       <div
         ref={wrapRef}
-        className="mermaid-container bg-bg-panel rounded-lg p-4 overflow-auto border border-fg/5"
+        className="mermaid-container bg-bg-panel rounded-md p-4 overflow-auto border border-border"
       >
         <div
           ref={containerRef}
@@ -170,13 +174,14 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
       {/* Fallback: flat branch list (also useful for accessibility) */}
       {branches.length > 0 && (
         <details className="mt-2">
-          <summary className="text-xs text-fg-muted cursor-pointer hover:text-fg">
-            📋 文字版分支 ({branches.length} 个)
+          <summary className="inline-flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer hover:text-fg">
+            <ListTree className="w-3.5 h-3.5" />
+            文字版分支 ({branches.length} 个)
           </summary>
           <ul className="mt-2 space-y-1 text-xs text-fg-muted">
             {branches.map((b, i) => (
               <li key={i} className="flex items-start gap-2">
-                <span className="text-purple-400 shrink-0">▸</span>
+                <span className="text-brand-600 dark:text-fg-muted shrink-0">▸</span>
                 <div>
                   <span className="text-fg">{b.name}</span>
                   {b.children && b.children.length > 0 && (

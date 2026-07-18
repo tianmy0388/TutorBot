@@ -34,12 +34,12 @@ export function JobProgressCard({
   return (
     <section
       className={cn(
-        "rounded-xl border p-3 my-2 text-sm",
-        job.status === "succeeded" && "border-green-500/30 bg-green-500/5",
-        job.status === "partial" && "border-yellow-500/30 bg-yellow-500/5",
-        job.status === "failed" && "border-red-500/30 bg-red-500/5",
-        job.status === "cancelled" && "border-fg/10 bg-bg-card",
-        !isTerminal && "border-blue-500/30 bg-blue-500/5",
+        "border-y px-1 py-3 my-2 text-sm",
+        job.status === "succeeded" && "border-green-200 dark:border-border",
+        job.status === "partial" && "border-yellow-200 dark:border-border",
+        job.status === "failed" && "border-red-200 dark:border-border",
+        job.status === "cancelled" && "border-border",
+        !isTerminal && "border-brand-200 dark:border-border",
       )}
       data-testid="job-progress-card"
       data-job-status={job.status}
@@ -47,16 +47,16 @@ export function JobProgressCard({
       <header className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           {!isTerminal && (
-            <Loader2 className="w-4 h-4 animate-spin text-blue-300 shrink-0" />
+            <Loader2 className="w-4 h-4 animate-spin text-brand-600 dark:text-fg-muted shrink-0" />
           )}
           {job.status === "succeeded" && (
-            <CheckCircle2 className="w-4 h-4 text-green-300 shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-green-700 dark:text-fg shrink-0" />
           )}
           {job.status === "partial" && (
-            <AlertCircle className="w-4 h-4 text-yellow-300 shrink-0" />
+            <AlertCircle className="w-4 h-4 text-yellow-700 dark:text-fg-muted shrink-0" />
           )}
           {job.status === "failed" && (
-            <XCircle className="w-4 h-4 text-red-300 shrink-0" />
+            <XCircle className="w-4 h-4 text-red-700 dark:text-fg shrink-0" />
           )}
           {job.status === "cancelled" && (
             <XCircle className="w-4 h-4 text-fg-muted shrink-0" />
@@ -96,7 +96,7 @@ export function JobProgressCard({
           {succeeded.map((a) => (
             <li
               key={a.resource_type}
-              className="text-green-300 inline-flex items-center gap-1 mr-3"
+              className="text-green-700 dark:text-fg inline-flex items-center gap-1 mr-3"
             >
               <CheckCircle2 className="w-3 h-3" /> {a.resource_type}
             </li>
@@ -104,7 +104,7 @@ export function JobProgressCard({
           {failed.map((a) => (
             <li
               key={a.resource_type}
-              className="text-red-300 inline-flex items-center gap-1 mr-3"
+              className="text-red-700 dark:text-fg inline-flex items-center gap-1 mr-3"
             >
               <XCircle className="w-3 h-3" /> {a.resource_type}
               {a.error?.code && (
@@ -121,7 +121,7 @@ export function JobProgressCard({
 function capabilityLabel(cap: string): string {
   switch (cap) {
     case "tutoring":
-      return "即时答疑";
+      return "问题讲解";
     case "resource_generation":
       return "资源生成";
     case "assessment":
@@ -129,7 +129,7 @@ function capabilityLabel(cap: string): string {
     case "path_planning":
       return "路径规划";
     case "profile":
-      return "学习画像";
+      return "更新学习状态";
     default:
       return cap;
   }

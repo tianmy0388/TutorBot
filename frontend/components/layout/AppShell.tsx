@@ -1,185 +1,98 @@
 "use client";
 
-/**
- * AppShell — TutorBot's outer chrome.
- *
- * Layout contract:
- *   body  →  ``h-dvh overflow-hidden`` (set in app/layout.tsx)
- *   AppShell → ``h-full`` (fills the body, no min-height tricks)
- *   AppShell → column: top rail + scroll region
- *
- * The top rail is a single horizontal band with three "zones":
- *   left:  brand wordmark + lockup
- *   middle: primary nav (the four top-level surfaces)
- *   right: status + theme + settings
- *
- * We deliberately avoid a sticky shadow; the rail sits on a slightly
- * elevated panel color with a 1px hairline divider — more editorial,
- * less SaaS-app.
- */
-
+import type { ReactNode } from "react";
+import type { LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  BookOpen,
-  Database,
-  MessageSquare,
-  Presentation,
-  Settings as SettingsIcon,
-  Sun,
-  Moon,
-  Sparkle,
-} from "lucide-react";
-import { ReactNode } from "react";
-import { cn } from "@/lib/utils";
-import { useTutorStore } from "@/lib/store";
+import { BookMarked, BookOpenText, Files, Home, Moon, Settings, Sun } from "lucide-react";
 import { Logo } from "@/components/brand/Logo";
+import { useTutorStore } from "@/lib/store";
+import { cn } from "@/lib/utils";
 
 interface NavItem {
   href: string;
   label: string;
-  icon: any;
+  icon: LucideIcon;
   match: (path: string) => boolean;
 }
 
-const NAV_ITEMS: NavItem[] = [
-  {
-    href: "/",
-    label: "学习工作台",
-    icon: MessageSquare,
-    match: (p) => p === "/",
-  },
-  {
-    href: "/knowledge-bases",
-    label: "知识库",
-    icon: Database,
-    match: (p) => p.startsWith("/knowledge-bases"),
-  },
-  {
-    href: "/resources",
-    label: "资源中心",
-    icon: BookOpen,
-    match: (p) => p.startsWith("/resources"),
-  },
-  {
-    href: "/demo",
-    label: "比赛演示",
-    icon: Presentation,
-    match: (p) => p.startsWith("/demo"),
-  },
-  {
-    href: "/settings",
-    label: "设置",
-    icon: SettingsIcon,
-    match: (p) => p.startsWith("/settings"),
-  },
+const PRIMARY_NAV: NavItem[] = [
+  { href: "/", label: "首页", icon: Home, match: (path) => path === "/" },
+  { href: "/workspace", label: "学习", icon: BookOpenText, match: (path) => path.startsWith("/workspace") },
+  { href: "/knowledge-bases", label: "资料库", icon: BookMarked, match: (path) => path.startsWith("/knowledge-bases") },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() || "/";
-  const setSettingsOpen = useTutorStore((s) => s.setSettingsOpen);
-  const theme = useTutorStore((s) => s.theme);
-  const setTheme = useTutorStore((s) => s.setTheme);
+  const theme = useTutorStore((state) => state.theme);
+  const setTheme = useTutorStore((state) => state.setTheme);
 
   return (
-    <div className="h-full flex flex-col bg-bg text-fg">
-      <header
-        className="border-b shrink-0 z-30 backdrop-blur-sm animate-slide-down"
-        style={{
-          backgroundColor: "rgb(var(--color-bg-panel) / 0.85)",
-          borderColor: "rgb(var(--color-rule) / 0.6)",
-        }}
-      >
-        <div className="h-14 px-5 flex items-center justify-between gap-6">
-          {/* Brand */}
-          <Link
-            href="/"
-            className="group flex items-center"
-            data-testid="app-logo"
+    <div className="flex h-full bg-bg text-fg">
+      <aside className="hidden w-[240px] shrink-0 flex-col border-r border-border bg-bg-panel px-4 py-5 md:flex">
+        <Link href="/" className="flex min-h-11 items-center px-2" data-testid="app-logo">
+          <Logo size={30} showWordmark wordmarkSize="lg" />
+        </Link>
+
+        <nav className="mt-10 space-y-1" aria-label="主要导航" data-testid="app-nav">
+          {PRIMARY_NAV.map((item) => <DesktopNavItem key={item.href} item={item} pathname={pathname} />)}
+        </nav>
+
+        <div className="mt-8 px-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-fg-subtle">你的空间</div>
+        <Link
+          href="/resources"
+          className={cn(
+            "mt-2 flex min-h-11 items-center gap-3 rounded-2xl px-3 text-sm font-medium transition-colors",
+            pathname.startsWith("/resources") ? "bg-bg-subtle text-fg" : "text-fg-muted hover:bg-bg-subtle hover:text-fg",
+          )}
+        >
+          <Files className="h-[18px] w-[18px]" />
+          最近生成
+        </Link>
+
+        <div className="mt-auto space-y-1 border-t border-border pt-4">
+          <button
+            type="button"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            className="flex min-h-11 w-full items-center gap-3 rounded-2xl px-3 text-sm font-medium text-fg-muted transition-colors hover:bg-bg-subtle hover:text-fg"
+            aria-label={theme === "dark" ? "切换到浅色模式" : "切换到暗色模式"}
+            data-testid="nav-theme-toggle"
           >
-            <Logo size={26} showWordmark wordmarkSize="lg" />
+            {theme === "dark" ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
+            {theme === "dark" ? "浅色模式" : "暗色模式"}
+          </button>
+          <Link href="/settings" className="flex min-h-11 items-center gap-3 rounded-2xl px-3 text-sm font-medium text-fg-muted transition-colors hover:bg-bg-subtle hover:text-fg">
+            <Settings className="h-[18px] w-[18px]" />
+            设置
           </Link>
-
-          {/* Primary nav */}
-          <nav
-            className="flex items-center gap-1 flex-1 justify-center"
-            data-testid="app-nav"
-          >
-            {NAV_ITEMS.map((item) => {
-              const active = item.match(pathname);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    "relative inline-flex items-center gap-1.5 px-3 h-8 rounded-md text-[13px] font-medium",
-                    "transition-colors duration-150",
-                    active
-                      ? "text-fg"
-                      : "text-fg-muted hover:text-fg",
-                  )}
-                  data-testid={`nav-${item.label}`}
-                >
-                  <item.icon
-                    className={cn(
-                      "w-3.5 h-3.5 transition-colors",
-                      active ? "text-brand-400" : "text-fg-subtle",
-                    )}
-                  />
-                  <span>{item.label}</span>
-                  {active && (
-                    <span
-                      className="absolute -bottom-[1px] left-3 right-3 h-[2px] rounded-full"
-                      style={{ backgroundColor: "rgb(var(--color-brand-400))" }}
-                    />
-                  )}
-                </Link>
-              );
-            })}
-          </nav>
-
-          {/* Right cluster */}
-          <div className="flex items-center gap-1.5">
-            <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 h-7 rounded-full text-[10px] font-mono-tab text-fg-subtle"
-              style={{
-                backgroundColor: "rgb(var(--color-bg-card) / 0.5)",
-                border: "1px solid rgb(var(--color-rule) / 0.5)",
-                letterSpacing: "0.14em",
-              }}
-            >
-              <span
-                className="w-1.5 h-1.5 rounded-full animate-pulse-slow"
-                style={{ backgroundColor: "rgb(var(--color-brand-400))" }}
-              />
-              v1.0
-            </span>
-
-            <button
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-              className="p-1.5 rounded-md text-fg-muted hover:text-fg transition-colors hover:bg-bg-card"
-              title={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
-              data-testid="nav-theme-toggle"
-            >
-              {theme === "dark" ? (
-                <Sun className="w-4 h-4" />
-              ) : (
-                <Moon className="w-4 h-4" />
-              )}
-            </button>
-
-            <button
-              className="btn-secondary text-xs h-8"
-              onClick={() => setSettingsOpen(true)}
-              title="打开设置"
-            >
-              <Sparkle className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">设置</span>
-            </button>
-          </div>
         </div>
-      </header>
+      </aside>
 
-      <main className="flex-1 min-h-0 overflow-hidden">{children}</main>
+      <main className="min-w-0 flex-1 overflow-hidden pb-[72px] md:pb-0">{children}</main>
+
+      <nav className="fixed inset-x-0 bottom-0 z-50 grid h-[72px] grid-cols-3 border-t border-border bg-bg-panel/95 px-3 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden" aria-label="主要导航" data-testid="app-nav-mobile">
+        {PRIMARY_NAV.map((item) => {
+          const active = item.match(pathname);
+          const Icon = item.icon;
+          return (
+            <Link key={item.href} href={item.href} className={cn("flex min-h-11 flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-semibold transition-colors", active ? "text-fg" : "text-fg-muted")}>
+              <Icon className={cn("h-5 w-5", active && "stroke-[2.5]")} />
+              {item.label}
+            </Link>
+          );
+        })}
+      </nav>
     </div>
+  );
+}
+
+function DesktopNavItem({ item, pathname }: { item: NavItem; pathname: string }) {
+  const active = item.match(pathname);
+  const Icon = item.icon;
+  return (
+    <Link href={item.href} className={cn("flex min-h-11 items-center gap-3 rounded-2xl px-3 text-sm font-semibold transition-colors duration-200", active ? "bg-bg-subtle text-fg" : "text-fg-muted hover:bg-bg-subtle hover:text-fg")} data-testid={`nav-${item.label}`}>
+      <Icon className={cn("h-[18px] w-[18px]", active && "stroke-[2.5]")} />
+      {item.label}
+    </Link>
   );
 }

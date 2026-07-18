@@ -276,7 +276,7 @@ export const useTutorStore = create<TutorState>()(
     tracePanelOpen: true,
     currentCapability: null,
     wsConnected: false,
-    theme: "dark",
+    theme: "light",
     settingsOpen: false,
 
     // --- simple setters ---
@@ -299,7 +299,7 @@ export const useTutorStore = create<TutorState>()(
       set({ theme });
     },
     hydrateTheme: () => {
-      let theme: Theme = "dark";
+      let theme: Theme = "light";
       try {
         if (typeof window !== "undefined") {
           const stored = window.localStorage.getItem("tutor:theme");

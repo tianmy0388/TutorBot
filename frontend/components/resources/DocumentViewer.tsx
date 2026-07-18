@@ -111,7 +111,7 @@ function SectionedDocument({
             className="scroll-mt-6"
           >
             <h2 className="text-xl font-bold mb-3 flex items-center gap-2">
-              <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-brand-600/30 text-brand-300 text-xs font-mono">
+              <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-brand-100 text-brand-700 dark:bg-bg-subtle dark:text-fg text-xs font-mono">
                 {i + 1}
               </span>
               {s.title}
@@ -154,8 +154,8 @@ function SectionedDocument({
               </ReactMarkdown>
             </div>
             {s.key_points && s.key_points.length > 0 && (
-              <div className="mt-4 p-3 bg-brand-950/30 border border-brand-800/30 rounded-lg">
-                <div className="text-xs font-semibold text-brand-300 mb-2 flex items-center gap-1.5">
+              <div className="mt-4 p-3 bg-brand-50 dark:bg-bg-subtle border border-brand-200 dark:border-border rounded-md">
+                <div className="text-xs font-semibold text-brand-700 dark:text-fg mb-2 flex items-center gap-1.5">
                   <Target className="w-3.5 h-3.5" />
                   关键点
                 </div>
@@ -191,7 +191,7 @@ function SectionedDocument({
                 className={cn(
                   "block text-xs px-2 py-1 rounded transition-colors leading-snug",
                   activeIdx === i
-                    ? "bg-brand-600/30 text-brand-200 border-l-2 border-brand-400"
+                    ? "bg-brand-100 text-brand-700 dark:bg-bg-subtle dark:text-fg border-l-2 border-brand-400"
                     : "text-fg-muted hover:text-fg hover:bg-bg/60",
                 )}
               >

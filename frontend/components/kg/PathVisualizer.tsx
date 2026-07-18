@@ -25,32 +25,32 @@ const STATUS_META: Record<
   completed: {
     label: "已掌握",
     icon: CheckCircle2,
-    className: "text-green-400",
-    ringClass: "ring-green-700/40 bg-green-950/20 border-green-800/40",
+    className: "text-green-700 dark:text-fg",
+    ringClass: "border-border",
   },
   skipped: {
     label: "已跳过",
     icon: SkipForward,
     className: "text-fg-subtle",
-    ringClass: "ring-fg/10 bg-bg-panel border-fg/5 opacity-60",
+    ringClass: "border-border opacity-60",
   },
   in_progress: {
     label: "进行中",
     icon: PlayCircle,
-    className: "text-brand-300",
-    ringClass: "ring-brand-700/40 bg-brand-950/20 border-brand-800/40",
+    className: "text-brand-700 dark:text-fg",
+    ringClass: "border-border",
   },
   available: {
     label: "可学习",
     icon: Circle,
-    className: "text-accent",
-    ringClass: "ring-accent/40 bg-accent/5 border-accent/30",
+    className: "text-brand-600 dark:text-fg-muted",
+    ringClass: "border-border",
   },
   locked: {
     label: "未解锁",
     icon: Lock,
     className: "text-fg-subtle",
-    ringClass: "ring-fg/10 bg-bg-card border-fg/10",
+    ringClass: "border-border",
   },
 };
 
@@ -71,7 +71,7 @@ export function PathVisualizer({ path }: { path: PlannedPath }) {
   };
 
   return (
-    <div className="p-4 border-t border-fg/10">
+    <div className="p-4">
       <div className="flex items-center gap-2 mb-3">
         <TrendingUp className="w-4 h-4 text-brand-400" />
         <h3 className="font-semibold text-sm">学习路径</h3>
@@ -82,25 +82,26 @@ export function PathVisualizer({ path }: { path: PlannedPath }) {
 
       <div className="h-1.5 bg-bg-panel rounded-full overflow-hidden mb-3">
         <div
-          className="h-full bg-gradient-to-r from-brand-500 to-accent transition-all"
+          className="h-full bg-brand-500 dark:bg-fg-muted transition-all"
           style={{ width: `${pct}%` }}
         />
       </div>
 
-      <div className="space-y-1.5">
+      <div className="border-t border-border">
         {path.nodes.map((step, i) => {
           const meta = STATUS_META[step.status];
           const Icon = meta.icon;
-          const isExpanded = expanded.has(step.id);
+          const stepId = step.node_id || step.id || String(i);
+          const isExpanded = expanded.has(stepId);
           return (
             <PathNodeRow
-              key={step.id}
+              key={stepId}
               step={step}
               index={i + 1}
               meta={meta}
               Icon={Icon}
               expanded={isExpanded}
-              onToggle={() => toggle(step.id)}
+              onToggle={() => toggle(stepId)}
             />
           );
         })}
@@ -125,7 +126,7 @@ function PathNodeRow({
   onToggle: () => void;
 }) {
   return (
-    <div className={cn("rounded-lg border", meta.ringClass)}>
+    <div className={cn("border-b", meta.ringClass)}>
       <button
         onClick={onToggle}
         className="w-full px-3 py-2 flex items-center gap-2 text-left"
@@ -136,11 +137,11 @@ function PathNodeRow({
         <Icon className={cn("w-3.5 h-3.5 shrink-0", meta.className)} />
         <span className="text-xs flex-1 truncate">{step.name}</span>
         <span className="text-[10px] text-fg-muted shrink-0">
-          {step.estimated_hours}h · {"★".repeat(step.difficulty)}
+          {step.estimated_hours}h · 难度 {step.difficulty}
         </span>
         <span
           className={cn(
-            "text-[9px] px-1.5 py-0.5 rounded shrink-0",
+            "text-[9px] shrink-0",
             meta.className,
           )}
         >
@@ -154,11 +155,11 @@ function PathNodeRow({
         />
       </button>
       {expanded && (
-        <div className="px-3 pb-2 text-[10px] text-fg-muted space-y-1 border-t border-fg/5 pt-2 mt-1">
-          {step.prerequisites.length > 0 && (
+        <div className="px-9 pb-3 text-[10px] text-fg-muted space-y-1 border-t border-border pt-2">
+          {(step.prerequisites?.length ?? 0) > 0 && (
             <div>
               前置:{" "}
-              {step.prerequisites.map((p) => (
+              {step.prerequisites?.map((p) => (
                 <code key={p} className="text-accent mx-0.5 bg-bg/40 px-1 rounded">
                   {p}
                 </code>

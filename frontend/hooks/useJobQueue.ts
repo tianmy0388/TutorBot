@@ -32,18 +32,7 @@ import { useTutorStore } from "@/lib/store";
 import { dispatchStreamEvent } from "@/lib/event-handler";
 import { getJobIdFromEvent } from "@/lib/job-reducer";
 import type { JobStatsResponse, JobSummary, JobStatus, StreamEvent } from "@/lib/types";
-import { WsClient, startJobMessage } from "@/lib/ws";
-
-function getWsUrl(): string {
-  if (typeof window === "undefined") {
-    // SSR fallback — must match the backend port the dev proxy targets.
-    // See next.config.ts (BACKEND_PORT).
-    const backendPort = "18000";
-    return `ws://localhost:${backendPort}/api/v1/ws`;
-  }
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/api/v1/ws`;
-}
+import { resolveWebSocketUrl, WsClient, startJobMessage } from "@/lib/ws";
 
 export interface SubmitJobResult {
   job_id: string;
@@ -104,7 +93,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
       if (!text.trim() || typeof window === "undefined") return null;
 
       return new Promise<SubmitJobResult | null>((resolve) => {
-        const url = getWsUrl();
+        const url = resolveWebSocketUrl();
         const client = new WsClient({
           url,
           onOpen: () => {
@@ -272,7 +261,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         }
       })();
 
-      const url = getWsUrl();
+      const url = resolveWebSocketUrl();
       const client = new WsClient({
         url,
         onOpen: () => {

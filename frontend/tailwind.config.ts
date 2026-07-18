@@ -50,10 +50,18 @@ const config: Config = {
           warm: withAlpha("var(--color-accent-warm)"),
           green: withAlpha("var(--color-accent-green)"),
         },
+        hero: {
+          DEFAULT: withAlpha("var(--color-hero)"),
+          panel: withAlpha("var(--color-hero-panel)"),
+          rule: withAlpha("var(--color-hero-rule)"),
+          fg: withAlpha("var(--color-hero-fg)"),
+          muted: withAlpha("var(--color-hero-muted)"),
+        },
       },
       fontFamily: {
         sans: [
           "var(--font-body)",
+          "Noto Sans SC",
           "PingFang SC",
           "Hiragino Sans GB",
           "Microsoft YaHei",
@@ -63,6 +71,7 @@ const config: Config = {
         ],
         display: [
           "var(--font-display)",
+          "Noto Serif SC",
           "Songti SC",
           "STSong",
           "SimSun",

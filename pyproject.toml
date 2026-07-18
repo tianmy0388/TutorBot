@@ -114,7 +114,6 @@ exclude = ["tests*", "frontend*"]
 [tool.setuptools.package-data]
 tutor = [
     "knowledge_base/**/*",
-    "demo/**/*.json",
     "prompts/**/*.yaml",
     "prompts/**/*.yml",
     "py.typed",

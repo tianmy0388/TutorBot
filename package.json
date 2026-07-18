@@ -10,12 +10,10 @@
     "frontend:install": "cd frontend && npm install",
     "frontend:dev": "cd frontend && npm run dev",
     "frontend:build": "cd frontend && npm run build",
-    "presentation:build": "node scripts/generate-competition-ppt.mjs",
     "dev": "concurrently -k -n backend,frontend -c blue,green \"npm run backend:dev\" \"npm run frontend:dev\"",
     "test": "cd backend && pytest"
   },
   "devDependencies": {
-    "@paperjsx/json-to-pptx": "^0.3.0",
     "concurrently": "^9.0.0"
   },
   "workspaces": [

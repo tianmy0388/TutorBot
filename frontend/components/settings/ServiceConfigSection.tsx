@@ -24,6 +24,7 @@ import {
   XCircle,
   Eye,
   EyeOff,
+  Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -130,7 +131,7 @@ export function ServiceConfigSection({
   };
 
   return (
-    <section className="rounded-xl border border-fg/10 bg-bg-panel p-5 space-y-4">
+    <section className="py-6 border-t border-border space-y-4">
       <header>
         <h3 className="text-base font-semibold">{title}</h3>
         <p className="text-xs text-fg-muted mt-1">{description}</p>
@@ -193,7 +194,7 @@ export function ServiceConfigSection({
 
       {providerHint && (
         <div
-          className="flex items-start gap-2 rounded-lg border border-yellow-500/25 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-100"
+          className="flex items-start gap-2 border-y border-yellow-200 dark:border-border bg-yellow-50 dark:bg-bg-subtle px-3 py-2 text-xs text-yellow-800 dark:text-fg"
           data-testid={`${title}-provider-hint`}
         >
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -213,7 +214,7 @@ export function ServiceConfigSection({
         <div className="flex items-center gap-2">
           <code
             data-testid={`${title}-key-preview`}
-            className="flex-1 px-3 py-2 rounded-lg border border-fg/10 bg-bg-card text-sm font-mono"
+            className="flex-1 px-3 py-2 rounded border border-border bg-bg-subtle text-sm font-mono"
           >
             {apiKey.configured
               ? apiKey.preview || "••••••••"
@@ -261,9 +262,10 @@ export function ServiceConfigSection({
         {apiKey.hint && (
           <p
             data-testid={`${title}-key-hint`}
-            className="text-[11px] text-yellow-300/80 mt-1"
+            className="flex items-start gap-1.5 text-[11px] text-fg-muted mt-1"
           >
-            💡 {apiKey.hint}
+            <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>{apiKey.hint}</span>
           </p>
         )}
         {apiKey.required !== false && !apiKey.configured && (
@@ -308,7 +310,9 @@ export function ServiceConfigSection({
           <span
             className={cn(
               "text-xs",
-              saveStatus === "已保存" ? "text-green-400" : "text-red-400",
+              saveStatus === "已保存"
+                ? "text-green-700 dark:text-fg"
+                : "text-red-700 dark:text-fg",
             )}
             data-testid={`${title}-save-status`}
           >
@@ -320,7 +324,9 @@ export function ServiceConfigSection({
             data-testid={`${title}-test-result`}
             className={cn(
               "inline-flex items-center gap-1 text-xs",
-              testResult.ok ? "text-green-400" : "text-red-400",
+              testResult.ok
+                ? "text-green-700 dark:text-fg"
+                : "text-red-700 dark:text-fg",
             )}
           >
             {testResult.ok ? (

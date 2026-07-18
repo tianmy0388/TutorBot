@@ -28,6 +28,11 @@ env/
 ENV/
 env.bak/
 venv.bak/
+/Lib/
+/include/
+/share/
+/scripts/*.exe
+/scripts/vba_extract.py
 
 # Distribution / packaging
 lib64/

@@ -12,7 +12,6 @@
 
 import {
   AlertTriangle,
-  CheckCircle2,
   ExternalLink,
   FileText,
   Network,
@@ -22,11 +21,8 @@ import {
   Code2,
   Presentation,
   Clock,
-  Star,
-  Sparkles,
   Inbox,
   Tag,
-  ShieldCheck,
 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { recordLearningEvent } from "@/lib/api";
@@ -50,56 +46,49 @@ export interface ResourceCardProps {
 
 const TYPE_META: Record<
   Resource["type"],
-  { label: string; icon: any; color: string; bgClass: string; gradient: string }
+  { label: string; icon: any; color: string; bgClass: string }
 > = {
   document: {
     label: "课程讲解",
     icon: FileText,
-    color: "text-blue-300",
-    bgClass: "bg-blue-950/30 border-blue-800/30",
-    gradient: "from-blue-500/20 to-blue-600/5",
+    color: "text-fg-muted",
+    bgClass: "bg-bg-subtle border-border",
   },
   mindmap: {
     label: "思维导图",
     icon: Network,
-    color: "text-purple-300",
-    bgClass: "bg-purple-950/30 border-purple-800/30",
-    gradient: "from-purple-500/20 to-purple-600/5",
+    color: "text-fg-muted",
+    bgClass: "bg-bg-subtle border-border",
   },
   exercise: {
     label: "练习题",
     icon: ListChecks,
-    color: "text-green-300",
-    bgClass: "bg-green-950/30 border-green-800/30",
-    gradient: "from-green-500/20 to-green-600/5",
+    color: "text-fg-muted",
+    bgClass: "bg-bg-subtle border-border",
   },
   reading: {
     label: "拓展阅读",
     icon: BookOpen,
-    color: "text-yellow-300",
-    bgClass: "bg-yellow-950/30 border-yellow-800/30",
-    gradient: "from-yellow-500/20 to-yellow-600/5",
+    color: "text-fg-muted",
+    bgClass: "bg-bg-subtle border-border",
   },
   video: {
     label: "视频/动画",
     icon: Video,
-    color: "text-pink-300",
-    bgClass: "bg-pink-950/30 border-pink-800/30",
-    gradient: "from-pink-500/20 to-pink-600/5",
+    color: "text-fg-muted",
+    bgClass: "bg-bg-subtle border-border",
   },
   code: {
     label: "代码示例",
     icon: Code2,
-    color: "text-orange-300",
-    bgClass: "bg-orange-950/30 border-orange-800/30",
-    gradient: "from-orange-500/20 to-orange-600/5",
+    color: "text-fg-muted",
+    bgClass: "bg-bg-subtle border-border",
   },
   ppt: {
     label: "PPT 教案",
     icon: Presentation,
-    color: "text-cyan-300",
-    bgClass: "bg-cyan-950/30 border-cyan-800/30",
-    gradient: "from-cyan-500/20 to-cyan-600/5",
+    color: "text-fg-muted",
+    bgClass: "bg-bg-subtle border-border",
   },
 };
 
@@ -140,10 +129,6 @@ export function ResourceCard({
               <span className="flex items-center gap-0.5">
                 <Clock className="w-3 h-3" />
                 {resource.estimated_minutes} 分
-              </span>
-              <span className="flex items-center gap-0.5">
-                <Star className="w-3 h-3" />
-                {(resource.confidence_score * 100).toFixed(0)}%
               </span>
             </div>
           )}
@@ -211,10 +196,7 @@ export function ResourceDetail({ resource }: { resource: Resource }) {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Header */}
       <div
-        className={cn(
-          "px-5 py-3 border-b border-fg/10 flex items-center gap-3",
-          `bg-gradient-to-r ${meta.gradient}`,
-        )}
+        className="px-5 py-3 border-b border-border flex items-center gap-3 bg-bg-subtle"
       >
         <span
           className={cn(
@@ -236,11 +218,6 @@ export function ResourceDetail({ resource }: { resource: Resource }) {
             <span>·</span>
             <span>
               <Clock className="w-3 h-3 inline" /> {resource.estimated_minutes} 分
-            </span>
-            <span>·</span>
-            <span>
-              <Star className="w-3 h-3 inline" />{" "}
-              {(resource.confidence_score * 100).toFixed(0)}% 置信
             </span>
           </div>
         </div>
@@ -270,43 +247,18 @@ export function ResourceDetail({ resource }: { resource: Resource }) {
 }
 
 function ResourceEvidence({ resource }: { resource: Resource }) {
-  const review = asRecord(resource.review);
-  const safety = asRecord(resource.safety);
   const citations = resource.citations ?? [];
   const unverified = resource.unverified_claims ?? [];
-  const reviewVerdict = display(review.verdict || "n/a");
-  const safetyVerdict = display(safety.verdict || "n/a");
 
   return (
-    <div
-      className="px-5 py-3 border-b border-fg/5 bg-bg-panel/20 space-y-3"
+    <details
+      className="border-b border-border bg-bg-panel px-5 py-3"
       data-testid="resource-evidence"
     >
-      <div className="flex items-center gap-2 text-xs font-semibold">
-        <ShieldCheck className="w-3.5 h-3.5 text-brand-300" />
-        <span>可信证据</span>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-        <EvidenceTile
-          icon={CheckCircle2}
-          label="质量审核"
-          value={`${reviewVerdict} · ${score(review.quality_score)}`}
-        />
-        <EvidenceTile
-          icon={ShieldCheck}
-          label="安全检查"
-          value={`${safetyVerdict} · ${display(safety.risk_level || "n/a")}`}
-        />
-        <EvidenceTile
-          icon={Sparkles}
-          label="生成 Agent"
-          value={resource.generated_by?.join(", ") || "n/a"}
-        />
-      </div>
+      <summary className="cursor-pointer text-xs font-semibold text-fg-muted hover:text-fg">来源与说明</summary>
 
       {citations.length > 0 && (
-        <div>
+        <div className="mt-3">
           <div className="text-[11px] font-semibold text-fg-muted mb-1">
             引用来源
           </div>
@@ -341,7 +293,7 @@ function ResourceEvidence({ resource }: { resource: Resource }) {
       )}
 
       {unverified.length > 0 && (
-        <div className="rounded-md border border-yellow-500/25 bg-yellow-500/10 p-2 text-[11px] text-yellow-100">
+        <div className="mt-3 rounded-md border border-border bg-bg-subtle p-3 text-[11px] text-fg-muted">
           <div className="flex items-start gap-1.5">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
             <div className="space-y-0.5">
@@ -352,29 +304,7 @@ function ResourceEvidence({ resource }: { resource: Resource }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function EvidenceTile({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: any;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-lg border border-fg/10 bg-bg-card/50 p-2 min-w-0">
-      <div className="flex items-center gap-1.5 text-[10px] text-fg-subtle">
-        <Icon className="w-3 h-3" />
-        {label}
-      </div>
-      <div className="text-[11px] text-fg-muted mt-1 truncate" title={value}>
-        {value}
-      </div>
-    </div>
+    </details>
   );
 }
 
@@ -384,12 +314,12 @@ function EvidenceTile({
 export function ResourceEmptyDetail() {
   return (
     <div className="h-full flex flex-col items-center justify-center text-fg-muted text-center p-12">
-      <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-bg-panel border border-fg/10 mb-4">
+      <div className="inline-flex items-center justify-center w-14 h-14 rounded-md bg-bg-panel border border-border mb-4">
         <Inbox className="w-8 h-8 opacity-40" />
       </div>
-      <div className="text-sm font-medium text-fg-muted">资源详情区</div>
+      <div className="text-sm font-medium text-fg-muted">选择一项资料</div>
       <p className="text-xs text-fg-subtle mt-1 max-w-xs">
-        从左侧资源列表中选择一项以查看完整内容；或在聊天中发送"系统学习 XXX"开始生成
+        从列表中选择一项查看完整内容，或回到学习任务整理新的资料。
       </p>
       <div className="mt-6 flex flex-wrap gap-2 justify-center text-[10px]">
         {["document", "mindmap", "exercise", "video", "code", "reading"].map(
@@ -442,9 +372,7 @@ function renderByType(resource: Resource): React.ReactNode {
 function hasEvidence(resource: Resource): boolean {
   return Boolean(
     (resource.citations && resource.citations.length > 0) ||
-      (resource.unverified_claims && resource.unverified_claims.length > 0) ||
-      Object.keys(asRecord(resource.review)).length > 0 ||
-      Object.keys(asRecord(resource.safety)).length > 0,
+      (resource.unverified_claims && resource.unverified_claims.length > 0),
   );
 }
 
@@ -457,12 +385,6 @@ function display(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return JSON.stringify(value);
-}
-
-function score(value: unknown): string {
-  const numeric = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(numeric)) return "n/a";
-  return `${Math.round(numeric * 100)}%`;
 }
 
 export const RESOURCE_TYPE_META = TYPE_META;

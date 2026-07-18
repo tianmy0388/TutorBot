@@ -12,7 +12,7 @@
  *  + Related concepts
  *  + Sources
  *  + Enrichment suggestions (diagram / code / exercise / reference / video)
- *  + Question understanding metadata (type / concepts / confidence)
+ *  + Question context (type / concepts)
  *
  * Falls back to a friendly empty state if no tutoring has happened yet.
  */
@@ -20,7 +20,6 @@
 import { useState } from "react";
 import {
   MessageCircle,
-  Sparkles,
   Lightbulb,
   BookOpen,
   Code2,
@@ -29,7 +28,6 @@ import {
   FileText,
   ChevronDown,
   ChevronRight,
-  Star,
   ArrowRight,
   HelpCircle,
   Tag,
@@ -46,13 +44,13 @@ const QUESTION_TYPE_META: Record<
   QuestionType,
   { label: string; color: string }
 > = {
-  concept: { label: "概念", color: "text-blue-300 bg-blue-950/40 border-blue-800/40" },
-  method: { label: "方法", color: "text-green-300 bg-green-950/40 border-green-800/40" },
-  debug: { label: "调试", color: "text-red-300 bg-red-950/40 border-red-800/40" },
-  comparison: { label: "对比", color: "text-purple-300 bg-purple-950/40 border-purple-800/40" },
-  practice: { label: "练习", color: "text-yellow-300 bg-yellow-950/40 border-yellow-800/40" },
-  meta: { label: "元学习", color: "text-pink-300 bg-pink-950/40 border-pink-800/40" },
-  other: { label: "其他", color: "text-fg-muted bg-bg-card border-fg/10" },
+  concept: { label: "概念", color: "text-brand-700 dark:text-fg border-border" },
+  method: { label: "方法", color: "text-brand-700 dark:text-fg border-border" },
+  debug: { label: "调试", color: "text-brand-700 dark:text-fg border-border" },
+  comparison: { label: "对比", color: "text-brand-700 dark:text-fg border-border" },
+  practice: { label: "练习", color: "text-brand-700 dark:text-fg border-border" },
+  meta: { label: "元学习", color: "text-brand-700 dark:text-fg border-border" },
+  other: { label: "其他", color: "text-fg-muted border-border" },
 };
 
 const ENRICHMENT_META: Record<
@@ -61,33 +59,33 @@ const ENRICHMENT_META: Record<
 > = {
   diagram: {
     label: "图解",
-    icon: Sparkles,
-    color: "text-purple-300",
-    bgClass: "bg-purple-950/30 border-purple-800/30",
+    icon: FileText,
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   code_example: {
     label: "代码示例",
     icon: Code2,
-    color: "text-orange-300",
-    bgClass: "bg-orange-950/30 border-orange-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   exercise: {
     label: "练习",
     icon: FlaskConical,
-    color: "text-green-300",
-    bgClass: "bg-green-950/30 border-green-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   reference: {
     label: "参考资料",
     icon: BookOpen,
-    color: "text-yellow-300",
-    bgClass: "bg-yellow-950/30 border-yellow-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   video: {
     label: "视频",
     icon: Video,
-    color: "text-pink-300",
-    bgClass: "bg-pink-950/30 border-pink-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
 };
 
@@ -101,16 +99,10 @@ export function TutorPanel() {
   }
 
   return (
-    <div className="p-5 border-b border-fg/10 h-full flex flex-col overflow-hidden">
+    <div className="p-4 h-full flex flex-col overflow-hidden">
       <div className="flex items-center gap-2 mb-4 shrink-0">
         <MessageCircle className="w-4 h-4 text-brand-400" />
-        <h2 className="font-semibold">即时答疑</h2>
-        {answer.confidence > 0 && (
-          <span className="ml-auto text-[10px] text-fg-muted flex items-center gap-1">
-            <Star className="w-3 h-3" />
-            置信 {(answer.confidence * 100).toFixed(0)}%
-          </span>
-        )}
+        <h2 className="font-semibold">问题讲解</h2>
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-3 pr-1">
@@ -120,7 +112,7 @@ export function TutorPanel() {
         {/* 4-layer answer */}
         <AnswerLayer
           tier={1}
-          icon={Sparkles}
+          icon={FileText}
           label="一句话总结"
           tone="brand"
           content={answer.tldr}
@@ -150,7 +142,7 @@ export function TutorPanel() {
         {/* Follow-up + related */}
         {(answer.follow_up_suggestion ||
           (answer.related_concepts && answer.related_concepts.length > 0)) && (
-          <div className="p-3 bg-bg-card rounded-lg border border-fg/5 space-y-2">
+          <div className="py-3 border-t border-border space-y-2">
             {answer.follow_up_suggestion && (
               <div className="flex items-start gap-2 text-xs">
                 <HelpCircle className="w-3.5 h-3.5 text-brand-400 mt-0.5 shrink-0" />
@@ -192,7 +184,7 @@ export function TutorPanel() {
 
         {/* Sources */}
         {answer.sources && answer.sources.length > 0 && (
-          <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+          <div className="py-3 border-t border-border">
             <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-2">
               引用来源
             </div>
@@ -220,7 +212,7 @@ function EmptyTutor() {
       <MessageCircle className="w-8 h-8 opacity-30" />
       <p>暂无答疑结果</p>
       <p className="text-fg-subtle leading-relaxed">
-        在聊天中输入 "解释 XXX" 或 "为什么 XXX" 触发即时答疑
+        写下想弄懂的问题，讲解会整理在这里
       </p>
     </div>
   );
@@ -238,7 +230,7 @@ function UnderstandingMeta({
   const qMeta = QUESTION_TYPE_META[understanding.question_type] || QUESTION_TYPE_META.other;
 
   return (
-    <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+    <div className="py-3 border-t border-border">
       <div className="flex items-center gap-2 mb-2 flex-wrap">
         <span
           className={cn(
@@ -249,13 +241,8 @@ function UnderstandingMeta({
           {qMeta.label}
         </span>
         <span className="text-[10px] text-fg-muted">
-          难度 {"★".repeat(understanding.difficulty || 0)}
+          难度 {understanding.difficulty || 0}
         </span>
-        {understanding.confidence > 0 && (
-          <span className="ml-auto text-[10px] text-fg-muted">
-            理解置信 {(understanding.confidence * 100).toFixed(0)}%
-          </span>
-        )}
       </div>
       {understanding.student_intent && (
         <div className="text-[11px] text-fg-muted italic">
@@ -301,24 +288,24 @@ const TONE_STYLE: Record<
   { ring: string; icon: string; badge: string }
 > = {
   brand: {
-    ring: "border-brand-700/40 bg-brand-950/20",
-    icon: "text-brand-300",
-    badge: "bg-brand-700/40 text-brand-200",
+    ring: "border-border",
+    icon: "text-fg-muted",
+    badge: "text-brand-700 dark:text-fg border border-border",
   },
   yellow: {
-    ring: "border-yellow-700/40 bg-yellow-950/20",
-    icon: "text-yellow-300",
-    badge: "bg-yellow-700/40 text-yellow-200",
+    ring: "border-border",
+    icon: "text-fg-muted",
+    badge: "text-fg-muted border border-border",
   },
   blue: {
-    ring: "border-blue-700/40 bg-blue-950/20",
-    icon: "text-blue-300",
-    badge: "bg-blue-700/40 text-blue-200",
+    ring: "border-border",
+    icon: "text-fg-muted",
+    badge: "text-fg-muted border border-border",
   },
   green: {
-    ring: "border-green-700/40 bg-green-950/20",
-    icon: "text-green-300",
-    badge: "bg-green-700/40 text-green-200",
+    ring: "border-border",
+    icon: "text-fg-muted",
+    badge: "text-fg-muted border border-border",
   },
 };
 
@@ -341,10 +328,10 @@ function AnswerLayer({
   if (!content || content.trim() === "") return null;
 
   return (
-    <div className={cn("rounded-lg border", style.ring)}>
+    <div className={cn("border-b", style.ring)}>
       <button
         onClick={() => setExpanded((e) => !e)}
-        className="w-full px-3 py-2 flex items-center gap-2 text-left"
+        className="w-full py-2.5 flex items-center gap-2 text-left"
       >
         <span
           className={cn(
@@ -364,7 +351,7 @@ function AnswerLayer({
         />
       </button>
       {expanded && (
-        <div className="px-3 pb-3 pt-1 text-[12px] text-fg leading-relaxed whitespace-pre-wrap border-t border-fg/5 mt-1">
+        <div className="pb-3 pt-2 text-[12px] text-fg leading-relaxed whitespace-pre-wrap border-t border-border">
           {content}
         </div>
       )}
@@ -384,15 +371,15 @@ function EnrichmentList({
   return (
     <div>
       <div className="flex items-center gap-2 mb-2">
-        <Sparkles className="w-3.5 h-3.5 text-accent" />
+        <BookOpen className="w-3.5 h-3.5 text-fg-muted" />
         <span className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold">
-          多模态补充建议
+          补充材料
         </span>
         <span className="ml-auto text-[10px] text-fg-subtle">
           {enrichments.length} 项
         </span>
       </div>
-      <div className="space-y-1.5">
+      <div className="border-t border-border">
         {enrichments.map((e, i) => (
           <EnrichmentCard key={i} enrichment={e} />
         ))}
@@ -407,20 +394,15 @@ function EnrichmentCard({ enrichment }: { enrichment: EnrichmentSuggestion }) {
   const Icon = meta.icon;
 
   return (
-    <div className={cn("rounded-lg border", meta.bgClass)}>
+    <div className={cn("border-b", meta.bgClass)}>
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="w-full px-3 py-2 flex items-center gap-2 text-left"
+        className="w-full py-2.5 flex items-center gap-2 text-left"
       >
         <Icon className={cn("w-3.5 h-3.5 shrink-0", meta.color)} />
         <span className={cn("text-xs font-medium truncate flex-1", meta.color)}>
           {enrichment.title || meta.label}
         </span>
-        {enrichment.confidence > 0 && (
-          <span className="text-[9px] text-fg-subtle shrink-0">
-            {(enrichment.confidence * 100).toFixed(0)}%
-          </span>
-        )}
         <ChevronRight
           className={cn(
             "w-3 h-3 text-fg-muted shrink-0 transition-transform",
@@ -429,7 +411,7 @@ function EnrichmentCard({ enrichment }: { enrichment: EnrichmentSuggestion }) {
         />
       </button>
       {expanded && (
-        <div className="px-3 pb-2 space-y-1 border-t border-fg/5 mt-1 pt-1">
+        <div className="pb-3 space-y-1 border-t border-border pt-2">
           <div className="text-[11px] text-fg leading-relaxed whitespace-pre-wrap">
             {enrichment.content}
           </div>

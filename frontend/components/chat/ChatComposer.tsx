@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * ChatComposer — text input + capability selector + send button.
+ * ChatComposer — task requirements + capability selector + submit action.
  *
  * Phase 5.2: Uses the async submit_job flow via useJobQueue so the
  * UI does not block while a capability runs in the background.
@@ -21,7 +21,7 @@
  */
 
 import { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, MessageCircle, BarChart3, Compass, X, Database, ChevronDown, BookOpen } from "lucide-react";
+import { ArrowRight, Files, MessageCircle, BarChart3, Compass, X, Database, ChevronDown, BookOpen } from "lucide-react";
 import { useTutorStore } from "@/lib/store";
 import { useJobQueue } from "@/hooks/useJobQueue";
 import { cn } from "@/lib/utils";
@@ -36,13 +36,19 @@ import {
 import type { KnowledgeBaseSummary } from "@/lib/types";
 
 const CAPABILITY_OPTIONS = [
-  { id: "resource_generation", label: "生成资源", icon: Sparkles, hint: "例如:系统学习 LSTM" },
-  { id: "tutoring", label: "即时答疑", icon: MessageCircle, hint: "例如:什么是注意力机制?" },
-  { id: "assessment", label: "效果评估", icon: BarChart3, hint: "评估一下我" },
-  { id: "path_planning", label: "路径规划", icon: Compass, hint: "下一步该学什么?" },
+  { id: "resource_generation", label: "整理学习资料", icon: Files, hint: "写下学习主题、已有基础，以及你希望得到的资料" },
+  { id: "tutoring", label: "讲解一个问题", icon: MessageCircle, hint: "写下具体问题，以及你卡住的地方" },
+  { id: "assessment", label: "检查掌握情况", icon: BarChart3, hint: "写下想检查的内容和最近的练习情况" },
+  { id: "path_planning", label: "安排下一步", icon: Compass, hint: "写下课程目标、当前基础和可投入时间" },
 ] as const;
 
-export function ChatComposer() {
+export function ChatComposer({
+  mode = "continue",
+  autoFocus = false,
+}: {
+  mode?: "create" | "continue";
+  autoFocus?: boolean;
+}) {
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -82,6 +88,10 @@ export function ChatComposer() {
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
   }, [text]);
+
+  useEffect(() => {
+    if (autoFocus) textareaRef.current?.focus();
+  }, [autoFocus]);
 
   const submit = async () => {
     if (!text.trim() || submitting) return;
@@ -185,19 +195,35 @@ export function ChatComposer() {
   })();
 
   return (
-    <div className="border-t border-fg/10 bg-bg-panel/50 backdrop-blur px-6 py-4">
-      <div className="max-w-3xl mx-auto">
+    <div className="border-t border-border bg-bg-panel px-4 py-4 sm:px-8">
+      <div className="mx-auto max-w-[880px] rounded-[24px] bg-bg-subtle p-4 sm:p-5">
+        <div className="mb-3 flex items-start justify-between gap-4">
+          <div>
+            <div className="text-xs font-semibold text-fg">
+              {mode === "create" ? "想学什么？" : "继续这个学习任务"}
+            </div>
+            <p className="mt-1 text-[11px] leading-5 text-fg-muted">
+              {mode === "create"
+                ? "写下目标、已有基础，或者一个具体问题。"
+                : "补充一个问题或新的要求，内容会留在当前任务里。"}
+            </p>
+          </div>
+          <span className="shrink-0 text-[10px] font-medium text-fg-subtle">
+            {mode === "create" ? "新的开始" : "继续学习"}
+          </span>
+        </div>
         {/* 2026-06-21 plan (D10): RAG scope selector */}
-        <div className="flex gap-2 mb-2 flex-wrap items-center">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-medium text-fg-subtle">参考资料</span>
           <div className="relative">
             <button
               onClick={() => setScopeOpen((o) => !o)}
               disabled={submitting}
               className={cn(
-                "px-2.5 py-1 rounded-full text-xs transition-colors flex items-center gap-1.5",
+                "h-7 px-2 rounded text-xs transition-colors flex items-center gap-1.5 border",
                 ragEnabled
-                  ? "bg-accent/20 text-accent border border-accent/30"
-                  : "bg-bg-card text-fg-muted border border-fg/10",
+                  ? "bg-brand-50 text-brand-700 border-brand-200 dark:bg-bg-card dark:text-fg dark:border-border"
+                  : "bg-bg-panel text-fg-muted border-border",
               )}
             >
               <Database className="w-3 h-3" />
@@ -210,7 +236,7 @@ export function ChatComposer() {
               />
             </button>
             {scopeOpen && (
-              <div className="absolute top-full mt-1 left-0 w-56 bg-bg-panel border border-fg/10 rounded-lg shadow-lg z-20 py-1 max-h-64 overflow-y-auto">
+              <div className="absolute top-full mt-1 left-0 w-56 bg-bg-panel border border-border rounded shadow-lg z-20 py-1 max-h-64 overflow-y-auto">
                 {/* Disable RAG */}
                 <button
                   onClick={() => {
@@ -220,7 +246,7 @@ export function ChatComposer() {
                   }}
                   className={cn(
                     "w-full text-left px-3 py-1.5 text-xs hover:bg-bg-card flex items-center gap-2",
-                    !ragEnabled && "bg-brand-500/10 text-brand-300",
+                    !ragEnabled && "bg-brand-500/10 text-brand-700 dark:text-fg",
                   )}
                 >
                   <X className="w-3 h-3" />
@@ -235,7 +261,7 @@ export function ChatComposer() {
                   }}
                   className={cn(
                     "w-full text-left px-3 py-1.5 text-xs hover:bg-bg-card flex items-center gap-2",
-                    ragEnabled && retrievalScope?.kind === "all" && "bg-brand-500/10 text-brand-300",
+                    ragEnabled && retrievalScope?.kind === "all" && "bg-brand-500/10 text-brand-700 dark:text-fg",
                   )}
                 >
                   <Database className="w-3 h-3" />
@@ -261,7 +287,7 @@ export function ChatComposer() {
                           ragEnabled &&
                             retrievalScope?.kind === "course" &&
                             retrievalScope?.id === c.id &&
-                            "bg-brand-500/10 text-brand-300",
+                            "bg-brand-500/10 text-brand-700 dark:text-fg",
                         )}
                       >
                         <Database className="w-3 h-3 opacity-50" />
@@ -294,7 +320,7 @@ export function ChatComposer() {
                             ragEnabled &&
                               retrievalScope?.kind === "library" &&
                               retrievalScope?.id === kb.id &&
-                              "bg-brand-500/10 text-brand-300",
+                              "bg-brand-500/10 text-brand-700 dark:text-fg",
                           )}
                         >
                           <Database className="w-3 h-3 opacity-50" />
@@ -318,8 +344,8 @@ export function ChatComposer() {
           </div>
         </div>
 
-        {/* Capability chips */}
-        <div className="flex gap-2 mb-2 flex-wrap items-center">
+        <div className="mb-2 flex flex-wrap items-center gap-1 border-b border-border">
+          <span className="mr-1 text-[10px] font-medium text-fg-subtle">这次想做什么</span>
           {CAPABILITY_OPTIONS.map((c) => {
             const Icon = c.icon;
             const active = currentCapability === c.id;
@@ -329,10 +355,10 @@ export function ChatComposer() {
                 onClick={() => setCapability(active ? null : c.id)}
                 disabled={submitting}
                 className={cn(
-                  "px-3 py-1 rounded-full text-xs transition-colors flex items-center gap-1.5",
+                  "min-h-10 rounded-full px-3 text-xs transition-colors flex items-center gap-1.5",
                   active
-                    ? "bg-brand-600 text-white shadow-sm"
-                    : "bg-bg-card text-fg-muted hover:text-fg hover:bg-bg/60 border border-fg/5",
+                    ? "bg-bg-panel text-fg"
+                    : "text-fg-muted hover:bg-bg-panel/70 hover:text-fg",
                   submitting && !active && "opacity-40 cursor-not-allowed",
                 )}
               >
@@ -342,9 +368,9 @@ export function ChatComposer() {
             );
           })}
           {activeCount > 0 && (
-            <span className="ml-auto text-[10px] text-brand-300 flex items-center gap-1">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse" />
-              {activeCount} 任务运行中
+            <span className="ml-auto text-[10px] text-brand-700 dark:text-fg-muted flex items-center gap-1">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-brand-500 dark:bg-fg-muted" />
+              {activeCount} 项正在准备
             </span>
           )}
         </div>
@@ -360,12 +386,12 @@ export function ChatComposer() {
               placeholder={
                 activeCap
                   ? activeCap.hint
-                  : "请输入你想学的内容… (或选择上方能力)"
+                  : "填写任务目标、已有基础、约束条件和期望产出"
               }
               rows={2}
               disabled={submitting}
               className={cn(
-                "w-full bg-bg-card border border-fg/10 rounded-xl px-4 py-3 resize-none",
+                "w-full bg-bg-panel border border-border rounded-2xl px-4 py-3 resize-none",
                 "focus:outline-none focus:border-brand-500 transition-colors text-sm",
                 submitting && "opacity-60",
               )}
@@ -388,17 +414,16 @@ export function ChatComposer() {
               "btn-primary h-12 px-5",
               (!text.trim() || submitting) && "opacity-50 cursor-not-allowed",
             )}
-            title="发送 (Enter) — 异步执行,不阻塞 UI"
+            title="提交学习内容"
           >
-            <Send className="w-4 h-4" />
-            发送
+            <ArrowRight className="w-4 h-4" />
+            开始
           </button>
         </div>
 
         <p className="text-[10px] text-fg-subtle mt-2 flex items-center gap-2 flex-wrap">
-          <span>Enter 发送 · Shift+Enter 换行</span>
-          <span>·</span>
-          <span>异步执行:发送后可继续输入,右上角"任务"查看进度</span>
+          <span>Enter 开始 · Shift+Enter 换行</span>
+          <span>你可以离开页面，回来后继续查看</span>
         </p>
       </div>
     </div>

@@ -79,7 +79,7 @@ export function ResourcePlanCard({
 
   return (
     <section
-      className="rounded-xl border border-brand-500/30 bg-brand-500/5 p-4 my-3 space-y-3"
+      className="border-y border-brand-200 dark:border-border px-1 py-4 my-3 space-y-3"
       data-testid="resource-plan-card"
     >
       <header className="flex items-center justify-between">
@@ -112,11 +112,11 @@ export function ResourcePlanCard({
               data-selected={isSelected}
               data-recommended={inRecommended}
               className={cn(
-                "inline-flex items-center gap-1 px-2.5 h-7 rounded-full border text-xs transition-colors",
+                "inline-flex items-center gap-1 px-2.5 h-7 rounded border text-xs transition-colors",
                 isSelected
                   ? t.expensive
-                    ? "border-yellow-500/50 bg-yellow-500/15 text-yellow-200"
-                    : "border-brand-500/50 bg-brand-500/15 text-brand-200"
+                    ? "border-yellow-300 bg-yellow-50 text-yellow-800 dark:border-border dark:bg-bg-subtle dark:text-fg"
+                    : "border-brand-300 bg-brand-50 text-brand-700 dark:border-border dark:bg-bg-subtle dark:text-fg"
                   : "border-fg/10 text-fg-muted hover:border-fg/20",
               )}
             >
@@ -127,7 +127,7 @@ export function ResourcePlanCard({
               )}
               {t.label}
               {t.expensive && (
-                <span className="text-[10px] text-yellow-300/80 ml-1">
+                <span className="text-[10px] text-yellow-700 dark:text-fg-muted ml-1">
                   耗时
                 </span>
               )}

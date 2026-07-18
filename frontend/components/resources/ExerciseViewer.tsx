@@ -23,6 +23,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { recordLearningEvent } from "@/lib/api";
+import { refreshLearningState } from "@/lib/learning-state";
 import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { Resource } from "@/lib/types";
@@ -69,6 +70,7 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
   const questions = parseQuestions(resource);
   const userId = useTutorStore((s) => s.userId);
   const latestPackage = useTutorStore((s) => s.latestPackage);
+  const currentCourse = useTutorStore((s) => s.currentCourse);
   const [answers, setAnswers] = useState<Record<string, any>>({});
   const [submitted, setSubmitted] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState<string>("all");
@@ -130,7 +132,9 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
           question_type: q.type,
           difficulty: q.difficulty,
         },
-      }).catch(() => undefined);
+      })
+        .then(() => refreshLearningState(userId || "anonymous", currentCourse))
+        .catch(() => undefined);
     }
   };
 
@@ -174,7 +178,9 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
             .map((q) => q.knowledge_point)
             .filter(Boolean),
         },
-      }).catch(() => undefined);
+      })
+        .then(() => refreshLearningState(userId || "anonymous", currentCourse))
+        .catch(() => undefined);
     }
   };
 
@@ -233,7 +239,7 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
         {/* Progress bar */}
         <div className="h-1.5 bg-bg-panel rounded-full overflow-hidden">
           <div
-            className="h-full bg-gradient-to-r from-green-500 to-emerald-400 transition-all"
+            className="h-full bg-green-600 dark:bg-fg-muted transition-all"
             style={{ width: `${(stats.correct / Math.max(1, stats.total)) * 100}%` }}
           />
         </div>
@@ -248,7 +254,7 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
               className={cn(
                 "px-2 py-0.5 rounded-md transition-colors",
                 filter === t
-                  ? "bg-brand-600/30 text-brand-200"
+                  ? "bg-brand-100 text-brand-700 dark:bg-bg-subtle dark:text-fg"
                   : "text-fg-muted hover:text-fg bg-bg-panel",
               )}
             >
@@ -431,7 +437,7 @@ function QuestionCard({
                 className={cn(
                   "flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors",
                   checked
-                    ? "border-brand-500 bg-brand-950/30"
+                    ? "border-brand-500 bg-brand-50 dark:bg-bg-subtle"
                     : "border-fg/10 hover:border-fg/20",
                   isSub && isAnswer && "border-green-500 bg-green-950/30",
                   isSub && checked && !isAnswer && "border-red-500 bg-red-950/30",
@@ -448,7 +454,7 @@ function QuestionCard({
                   className="mt-1 accent-brand-500"
                 />
                 <span className="text-sm flex-1">
-                  <strong className="font-mono text-brand-300">
+                  <strong className="font-mono text-brand-700 dark:text-fg">
                     {opt.label}.
                   </strong>{" "}
                   {opt.text}
@@ -472,7 +478,7 @@ function QuestionCard({
                 className={cn(
                   "flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors",
                   checked
-                    ? "border-brand-500 bg-brand-950/30"
+                    ? "border-brand-500 bg-brand-50 dark:bg-bg-subtle"
                     : "border-fg/10 hover:border-fg/20",
                   isSub && isAnswer && "border-green-500 bg-green-950/30",
                   isSub && checked && !isAnswer && "border-red-500 bg-red-950/30",
@@ -493,7 +499,7 @@ function QuestionCard({
                   className="mt-1 accent-brand-500"
                 />
                 <span className="text-sm flex-1">
-                  <strong className="font-mono text-brand-300">
+                  <strong className="font-mono text-brand-700 dark:text-fg">
                     {opt.label}.
                   </strong>{" "}
                   {opt.text}
@@ -516,7 +522,7 @@ function QuestionCard({
                 className={cn(
                   "px-4 py-1.5 rounded-md text-sm border transition-colors",
                   checked
-                    ? "border-brand-500 bg-brand-950/30"
+                    ? "border-brand-500 bg-brand-50 dark:bg-bg-subtle"
                     : "border-fg/10 hover:border-fg/20",
                   isSub && isAnswer && "border-green-500 bg-green-950/30",
                   isSub && checked && !isAnswer && "border-red-500 bg-red-950/30",
@@ -567,7 +573,7 @@ function QuestionCard({
         )}
         {isSub && q.explanation && (
           <div className="text-xs text-fg-muted ml-2 flex-1 leading-relaxed">
-            <span className="font-semibold text-brand-300">解析：</span>
+            <span className="font-semibold text-brand-700 dark:text-fg">解析：</span>
             {q.explanation}
           </div>
         )}

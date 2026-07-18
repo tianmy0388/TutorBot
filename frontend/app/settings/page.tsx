@@ -87,7 +87,7 @@ export default function SettingsPage() {
 
   if (error) {
     return (
-      <div className="p-6 text-sm text-red-400">
+      <div className="p-6 text-sm text-red-700 dark:text-fg">
         加载配置失败：{error}
         <button
           className="btn-secondary text-sm h-8 ml-3"
@@ -102,7 +102,8 @@ export default function SettingsPage() {
   if (!config) return null;
 
   return (
-    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+    <div className="h-full overflow-y-auto bg-bg-panel">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 space-y-6">
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">设置</h1>
@@ -110,31 +111,34 @@ export default function SettingsPage() {
             配置 AI 服务、密钥与外观。密钥以掩码形式回显，原值不会通过网络暴露。
           </p>
         </div>
-        <button
-          className="btn-secondary text-sm h-9"
-          onClick={refresh}
-          title="从服务器刷新"
+          <button
+            className="btn-secondary text-sm h-9"
+            onClick={refresh}
+            title="从服务器刷新"
+            aria-label="从服务器刷新设置"
         >
           <RefreshCw className="w-4 h-4" />
         </button>
       </header>
 
       {/* 外观 */}
-      <section className="rounded-xl border border-fg/10 bg-bg-panel p-5">
+      <section className="py-5 border-y border-border">
         <h3 className="text-base font-semibold">外观</h3>
-        <p className="text-xs text-fg-muted mt-1">主题颜色；立即生效。</p>
+        <p className="text-xs text-fg-muted mt-1">
+          浅色使用白底学术绿，深色仅保留黑白灰；切换后立即生效。
+        </p>
         <div className="grid grid-cols-2 gap-2 mt-3 max-w-md">
-          <ThemeOption
-            label="深色"
-            icon={Moon}
-            selected={theme === "dark"}
-            onClick={() => setTheme("dark")}
-          />
           <ThemeOption
             label="浅色"
             icon={Sun}
             selected={theme === "light"}
             onClick={() => setTheme("light")}
+          />
+          <ThemeOption
+            label="深色"
+            icon={Moon}
+            selected={theme === "dark"}
+            onClick={() => setTheme("dark")}
           />
         </div>
       </section>
@@ -181,7 +185,7 @@ export default function SettingsPage() {
         providerOptions={EMBED_PROVIDERS}
         providerHelp={{
           local:
-            "Local hash embedding runs offline without an API key. It is suitable for course demos and smoke tests; use a cloud embedding model for stronger semantic recall.",
+            "Local hash embedding runs offline without an API key. It is suitable for local learning and smoke tests; use a cloud embedding model for stronger semantic recall.",
           openrouter:
             "OpenRouter 可作为 OpenAI 兼容向量端点使用，需填写独立的 Embedding API Key 和 Base URL。",
           zhipu:
@@ -225,6 +229,7 @@ export default function SettingsPage() {
           return r as ConfigTestResult;
         }}
       />
+      </div>
     </div>
   );
 }
@@ -244,16 +249,16 @@ function ThemeOption({
     <button
       onClick={onClick}
       className={cn(
-        "p-3 rounded-lg border text-left transition-all flex items-center gap-2",
+        "py-3 border-b-2 text-left transition-colors flex items-center gap-2",
         selected
-          ? "border-brand-500 bg-brand-500/10 text-brand-200"
-          : "border-fg/10 hover:border-fg/20 hover:bg-bg-card text-fg-muted hover:text-fg",
+          ? "border-brand-500 text-brand-700 dark:border-fg-muted dark:text-fg"
+          : "border-transparent text-fg-muted hover:text-fg",
       )}
     >
       <Icon
         className={cn(
           "w-4 h-4 shrink-0",
-          selected ? "text-brand-300" : "text-fg-muted",
+          selected ? "text-brand-600 dark:text-fg" : "text-fg-muted",
         )}
       />
       <span className="text-sm font-medium">{label}</span>

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from tutor.services.learning_events.schema import EventType, LearningEvent
 from tutor.services.learning_events.store import get_learning_event_store
+from tutor.services.learner_profile.builder import ExerciseResult, get_profile_builder
 
 router = APIRouter()
 
@@ -49,9 +50,41 @@ async def record_learning_event(req: LearningEventRequest) -> dict[str, Any]:
             created_at=req.created_at or datetime.now(timezone.utc),
         )
         saved = await store.record(event)
+        profile_update: dict[str, Any] | None = None
+        if (
+            req.event_type == EventType.EXERCISE_ATTEMPTED
+            and req.concept_id.strip()
+            and req.correct is not None
+        ):
+            difficulty_raw = req.metadata.get("difficulty", 3)
+            try:
+                difficulty = max(1, min(5, int(difficulty_raw)))
+            except (TypeError, ValueError):
+                difficulty = 3
+            builder = get_profile_builder()
+            await builder.initialize()
+            profile, _ = await builder.ingest_exercise(
+                req.user_id,
+                ExerciseResult(
+                    concept=req.concept_id,
+                    correct=req.correct,
+                    difficulty=difficulty,
+                    elapsed_seconds=req.duration_seconds,
+                    mistake_type=(
+                        str(req.metadata.get("mistake_type"))
+                        if req.metadata.get("mistake_type")
+                        else None
+                    ),
+                    note=str(req.metadata.get("note") or ""),
+                ),
+            )
+            profile_update = {
+                "profile_version": profile.version,
+                "mastery": profile.knowledge_map.get(req.concept_id),
+            }
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return saved.to_dict()
+    return {**saved.to_dict(), **(profile_update or {})}
 
 
 @router.get("/learning-events/{user_id}")

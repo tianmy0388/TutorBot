@@ -6,7 +6,7 @@
  * Features:
  *  - Group by type with section headers + counts
  *  - Filter by type (chip selector)
- *  - Sort by type/difficulty/duration/confidence
+ *  - Sort by type, difficulty, or duration
  *  - History switcher (Phase 5): dropdown to load any of the user's
  *    previously generated packages; selection swaps `latestPackage`
  *    in the store so the ResourceDetail pane renders it.
@@ -17,7 +17,6 @@
 
 import { useState, useMemo, useEffect } from "react";
 import {
-  Sparkles,
   Package,
   ChevronDown,
   Filter,
@@ -33,7 +32,7 @@ import { ResourceCard, RESOURCE_TYPE_META } from "./ResourceCard";
 import type { ResourcePackage } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type SortBy = "default" | "difficulty" | "duration" | "confidence";
+type SortBy = "default" | "difficulty" | "duration";
 type FilterType = "all" | string;
 
 export function ResourceTray() {
@@ -75,9 +74,6 @@ export function ResourceTray() {
         break;
       case "duration":
         arr.sort((a, b) => a.estimated_minutes - b.estimated_minutes);
-        break;
-      case "confidence":
-        arr.sort((a, b) => b.confidence_score - a.confidence_score);
         break;
     }
     return arr;
@@ -133,7 +129,7 @@ export function ResourceTray() {
       <div className="p-5">
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-accent" />
+            <Package className="w-4 h-4 text-fg-muted" />
             资源中心
           </h2>
           {history.packages.length > 0 && (
@@ -149,7 +145,7 @@ export function ResourceTray() {
         <div className="text-center py-8 text-xs text-fg-muted">
           <Package className="w-8 h-8 mx-auto mb-2 opacity-40" />
           <p>暂无资源</p>
-          <p className="mt-1 text-fg-subtle">发送"系统学习 XXX"开始生成</p>
+          <p className="mt-1 text-fg-subtle">从一个学习主题开始整理资料</p>
         </div>
         {historyOpen && (
           <HistoryDropdown
@@ -176,7 +172,7 @@ export function ResourceTray() {
       {/* Header */}
       <div className="flex items-center justify-between mb-3 shrink-0">
         <h2 className="font-semibold flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-accent" />
+          <Package className="w-4 h-4 text-fg-muted" />
           资源中心
         </h2>
         <div className="flex items-center gap-2">
@@ -203,7 +199,7 @@ export function ResourceTray() {
 
       {/* Topic + meta */}
       <div className="text-[11px] text-fg-muted mb-3 truncate flex items-center gap-2">
-        <span className="truncate">📦 {latestPackage.topic}</span>
+        <span className="truncate">{latestPackage.topic}</span>
         <button
           onClick={() => history.refresh()}
           disabled={history.loading}
@@ -239,7 +235,7 @@ export function ResourceTray() {
           className={cn(
             "px-2 py-0.5 rounded-md transition-colors",
             filter === "all"
-              ? "bg-brand-600/30 text-brand-200"
+              ? "bg-brand-100 text-brand-700 dark:bg-bg-subtle dark:text-fg"
               : "text-fg-muted hover:text-fg bg-bg-panel",
           )}
         >
@@ -259,7 +255,7 @@ export function ResourceTray() {
               className={cn(
                 "px-2 py-0.5 rounded-md transition-colors flex items-center gap-1",
                 filter === t
-                  ? "bg-brand-600/30 text-brand-200"
+                  ? "bg-brand-100 text-brand-700 dark:bg-bg-subtle dark:text-fg"
                   : "text-fg-muted hover:text-fg bg-bg-panel",
               )}
             >
@@ -284,9 +280,7 @@ export function ResourceTray() {
               ? "默认"
               : sortBy === "difficulty"
               ? "难度 ↑"
-              : sortBy === "duration"
-              ? "时长 ↑"
-              : "置信度 ↓"}
+              : "时长 ↑"}
             <ChevronDown className="w-2.5 h-2.5" />
           </button>
           {sortOpen && (
@@ -296,7 +290,6 @@ export function ResourceTray() {
                   ["default", "默认"],
                   ["difficulty", "难度 ↑"],
                   ["duration", "时长 ↑"],
-                  ["confidence", "置信度 ↓"],
                 ] as [SortBy, string][]
               ).map(([k, label]) => (
                 <button
@@ -307,7 +300,7 @@ export function ResourceTray() {
                   }}
                   className={cn(
                     "block w-full text-left px-3 py-1.5 hover:bg-bg-panel",
-                    sortBy === k && "text-brand-300",
+                    sortBy === k && "text-brand-700 dark:text-fg",
                   )}
                 >
                   {label}
@@ -399,7 +392,7 @@ function HistoryDropdown({
                   onClick={() => onPick(p.package_id)}
                   className={cn(
                     "w-full text-left px-2 py-1.5 rounded-md text-[11px] hover:bg-bg-panel transition-colors flex items-start gap-2",
-                    isCurrent && "bg-brand-600/20 text-brand-200",
+                    isCurrent && "bg-brand-100 text-brand-700 dark:bg-bg-subtle dark:text-fg",
                   )}
                 >
                   <div className="flex-1 min-w-0">
@@ -408,8 +401,6 @@ function HistoryDropdown({
                       <span>{p.resource_count} 项</span>
                       <span>·</span>
                       <span>{p.total_minutes} 分</span>
-                      <span>·</span>
-                      <span>{(p.avg_confidence * 100).toFixed(0)}% 置信</span>
                       {p.created_at && (
                         <>
                           <span>·</span>

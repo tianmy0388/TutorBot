@@ -27,7 +27,6 @@ import {
   AlertTriangle,
   ListChecks,
   Activity,
-  Sparkles,
   ChevronRight,
 } from "lucide-react";
 import { useTutorStore } from "@/lib/store";
@@ -51,38 +50,38 @@ const DIM_META: Record<
   knowledge_mastery: {
     label: "知识掌握",
     icon: Brain,
-    color: "text-blue-300",
-    bgClass: "bg-blue-500",
+    color: "text-fg-muted",
+    bgClass: "bg-brand-500 dark:bg-fg-muted",
   },
   engagement: {
     label: "参与度",
     icon: Zap,
-    color: "text-yellow-300",
-    bgClass: "bg-yellow-500",
+    color: "text-fg-muted",
+    bgClass: "bg-brand-500 dark:bg-fg-muted",
   },
   comprehension: {
     label: "理解深度",
     icon: Target,
-    color: "text-purple-300",
-    bgClass: "bg-purple-500",
+    color: "text-fg-muted",
+    bgClass: "bg-brand-500 dark:bg-fg-muted",
   },
   pace: {
     label: "学习节奏",
     icon: Clock,
-    color: "text-cyan-300",
-    bgClass: "bg-cyan-500",
+    color: "text-fg-muted",
+    bgClass: "bg-brand-500 dark:bg-fg-muted",
   },
   gaps: {
     label: "薄弱点",
     icon: AlertTriangle,
-    color: "text-orange-300",
-    bgClass: "bg-orange-500",
+    color: "text-fg-muted",
+    bgClass: "bg-brand-500 dark:bg-fg-muted",
   },
   trajectory: {
     label: "进步趋势",
     icon: TrendingUp,
-    color: "text-green-300",
-    bgClass: "bg-green-500",
+    color: "text-fg-muted",
+    bgClass: "bg-brand-500 dark:bg-fg-muted",
   },
 };
 
@@ -93,26 +92,26 @@ const TRAJECTORY_META: Record<
   improving: {
     label: "上升中",
     icon: TrendingUp,
-    color: "text-green-300",
-    ring: "bg-green-950/30 border-green-700/40",
+    color: "text-green-700 dark:text-fg",
+    ring: "border-border",
   },
   declining: {
     label: "下滑中",
     icon: TrendingDown,
-    color: "text-red-300",
-    ring: "bg-red-950/30 border-red-700/40",
+    color: "text-red-700 dark:text-fg",
+    ring: "border-border",
   },
   stagnant: {
     label: "停滞",
     icon: Minus,
-    color: "text-yellow-300",
-    ring: "bg-yellow-950/30 border-yellow-700/40",
+    color: "text-yellow-700 dark:text-fg",
+    ring: "border-border",
   },
   insufficient_data: {
     label: "数据不足",
     icon: Activity,
     color: "text-fg-muted",
-    ring: "bg-bg-card border-fg/10",
+    ring: "border-border",
   },
 };
 
@@ -123,44 +122,44 @@ const ACTION_META: Record<
   recommend_review: {
     label: "复习",
     icon: ListChecks,
-    color: "text-blue-300",
-    bgClass: "bg-blue-950/30 border-blue-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   recommend_advance: {
     label: "进阶",
     icon: TrendingUp,
-    color: "text-green-300",
-    bgClass: "bg-green-950/30 border-green-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   recommend_practice: {
     label: "练习",
-    icon: Sparkles,
-    color: "text-purple-300",
-    bgClass: "bg-purple-950/30 border-purple-800/30",
+    icon: ListChecks,
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   recommend_tutoring: {
     label: "答疑",
     icon: Brain,
-    color: "text-pink-300",
-    bgClass: "bg-pink-950/30 border-pink-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   recommend_break: {
     label: "休息",
     icon: Clock,
-    color: "text-yellow-300",
-    bgClass: "bg-yellow-950/30 border-yellow-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   adjust_pace: {
     label: "调速",
     icon: Activity,
-    color: "text-cyan-300",
-    bgClass: "bg-cyan-950/30 border-cyan-800/30",
+    color: "text-fg-muted",
+    bgClass: "border-border",
   },
   no_action: {
     label: "无需调整",
     icon: Minus,
     color: "text-fg-muted",
-    bgClass: "bg-bg-card border-fg/10",
+    bgClass: "border-border",
   },
 };
 
@@ -177,7 +176,7 @@ export function AssessmentPanel() {
   }
 
   return (
-    <div className="p-5 border-b border-fg/10 h-full flex flex-col overflow-hidden">
+    <div className="p-4 h-full flex flex-col overflow-hidden">
       <div className="flex items-center gap-2 mb-4 shrink-0">
         <BarChart3 className="w-4 h-4 text-brand-400" />
         <h2 className="font-semibold">学习效果评估</h2>
@@ -225,7 +224,7 @@ function OverallBlock({ report }: { report: AssessmentReport }) {
   const score = Math.round((report.overall_score || 0) * 100);
 
   return (
-    <div className={cn("p-3 rounded-lg border", t.ring)}>
+    <div className={cn("py-3 border-t", t.ring)}>
       <div className="flex items-center gap-2 mb-2">
         <TIcon className={cn("w-4 h-4", t.color)} />
         <span className={cn("text-xs font-semibold", t.color)}>{t.label}</span>
@@ -240,12 +239,12 @@ function OverallBlock({ report }: { report: AssessmentReport }) {
       <div className="mt-2 h-1.5 bg-bg-panel rounded-full overflow-hidden">
         <div
           className={cn(
-            "h-full bg-gradient-to-r",
+            "h-full",
             score >= 70
-              ? "from-green-500 to-emerald-400"
+              ? "bg-green-600 dark:bg-fg-muted"
               : score >= 40
-              ? "from-brand-500 to-brand-400"
-              : "from-orange-500 to-red-400",
+              ? "bg-brand-500 dark:bg-fg-muted"
+              : "bg-orange-600 dark:bg-fg-muted",
           )}
           style={{ width: `${score}%` }}
         />
@@ -268,7 +267,7 @@ function DimensionsBlock({ report }: { report: AssessmentReport }) {
   return (
     <div>
       <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-2 px-1">
-        六维评分
+        学习反馈
       </div>
       <div className="space-y-1.5">
         {dims.map(([key, dim]) => (
@@ -292,7 +291,7 @@ function DimensionBar({
   const pct = Math.round((dim?.score || 0) * 100);
 
   return (
-    <div className="p-2.5 bg-bg-card rounded-lg border border-fg/5">
+    <div className="py-2.5 border-t border-border">
       <button
         onClick={() => setExpanded((e) => !e)}
         className="w-full flex items-center gap-2 text-left"
@@ -367,10 +366,10 @@ function ConceptList({
   return (
     <div
       className={cn(
-        "p-2.5 rounded-lg border",
+        "py-2.5 border-t border-border",
         accent === "green"
-          ? "bg-green-950/20 border-green-800/30"
-          : "bg-orange-950/20 border-orange-800/30",
+          ? "text-green-800 dark:text-fg"
+          : "text-orange-800 dark:text-fg",
       )}
     >
       <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-1.5">
@@ -403,7 +402,7 @@ function StrategyBlock({ strategy }: { strategy: StrategyDecision }) {
   return (
     <div>
       <div className="flex items-center gap-2 mb-2">
-        <Sparkles className="w-3.5 h-3.5 text-accent" />
+        <ListChecks className="w-3.5 h-3.5 text-fg-muted" />
         <span className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold">
           自适应策略
         </span>
@@ -412,7 +411,7 @@ function StrategyBlock({ strategy }: { strategy: StrategyDecision }) {
         </span>
       </div>
       {strategy.overall_directive && (
-        <div className="mb-2 p-2.5 bg-bg-card rounded-lg border border-fg/5 text-[11px] text-fg-muted italic">
+        <div className="mb-2 py-2.5 border-y border-border text-[11px] text-fg-muted italic">
           {strategy.overall_directive}
         </div>
       )}
@@ -433,7 +432,7 @@ function ActionRow({
   const meta = ACTION_META[action.action_type] || ACTION_META.no_action;
   const Icon = meta.icon;
   return (
-    <div className={cn("p-2.5 rounded-lg border", meta.bgClass)}>
+    <div className={cn("py-2.5 border-t", meta.bgClass)}>
       <div className="flex items-center gap-2 mb-1">
         <Icon className={cn("w-3.5 h-3.5 shrink-0", meta.color)} />
         <span className={cn("text-xs font-medium", meta.color)}>
@@ -469,7 +468,7 @@ function ActionRow({
 
 function RecommendationsBlock({ items }: { items: string[] }) {
   return (
-    <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+    <div className="py-3 border-t border-border">
       <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-2">
         建议
       </div>
@@ -486,7 +485,7 @@ function RecommendationsBlock({ items }: { items: string[] }) {
 
 function NotesBlock({ notes }: { notes: string }) {
   return (
-    <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+    <div className="py-3 border-t border-border">
       <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-2">
         备注
       </div>

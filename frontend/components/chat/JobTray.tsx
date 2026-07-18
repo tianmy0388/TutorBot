@@ -28,7 +28,7 @@ import {
   RefreshCw,
   Eye,
   History,
-  Sparkles,
+  Files,
   MessageCircle,
   BarChart3,
   Compass,
@@ -46,32 +46,32 @@ const STATUS_META: Record<
   pending: {
     label: "排队中",
     icon: Clock,
-    color: "text-yellow-300",
-    ring: "bg-yellow-950/30 border-yellow-800/40",
+    color: "text-yellow-700 dark:text-fg-muted",
+    ring: "bg-yellow-50 border-yellow-200 dark:bg-bg-subtle dark:border-border",
   },
   running: {
     label: "运行中",
     icon: Loader2,
-    color: "text-brand-300",
-    ring: "bg-brand-950/30 border-brand-800/40",
+    color: "text-brand-700 dark:text-fg",
+    ring: "bg-brand-50 border-brand-200 dark:bg-bg-subtle dark:border-border",
   },
   succeeded: {
     label: "已完成",
     icon: CheckCircle2,
-    color: "text-green-300",
-    ring: "bg-green-950/30 border-green-800/40",
+    color: "text-green-700 dark:text-fg",
+    ring: "bg-green-50 border-green-200 dark:bg-bg-subtle dark:border-border",
   },
   partial: {
     label: "部分完成",
     icon: CheckCircle2,
-    color: "text-yellow-300",
-    ring: "bg-yellow-950/30 border-yellow-800/40",
+    color: "text-yellow-700 dark:text-fg-muted",
+    ring: "bg-yellow-50 border-yellow-200 dark:bg-bg-subtle dark:border-border",
   },
   failed: {
     label: "失败",
     icon: XCircle,
-    color: "text-red-300",
-    ring: "bg-red-950/30 border-red-800/40",
+    color: "text-red-700 dark:text-fg",
+    ring: "bg-red-50 border-red-200 dark:bg-bg-subtle dark:border-border",
   },
   cancelled: {
     label: "已取消",
@@ -83,14 +83,14 @@ const STATUS_META: Record<
 
 const CAPABILITY_META: Record<string, { icon: any; color: string; label: string }> = {
   resource_generation: {
-    icon: Sparkles,
+    icon: Files,
     color: "text-accent",
     label: "资源生成",
   },
-  tutoring: { icon: MessageCircle, color: "text-brand-300", label: "即时答疑" },
-  assessment: { icon: BarChart3, color: "text-green-400", label: "效果评估" },
-  path_planning: { icon: Compass, color: "text-yellow-300", label: "路径规划" },
-  profile: { icon: Brain, color: "text-pink-300", label: "画像" },
+  tutoring: { icon: MessageCircle, color: "text-brand-600 dark:text-fg-muted", label: "问题讲解" },
+  assessment: { icon: BarChart3, color: "text-brand-600 dark:text-fg-muted", label: "效果评估" },
+  path_planning: { icon: Compass, color: "text-brand-600 dark:text-fg-muted", label: "路径规划" },
+  profile: { icon: Brain, color: "text-brand-600 dark:text-fg-muted", label: "学习状态" },
 };
 
 export function JobTray() {
@@ -107,9 +107,9 @@ export function JobTray() {
       <button
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "text-[11px] px-2 py-1 rounded-md flex items-center gap-1.5 border transition-colors",
+          "text-[11px] px-1.5 sm:px-2 py-1 rounded-md flex items-center gap-1.5 border transition-colors",
           active > 0
-            ? "bg-brand-700/30 border-brand-600/50 text-brand-200 animate-pulse"
+            ? "bg-brand-100 border-brand-300 text-brand-700 dark:bg-bg-subtle dark:border-border dark:text-fg animate-pulse"
             : "bg-bg-panel border-fg/10 text-fg-muted hover:text-fg",
         )}
         title="任务队列"
@@ -119,7 +119,7 @@ export function JobTray() {
         ) : (
           <History className="w-3 h-3" />
         )}
-        <span>任务</span>
+        <span className="hidden sm:inline">任务</span>
         <span
           className={cn(
             "px-1 rounded text-[10px] font-mono",
@@ -137,12 +137,12 @@ export function JobTray() {
             onClick={() => setOpen(false)}
             aria-hidden
           />
-          <div className="absolute right-0 top-full mt-2 z-50 w-[420px] max-h-[70vh] bg-bg-card border border-fg/10 rounded-lg shadow-2xl overflow-hidden flex flex-col">
+          <div className="fixed left-3 right-3 top-[104px] z-50 max-h-[70vh] overflow-hidden rounded-md border border-border bg-bg-panel shadow-lg flex flex-col sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-2 sm:w-[420px]">
             <header className="px-4 py-2.5 border-b border-fg/10 flex items-center gap-2 bg-bg-panel shrink-0">
               <History className="w-3.5 h-3.5 text-fg-muted" />
               <h3 className="font-semibold text-sm">任务队列</h3>
               {active > 0 && (
-                <span className="px-1.5 py-0.5 rounded bg-brand-700/40 text-brand-200 text-[10px] font-mono">
+                <span className="px-1.5 py-0.5 rounded bg-brand-100 text-brand-700 dark:bg-bg-subtle dark:text-fg text-[10px] font-mono">
                   {active} 运行中
                 </span>
               )}
@@ -164,7 +164,7 @@ export function JobTray() {
 
             <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
               {queue.error && (
-                <div className="p-2 rounded bg-red-950/30 border border-red-800/40 text-[11px] text-red-300">
+                <div className="p-2 rounded bg-red-50 dark:bg-bg-subtle border border-red-200 dark:border-border text-[11px] text-red-700 dark:text-fg">
                   {queue.error}
                 </div>
               )}
@@ -267,7 +267,7 @@ function JobRow({
               <span>耗时 {job.duration_seconds.toFixed(1)}s</span>
             )}
             {job.started_at && !job.finished_at && (
-              <span className="text-brand-300">运行中…</span>
+              <span className="text-brand-700 dark:text-fg">运行中…</span>
             )}
             {job.created_at && (
               <span>
@@ -293,7 +293,7 @@ function JobRow({
           <>
             <button
               onClick={onSubscribe}
-              className="text-[10px] px-1.5 py-0.5 rounded bg-brand-700/30 text-brand-200 hover:bg-brand-700/50 flex items-center gap-1"
+              className="text-[10px] px-1.5 py-0.5 rounded bg-brand-100 text-brand-700 hover:bg-brand-200 dark:bg-bg-subtle dark:text-fg dark:hover:bg-bg-card flex items-center gap-1"
             >
               <Eye className="w-2.5 h-2.5" />
               查看

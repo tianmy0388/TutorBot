@@ -46,6 +46,24 @@ const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000;
 const DEFAULT_BACKOFF_MULTIPLIER = 2;
 const DEFAULT_JITTER_FRACTION = 0.2;
 
+export function resolveWebSocketUrl(explicitUrl?: string): string {
+  if (explicitUrl) return explicitUrl;
+
+  const backendPort = process.env.NEXT_PUBLIC_BACKEND_PORT || "8000";
+  if (typeof window === "undefined") {
+    return `ws://127.0.0.1:${backendPort}/api/v1/ws`;
+  }
+
+  const configuredUrl = process.env.NEXT_PUBLIC_BACKEND_WS_URL;
+  if (configuredUrl) return configuredUrl;
+
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  if (process.env.NODE_ENV === "development") {
+    return `${protocol}//${window.location.hostname}:${backendPort}/api/v1/ws`;
+  }
+  return `${protocol}//${window.location.host}/api/v1/ws`;
+}
+
 export class WsClient {
   private ws: WebSocket | null = null;
   private opts: Required<WsClientOptions> & {

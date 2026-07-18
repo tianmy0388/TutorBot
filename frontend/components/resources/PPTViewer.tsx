@@ -84,8 +84,8 @@ export function PPTViewer({ resource }: PPTViewerProps) {
 
   if (error) {
     return (
-      <div className="p-4 bg-red-950/30 border border-red-800/40 rounded-lg text-sm">
-        <div className="flex items-center gap-2 text-red-300 font-medium mb-1">
+      <div className="py-4 border-y border-red-200 dark:border-border bg-red-50 dark:bg-bg-subtle px-3 text-sm">
+        <div className="flex items-center gap-2 text-red-700 dark:text-fg font-medium mb-1">
           <Presentation className="w-4 h-4" />
           PPT 生成失败
         </div>
@@ -97,30 +97,27 @@ export function PPTViewer({ resource }: PPTViewerProps) {
   return (
     <div className="space-y-4">
       {/* Stats row */}
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-3 border-y border-border divide-x divide-border">
         <Stat
           icon={Presentation}
           label="幻灯片数"
           value={slideCount > 0 ? String(slideCount) : "—"}
-          accent="cyan"
         />
         <Stat
           icon={ListChecks}
           label="标题"
           value={String(slideTitles.length)}
-          accent="purple"
         />
         <Stat
           icon={FileText}
           label="格式"
           value=".pptx"
-          accent="blue"
         />
       </div>
 
       {/* Slide list */}
       {slideTitles.length > 0 ? (
-        <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
+        <div className="py-3 border-y border-border">
           <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-2 flex items-center gap-1">
             <Presentation className="w-3 h-3" />
             幻灯片大纲
@@ -138,7 +135,7 @@ export function PPTViewer({ resource }: PPTViewerProps) {
           </ol>
         </div>
       ) : (
-        <div className="p-3 bg-bg-card rounded-lg border border-fg/5 text-xs text-fg-muted">
+        <div className="py-3 border-y border-border text-xs text-fg-muted">
           暂无幻灯片大纲
         </div>
       )}
@@ -161,7 +158,7 @@ export function PPTViewer({ resource }: PPTViewerProps) {
         </span>
       </div>
       {downloadErr && (
-        <div className="text-xs text-red-400">下载失败: {downloadErr}</div>
+        <div className="text-xs text-red-700 dark:text-fg">下载失败: {downloadErr}</div>
       )}
 
       {/* Markdown body (collapsed) */}
@@ -183,21 +180,14 @@ function Stat({
   icon: Icon,
   label,
   value,
-  accent,
 }: {
   icon: any;
   label: string;
   value: string;
-  accent: "cyan" | "purple" | "blue";
 }) {
-  const colorMap = {
-    cyan: "text-cyan-300 bg-cyan-950/30 border-cyan-800/40",
-    purple: "text-purple-300 bg-purple-950/30 border-purple-800/40",
-    blue: "text-blue-300 bg-blue-950/30 border-blue-800/40",
-  } as const;
   return (
-    <div className={cn("p-2.5 rounded-lg border text-center", colorMap[accent])}>
-      <Icon className="w-3.5 h-3.5 mx-auto mb-1 opacity-70" />
+    <div className="py-3 text-center">
+      <Icon className="w-3.5 h-3.5 mx-auto mb-1 text-brand-600 dark:text-fg-muted" />
       <div className="text-base font-bold text-fg">{value}</div>
       <div className="text-[10px] text-fg-muted mt-0.5">{label}</div>
     </div>

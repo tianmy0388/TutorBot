@@ -10,12 +10,12 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { WsClient, startTurnMessage } from "@/lib/ws";
+import { resolveWebSocketUrl, WsClient, startTurnMessage } from "@/lib/ws";
 import { useTutorStore } from "@/lib/store";
 import { dispatchStreamEvent } from "@/lib/event-handler";
 
 export interface UseWebSocketOptions {
-  /** Override WS URL; default = same-origin ws://…/api/v1/ws */
+  /** Override WS URL; defaults to the direct backend in development. */
   url?: string;
   /** Auto-connect on mount (default true) */
   autoConnect?: boolean;
@@ -30,13 +30,9 @@ export function useWebSocket(opts: UseWebSocketOptions = {}): void {
     if (typeof window === "undefined") return;
     if (!autoConnect) return;
 
-    const resolved =
-      url ??
-      (() => {
-        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return `${proto}//${window.location.host}/api/v1/ws`;
-      })();
+    const resolved = resolveWebSocketUrl(url);
 
+    let disposed = false;
     const client = new WsClient({
       url: resolved,
       onOpen: () => setConnected(true),
@@ -44,12 +40,19 @@ export function useWebSocket(opts: UseWebSocketOptions = {}): void {
       onError: () => setConnected(false),
       onEvent: dispatchStreamEvent,
     });
-    clientRef.current = client;
-    client.connect();
+    const connectTimer = window.setTimeout(() => {
+      if (disposed) return;
+      clientRef.current = client;
+      client.connect();
+    }, 0);
 
     return () => {
-      client.close();
-      clientRef.current = null;
+      disposed = true;
+      window.clearTimeout(connectTimer);
+      if (clientRef.current === client) {
+        client.close();
+        clientRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -73,8 +76,7 @@ export function sendUserMessage(text: string): boolean {
   store.startActiveTurn(turnId, store.currentCapability || "resource_generation");
 
   // Connect (or reconnect) and send
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${proto}//${window.location.host}/api/v1/ws`;
+  const url = resolveWebSocketUrl();
   const client = new WsClient({
     url,
     onOpen: () => {
@@ -119,8 +121,7 @@ export function cancelActiveTurn(): void {
   // Best-effort server cancel (open a transient connection).
   if (typeof window === "undefined") return;
   try {
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${window.location.host}/api/v1/ws`;
+    const url = resolveWebSocketUrl();
     const client = new WsClient({
       url,
       onOpen: () => {

@@ -27,10 +27,10 @@ export function ReadingViewer({ resource }: { resource: Resource }) {
 
   return (
     <div className="space-y-5">
-      {/* Summary card */}
+      {/* Summary */}
       {summary && (
-        <div className="p-4 bg-gradient-to-br from-yellow-950/30 to-orange-950/20 border border-yellow-800/30 rounded-lg">
-          <div className="flex items-center gap-2 mb-2 text-yellow-300 text-xs font-semibold">
+        <div className="px-1 py-4 bg-brand-50/60 dark:bg-bg-subtle border-y border-brand-200 dark:border-border">
+          <div className="flex items-center gap-2 mb-2 text-brand-700 dark:text-fg-muted text-xs font-semibold">
             <Quote className="w-3.5 h-3.5" />
             一句话摘要
           </div>
@@ -67,13 +67,13 @@ export function ReadingViewer({ resource }: { resource: Resource }) {
         <div>
           <h3 className="text-sm font-semibold mb-3 flex items-center gap-2 text-fg-muted">
             <BookOpen className="w-3.5 h-3.5" />
-            📚 参考资料 ({citations.length})
+            参考资料 ({citations.length})
           </h3>
           <ol className="space-y-2">
             {citations.map((c, i) => (
               <li
                 key={i}
-                className="text-xs text-fg-muted p-3 bg-bg-card rounded-md border border-fg/5 hover:border-fg/10 transition-colors"
+                className="text-xs text-fg-muted py-3 border-t border-border"
               >
                 <div className="flex items-start gap-2">
                   <span className="text-fg-subtle font-mono shrink-0 mt-0.5">
@@ -85,7 +85,7 @@ export function ReadingViewer({ resource }: { resource: Resource }) {
                         href={c.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-brand-300 hover:text-brand-200 inline-flex items-center gap-1"
+                        className="text-brand-700 hover:text-brand-800 dark:text-fg-muted dark:hover:text-fg inline-flex items-center gap-1"
                       >
                         <span className="truncate">{c.title || c.url}</span>
                         <ExternalLink className="w-3 h-3 shrink-0" />

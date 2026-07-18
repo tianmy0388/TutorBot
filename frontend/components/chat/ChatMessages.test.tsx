@@ -192,4 +192,47 @@ describe("ChatMessages — terminal state", () => {
     // textContent.
     expect(container.textContent ?? "").toMatch(/self-attention.*QKV.*注意力/);
   });
+
+  it("renders a natural progress label instead of the internal stage name", () => {
+    const now = Date.now();
+    const job: ClientJob = {
+      job_id: "job_3",
+      capability: "resource_generation",
+      status: "running",
+      message_preview: "整理注意力机制资料",
+      submitted_at: now - 1000,
+      started_at: now - 1000,
+      finished_at: null,
+      last_seq: 0,
+      event_count: 0,
+      seen_event_ids: new Set(),
+      events: [],
+      result: null,
+      error: null,
+      text_buffer: "",
+      thinking_buffer: "",
+      stage: "quality_review_inner",
+      open_stages: [],
+    };
+    mockStoreState({
+      activeTurn: {
+        turn_id: "t3",
+        phase: "streaming",
+        started_at: now - 1000,
+        text_buffer: "",
+        thinking_buffer: "",
+        events: [],
+        result: null,
+        error: null,
+      },
+      jobs: {
+        jobsById: { job_3: job },
+        jobOrder: ["job_3"],
+      },
+    });
+
+    render(<ChatMessages />);
+    expect(screen.getByText("检查内容")).toBeInTheDocument();
+    expect(screen.queryByText("quality_review_inner")).not.toBeInTheDocument();
+  });
 });

@@ -75,8 +75,8 @@ describe("ResourcesPage", () => {
     await waitFor(() =>
       expect(screen.getByTestId("resource-card-pkg-1")).toBeInTheDocument(),
     );
-    // Should not throw, and should fall back to "—" instead of crashing.
-    expect(screen.getByText(/平均置信度 80%/)).toBeInTheDocument();
+    // Should not throw, and should use a natural empty type label.
+    expect(screen.getByText(/内容整理中/)).toBeInTheDocument();
   });
 
   it("renders Chinese type labels when types is a string array", async () => {
@@ -102,8 +102,8 @@ describe("ResourcesPage", () => {
     await waitFor(() =>
       expect(screen.getByTestId("resource-card-pkg-2")).toBeInTheDocument(),
     );
-    expect(screen.getByText(/文档.*练习/)).toBeInTheDocument();
-    expect(screen.getByText(/平均置信度 65%/)).toBeInTheDocument();
+    expect(screen.getAllByText(/讲解.*练习/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/置信度/)).not.toBeInTheDocument();
   });
 
   it("opens a two-pane preview and switches between resources", async () => {

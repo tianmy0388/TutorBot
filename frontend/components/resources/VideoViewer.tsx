@@ -96,8 +96,8 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     <div className="space-y-4">
       {/* Concept header */}
       {formatSpec.concept && (
-        <div className="p-3 bg-gradient-to-r from-pink-950/30 to-purple-950/20 border border-pink-800/30 rounded-lg">
-          <div className="flex items-center gap-2 text-pink-300 text-xs font-semibold mb-1">
+        <div className="p-3 bg-bg-subtle border border-border rounded">
+          <div className="flex items-center gap-2 text-fg-muted text-xs font-semibold mb-1">
             <Film className="w-3.5 h-3.5" />
             视频概念
           </div>
@@ -107,7 +107,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
 
       {/* Video player */}
       {isReady && formatSpec.video_url && (
-        <div className="rounded-lg overflow-hidden bg-black border border-fg/10 shadow-lg">
+        <div className="rounded-md overflow-hidden bg-black border border-border">
           <video
             controls
             className="w-full max-h-[60vh]"
@@ -132,9 +132,9 @@ export function VideoViewer({ resource }: { resource: Resource }) {
       )}
 
       {isPending && (
-        <div className="p-8 rounded-lg border border-fg/10 bg-bg-card text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-pink-950/40 mb-3">
-            <Play className="w-8 h-8 text-pink-400 animate-pulse" />
+        <div className="py-8 border-y border-border text-center">
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-md bg-brand-100 dark:bg-bg-subtle border border-brand-200 dark:border-border mb-3">
+            <Play className="w-6 h-6 text-brand-600 dark:text-fg-muted animate-pulse" />
           </div>
           <div className="text-sm text-fg font-medium">视频渲染中…</div>
           <div className="mt-1 text-xs text-fg-muted">
@@ -145,25 +145,25 @@ export function VideoViewer({ resource }: { resource: Resource }) {
                 : "任务已排队 — 通常 30 秒内完成"}
           </div>
           <div className="mt-3 h-1 bg-bg-panel rounded-full overflow-hidden max-w-xs mx-auto">
-            <div className="h-full bg-gradient-to-r from-pink-500 to-pink-400 animate-pulse w-2/3" />
+            <div className="h-full bg-brand-500 dark:bg-fg-muted animate-pulse w-2/3" />
           </div>
         </div>
       )}
 
       {isFailed && (
-        <div className="p-4 rounded-lg border border-red-800/40 bg-red-950/20 flex gap-3">
-          <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+        <div className="px-3 py-4 border-y border-red-200 dark:border-border bg-red-50 dark:bg-bg-subtle flex gap-3">
+          <AlertCircle className="w-5 h-5 text-red-700 dark:text-fg shrink-0 mt-0.5" />
           <div className="flex-1">
-            <div className="text-sm font-medium text-red-300">
+            <div className="text-sm font-medium text-red-700 dark:text-fg">
               {videoLoadFailed ? "视频加载失败" : "渲染失败"}
             </div>
-            <div className="mt-1 text-xs text-red-400/80">
+            <div className="mt-1 text-xs text-red-700/80 dark:text-fg-muted">
               {videoLoadFailed
                 ? `无法访问 ${formatSpec.video_url} — 后端静态文件路由可能未配置（ada95ede fix），或视频文件已被清理。`
                 : "渲染流程未生成可播放视频。"}
             </div>
             {formatSpec.render_error && (
-              <div className="mt-2 text-xs text-red-400/80 font-mono whitespace-pre-wrap bg-red-950/40 rounded p-2 border border-red-800/30">
+              <div className="mt-2 text-xs text-red-700/80 dark:text-fg-muted font-mono whitespace-pre-wrap bg-red-100 dark:bg-bg-panel rounded p-2 border border-red-200 dark:border-border">
                 {formatSpec.render_error}
               </div>
             )}

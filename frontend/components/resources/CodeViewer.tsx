@@ -276,7 +276,7 @@ export function CodeViewer({ resource }: { resource: Resource }) {
       {formatSpec.dependencies && formatSpec.dependencies.length > 0 && (
         <div className="p-3 bg-bg-card rounded-lg border border-fg/5">
           <div className="text-[10px] uppercase tracking-wider text-fg-subtle font-semibold mb-2">
-            📦 依赖
+            依赖
           </div>
           <div className="flex flex-wrap gap-1">
             {formatSpec.dependencies.map((d, i) => (

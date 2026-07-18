@@ -492,7 +492,7 @@ git commit -m "feat: expose evidence and close the adaptive learning loop"
 - Modify: `.env.example`
 - Modify: `docs/architecture.md`
 - Modify: `docs/knowledge-base.md`
-- Create: `docs/demo-script.md`
+- Create: `docs/deployment-guide.md`
 - Create: `backend/tests/e2e/test_demo_scenarios.py`
 
 - [ ] **Step 1: Add API-level demo scenarios**
@@ -521,7 +521,7 @@ Expected: tests, TypeScript, and production build pass without warnings treated 
 
 - [ ] **Step 5: Execute the documented demo script**
 
-Start backend and frontend, then follow `docs/demo-script.md`. Confirm first visible feedback appears within one second, each job has a visible terminal message, and a page refresh restores active job state.
+Start backend and frontend, then follow `docs/deployment-guide.md`. Confirm first visible feedback appears within one second, each job has a visible terminal message, and a page refresh restores active job state.
 
 - [ ] **Step 6: Commit**
 

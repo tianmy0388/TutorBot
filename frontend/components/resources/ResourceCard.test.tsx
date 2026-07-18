@@ -6,18 +6,16 @@ import type { Resource } from "@/lib/types";
 describe("ResourceDetail evidence", () => {
   afterEach(() => cleanup());
 
-  it("renders citations, review, safety, generator, and unverified claims", () => {
+  it("keeps sources and caveats while hiding internal review details", () => {
     render(<ResourceDetail resource={resourceWithEvidence()} />);
 
-    expect(screen.getByTestId("resource-evidence")).toHaveTextContent("可信证据");
+    expect(screen.getByTestId("resource-evidence")).toHaveTextContent("来源与说明");
     expect(screen.getByTestId("resource-evidence")).toHaveTextContent(
       "Attention Is All You Need",
     );
-    expect(screen.getByTestId("resource-evidence")).toHaveTextContent("pass");
-    expect(screen.getByTestId("resource-evidence")).toHaveTextContent("safe");
-    expect(screen.getByTestId("resource-evidence")).toHaveTextContent(
-      "ContentExpertAgent",
-    );
+    expect(screen.getByTestId("resource-evidence")).not.toHaveTextContent("pass");
+    expect(screen.getByTestId("resource-evidence")).not.toHaveTextContent("safe");
+    expect(screen.getByTestId("resource-evidence")).not.toHaveTextContent("Agent");
     expect(screen.getByTestId("resource-evidence")).toHaveTextContent(
       "需要按具体模型文档确认",
     );

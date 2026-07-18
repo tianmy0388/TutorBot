@@ -4,103 +4,125 @@
 @tailwind components;
 @tailwind utilities;
 
-/* =========================================================================
-   TutorBot — Design Tokens
-   -------------------------------------------------------------------------
-   Aesthetic: Editorial Library Modernism
-     - Warm cream paper (light) / deep ink (dark) — never sterile white/black
-     - Saffron amber accent — a deliberate departure from AI-app blue/purple
-     - Fraunces (variable serif) for display, Inter Tight for body,
-       JetBrains Mono for technical marks
-
-   Color values are space-separated RGB triplets so Tailwind's
-   ``<alpha-value>`` placeholder (see tailwind.config.ts) can wrap them
-   in ``rgb(... / <alpha-value>)`` and opacity modifiers keep working.
-   ========================================================================= */
+/* Headspace-led product shell + Notion pre-AI knowledge surfaces. */
 
 :root,
-[data-theme="dark"] {
-  color-scheme: dark;
-
-  /* Surfaces — warm-inked, never pure black */
-  --color-bg: 16 14 12;            /* near-black with brown undertone */
-  --color-bg-subtle: 22 19 16;     /* surface level 1 */
-  --color-bg-panel: 28 24 20;      /* surface level 2 (cards/panels) */
-  --color-bg-card: 38 32 27;       /* surface level 3 (hover/inlay) */
-
-  /* Foreground — warm bone whites */
-  --color-fg: 244 238 228;         /* primary text — warm cream */
-  --color-fg-muted: 184 174 158;   /* secondary */
-  --color-fg-subtle: 130 120 106;  /* tertiary, captions */
-
-  --color-border: 56 48 40;        /* warm-tinted dividers */
-
-  /* Brand — saffron / amber. Distinctive, warm, premium. */
-  --color-brand-50: 255 247 232;
-  --color-brand-100: 254 238 210;
-  --color-brand-200: 250 220 168;
-  --color-brand-300: 244 195 122;
-  --color-brand-400: 232 165 78;   /* primary accent */
-  --color-brand-500: 212 138 50;   /* hover/active accent */
-  --color-brand-600: 178 105 32;
-  --color-brand-700: 138 78 22;
-  --color-brand-800: 98 56 16;
-  --color-brand-900: 64 38 12;
-
-  /* Supporting accents — used sparingly */
-  --color-accent: 96 165 145;      /* aged teal — for path/data */
-  --color-accent-warm: 214 122 78; /* terracotta */
-  --color-accent-green: 124 168 110; /* moss */
-
-  /* Hairline & shadow tints (warm) */
-  --color-rule: 56 48 40;
-  --shadow-soft: 0 1px 0 rgb(255 255 255 / 0.04) inset,
-                 0 12px 32px -12px rgb(0 0 0 / 0.5);
-}
-
 [data-theme="light"] {
   color-scheme: light;
 
-  /* Surfaces — warm cream paper */
-  --color-bg: 250 246 238;         /* warm cream */
-  --color-bg-subtle: 244 239 229;
-  --color-bg-panel: 255 252 246;   /* lighter than bg = paper "above" */
-  --color-bg-card: 240 234 222;
+  --color-bg: 255 237 213;
+  --color-bg-subtle: 255 226 197;
+  --color-bg-panel: 255 250 244;
+  --color-bg-card: 247 246 243;
 
-  --color-fg: 30 24 18;            /* deep ink */
-  --color-fg-muted: 96 84 70;
-  --color-fg-subtle: 142 128 110;
+  --color-fg: 27 58 71;
+  --color-fg-muted: 92 107 122;
+  --color-fg-subtle: 119 127 132;
 
-  --color-border: 220 210 192;     /* warm hairline */
+  --color-border: 226 211 194;
 
-  --color-brand-50: 252 240 218;
-  --color-brand-100: 248 226 188;
-  --color-brand-200: 240 200 142;
-  --color-brand-300: 226 168 92;
-  --color-brand-400: 200 132 56;   /* primary */
-  --color-brand-500: 168 102 32;
-  --color-brand-600: 134 78 22;
-  --color-brand-700: 100 58 16;
-  --color-brand-800: 72 42 12;
-  --color-brand-900: 50 30 10;
+  --color-brand-50: 255 242 232;
+  --color-brand-100: 255 226 207;
+  --color-brand-200: 251 205 177;
+  --color-brand-300: 248 184 145;
+  --color-brand-400: 246 174 130;
+  --color-brand-500: 244 165 115;
+  --color-brand-600: 225 141 91;
+  --color-brand-700: 190 112 67;
+  --color-brand-800: 133 76 48;
+  --color-brand-900: 86 49 35;
 
-  --color-accent: 56 112 96;
-  --color-accent-warm: 192 92 48;
-  --color-accent-green: 84 128 72;
+  --color-accent: 176 165 209;
+  --color-accent-warm: 245 134 123;
+  --color-accent-green: 157 182 122;
 
-  --color-rule: 220 210 192;
-  --shadow-soft: 0 1px 0 rgb(255 255 255 / 0.6) inset,
-                 0 12px 32px -16px rgb(80 60 30 / 0.18);
+  --color-chart-1: 255 226 197;
+  --color-chart-2: 244 165 115;
+  --color-chart-3: 176 165 209;
+  --color-chart-4: 157 182 122;
+  --color-chart-5: 27 58 71;
+
+  --color-rule: 226 211 194;
+  --shadow-soft: 0 24px 60px -34px rgb(81 53 34 / 0.34);
+
+  --color-hero: 244 165 115;
+  --color-hero-panel: 255 226 197;
+  --color-hero-rule: 218 137 91;
+  --color-hero-fg: 27 58 71;
+  --color-hero-muted: 72 89 98;
+
+  --knowledge-bg: 255 255 255;
+  --knowledge-panel: 247 246 243;
+  --knowledge-fg: 55 53 47;
+  --knowledge-muted: 120 119 116;
+  --knowledge-rule: 233 233 231;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-bg: 16 16 16;
+  --color-bg-subtle: 35 35 35;
+  --color-bg-panel: 24 24 24;
+  --color-bg-card: 35 35 35;
+
+  --color-fg: 245 245 245;
+  --color-fg-muted: 166 166 166;
+  --color-fg-subtle: 126 126 126;
+
+  --color-border: 56 56 56;
+
+  --color-brand-50: 245 245 245;
+  --color-brand-100: 226 226 226;
+  --color-brand-200: 204 204 204;
+  --color-brand-300: 176 176 176;
+  --color-brand-400: 145 145 145;
+  --color-brand-500: 112 112 112;
+  --color-brand-600: 91 91 91;
+  --color-brand-700: 70 70 70;
+  --color-brand-800: 49 49 49;
+  --color-brand-900: 31 31 31;
+
+  --color-accent: 190 190 190;
+  --color-accent-warm: 160 160 160;
+  --color-accent-green: 205 205 205;
+
+  --color-chart-1: 70 70 70;
+  --color-chart-2: 91 91 91;
+  --color-chart-3: 112 112 112;
+  --color-chart-4: 145 145 145;
+  --color-chart-5: 176 176 176;
+
+  --color-rule: 56 56 56;
+  --shadow-soft: 0 12px 28px -18px rgb(0 0 0 / 0.7);
+
+  --color-hero: 35 35 35;
+  --color-hero-panel: 24 24 24;
+  --color-hero-rule: 56 56 56;
+  --color-hero-fg: 245 245 245;
+  --color-hero-muted: 166 166 166;
+
+  --knowledge-bg: 16 16 16;
+  --knowledge-panel: 24 24 24;
+  --knowledge-fg: 245 245 245;
+  --knowledge-muted: 166 166 166;
+  --knowledge-rule: 56 56 56;
 }
 
 @layer base {
+  *,
+  *::before,
+  *::after {
+    border-color: rgb(var(--color-border));
+  }
+
   html,
   body {
     height: 100%;
   }
   body {
-    font-family: var(--font-body), "PingFang SC", "Hiragino Sans GB",
-      "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+    font-family: var(--font-body), "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI",
+      ui-sans-serif, system-ui, sans-serif;
     font-feature-settings: "ss01", "cv11", "rlig" 1, "calt" 1;
     background-color: rgb(var(--color-bg));
     color: rgb(var(--color-fg));
@@ -110,11 +132,15 @@
     transition: background-color 0.25s ease, color 0.25s ease;
   }
 
-  /* Editorial display headings */
+  :where(button, a, input, select, textarea, [role="button"]):focus-visible {
+    outline: 2px solid rgb(var(--color-fg));
+    outline-offset: 3px;
+  }
+
   .font-display {
-    font-family: var(--font-display), "Songti SC", "STSong", "SimSun", serif;
-    font-feature-settings: "ss01", "ss02";
-    letter-spacing: -0.02em;
+    font-family: var(--font-display), "Noto Serif SC", "Source Han Serif SC", "Songti SC",
+      ui-serif, Georgia, serif;
+    letter-spacing: -0.015em;
   }
   .font-mono-tab {
     font-family: var(--font-mono), ui-monospace, "SFMono-Regular", monospace;
@@ -153,81 +179,30 @@
 }
 
 /* =========================================================================
-   Atmospheric layers
-   ========================================================================= */
-
-/* Paper grain — extremely subtle, gives surfaces texture without noise */
-[data-theme="light"] body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  opacity: 0.35;
-  background-image:
-    radial-gradient(circle at 20% 10%, rgb(212 178 130 / 0.06), transparent 50%),
-    radial-gradient(circle at 80% 80%, rgb(180 130 80 / 0.05), transparent 55%);
-  mix-blend-mode: multiply;
-}
-
-/* Subtle vignette + warm top-light for dark mode */
-[data-theme="dark"] body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  opacity: 0.5;
-  background-image:
-    radial-gradient(ellipse at 50% -10%, rgb(212 138 50 / 0.10), transparent 60%),
-    radial-gradient(ellipse at 0% 100%, rgb(96 165 145 / 0.04), transparent 50%);
-}
-
-/* Ensure app content sits above the atmospheric layer */
-#__next, body > * {
-  position: relative;
-  z-index: 1;
-}
-
-/* =========================================================================
    Component primitives
    ========================================================================= */
 
 @layer components {
-  /* Editorial card with warm hairline */
   .card {
-    @apply rounded-xl bg-bg-panel p-4;
-    border: 1px solid rgb(var(--color-rule) / 0.5);
-    box-shadow: var(--shadow-soft);
+    @apply rounded-3xl bg-bg-panel p-5;
+    border: 1px solid rgb(var(--color-rule));
   }
 
-  /* Primary CTA — saffron, with editorial restraint */
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-4 h-9 rounded-md font-medium
-           transition-all duration-200 ease-out
+    @apply inline-flex items-center justify-center gap-2 px-5 h-10 rounded-full font-semibold
+           transition-all duration-300 ease-out
            disabled:opacity-50 disabled:cursor-not-allowed;
-    background: rgb(var(--color-brand-400));
-    color: rgb(20 14 8);
-    letter-spacing: -0.005em;
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.25),
-      0 1px 2px rgb(0 0 0 / 0.18);
+    background: rgb(var(--color-brand-500));
+    color: rgb(var(--color-hero-fg));
   }
   .btn-primary:hover {
-    background: rgb(var(--color-brand-300));
-    transform: translateY(-1px);
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.3),
-      0 6px 18px -6px rgb(var(--color-brand-500) / 0.45);
-  }
-  .btn-primary:active {
-    transform: translateY(0);
+    background: rgb(var(--color-brand-600));
   }
 
   /* Ghost button — quiet, used in rails */
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-3 h-9 rounded-md
-           font-medium transition-all duration-150 ease-out
+    @apply inline-flex items-center justify-center gap-2 px-4 h-10 rounded-full
+           font-medium transition-all duration-300 ease-out
            text-fg-muted hover:text-fg;
   }
   .btn-ghost:hover {
@@ -236,8 +211,8 @@
 
   /* Secondary — outlined hairline */
   .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 px-3 h-8 rounded-md
-           text-sm transition-all duration-150;
+    @apply inline-flex items-center justify-center gap-2 px-3 h-9 rounded-md
+           text-sm transition-all duration-200;
     color: rgb(var(--color-fg));
     background: rgb(var(--color-bg-card) / 0.6);
     border: 1px solid rgb(var(--color-rule));
@@ -250,7 +225,7 @@
   /* Input */
   .input {
     @apply w-full rounded-md px-3 py-2 text-sm transition-colors;
-    background: rgb(var(--color-bg-card) / 0.5);
+    background: rgb(var(--color-bg-panel));
     border: 1px solid rgb(var(--color-rule));
     color: rgb(var(--color-fg));
   }
@@ -267,9 +242,109 @@
 
   /* Subtle inlay — for nav rail headers */
   .rail-label {
-    @apply text-[10px] uppercase font-semibold;
+    @apply text-[11px] font-medium;
     color: rgb(var(--color-fg-subtle));
-    letter-spacing: 0.14em;
+    letter-spacing: 0.02em;
+  }
+}
+
+.knowledge-canvas {
+  --color-bg: var(--knowledge-bg);
+  --color-bg-subtle: var(--knowledge-panel);
+  --color-bg-panel: var(--knowledge-bg);
+  --color-bg-card: var(--knowledge-panel);
+  --color-fg: var(--knowledge-fg);
+  --color-fg-muted: var(--knowledge-muted);
+  --color-fg-subtle: var(--knowledge-muted);
+  --color-border: var(--knowledge-rule);
+  --color-rule: var(--knowledge-rule);
+  background: rgb(var(--knowledge-bg));
+  color: rgb(var(--knowledge-fg));
+}
+
+.breathing-orb {
+  position: absolute;
+  z-index: -1;
+  border-radius: 999px;
+  pointer-events: none;
+  animation: breathe 3.2s ease-in-out infinite;
+}
+
+.breathing-orb-one {
+  right: -8rem;
+  top: -9rem;
+  width: 28rem;
+  height: 28rem;
+  background: rgb(var(--color-accent-green) / 0.48);
+}
+
+.breathing-orb-two {
+  bottom: 8%;
+  left: 34%;
+  width: 11rem;
+  height: 11rem;
+  background: rgb(var(--color-brand-500) / 0.22);
+  animation-delay: -1.6s;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(0.96); opacity: 0.72; }
+  50% { transform: scale(1.04); opacity: 1; }
+}
+
+[data-theme="dark"] .brand-mark {
+  filter: grayscale(1) brightness(2.4);
+}
+
+[data-theme="dark"] [class*="text-red-"],
+[data-theme="dark"] [class*="text-orange-"],
+[data-theme="dark"] [class*="text-yellow-"],
+[data-theme="dark"] [class*="text-green-"],
+[data-theme="dark"] [class*="text-blue-"],
+[data-theme="dark"] [class*="text-cyan-"],
+[data-theme="dark"] [class*="text-purple-"],
+[data-theme="dark"] [class*="text-pink-"] {
+  color: rgb(var(--color-fg-muted)) !important;
+}
+
+[data-theme="dark"] [class*="bg-red-"],
+[data-theme="dark"] [class*="bg-orange-"],
+[data-theme="dark"] [class*="bg-yellow-"],
+[data-theme="dark"] [class*="bg-green-"],
+[data-theme="dark"] [class*="bg-blue-"],
+[data-theme="dark"] [class*="bg-cyan-"],
+[data-theme="dark"] [class*="bg-purple-"],
+[data-theme="dark"] [class*="bg-pink-"] {
+  background-color: rgb(var(--color-bg-subtle)) !important;
+}
+
+[data-theme="dark"] [class*="border-red-"],
+[data-theme="dark"] [class*="border-orange-"],
+[data-theme="dark"] [class*="border-yellow-"],
+[data-theme="dark"] [class*="border-green-"],
+[data-theme="dark"] [class*="border-blue-"],
+[data-theme="dark"] [class*="border-cyan-"],
+[data-theme="dark"] [class*="border-purple-"],
+[data-theme="dark"] [class*="border-pink-"] {
+  border-color: rgb(var(--color-border)) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (pointer: coarse) {
+  button,
+  [role="button"],
+  input,
+  select,
+  textarea {
+    min-height: 44px;
   }
 }
 
@@ -308,20 +383,20 @@
 .prose-tutor ul { @apply list-disc list-inside my-2 space-y-1; }
 .prose-tutor ol { @apply list-decimal list-inside my-2 space-y-1; }
 .prose-tutor a {
-  color: rgb(var(--color-brand-300));
+  color: rgb(var(--color-accent));
   text-underline-offset: 3px;
   text-decoration: underline;
   text-decoration-color: rgb(var(--color-brand-500) / 0.5);
   text-decoration-thickness: 1px;
 }
 .prose-tutor a:hover {
-  color: rgb(var(--color-brand-200));
+  color: rgb(var(--color-fg));
   text-decoration-color: rgb(var(--color-brand-400));
 }
 .prose-tutor code:not(pre code) {
   @apply px-1.5 py-0.5 rounded text-xs;
   background: rgb(var(--color-bg-card));
-  color: rgb(var(--color-brand-300));
+  color: rgb(var(--color-accent));
   font-family: var(--font-mono), ui-monospace, monospace;
 }
 .prose-tutor pre {

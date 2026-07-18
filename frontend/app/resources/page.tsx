@@ -1,241 +1,156 @@
 "use client";
 
-/**
- * /resources — persisted resource center (Task 10).
- *
- * Lists resource packages with filters and lets the user preview or
- * download individual resources.
- */
-
-import { useEffect, useState } from "react";
-import { Loader2, BookOpen, Filter } from "lucide-react";
-import {
-  listResourcePackages,
-  getResourcePackageDetail,
-} from "@/lib/api";
-import { useTutorStore } from "@/lib/store";
+import { useEffect, useMemo, useState } from "react";
+import { ArrowDownAZ, BookOpen, Grid2X2, List, Loader2, Search, X } from "lucide-react";
+import { getResourcePackageDetail, listResourcePackages } from "@/lib/api";
 import { ResourceDetail } from "@/components/resources/ResourceCard";
-import type {
-  ResourcePackage,
-  ResourcePackageSummary,
-  ResourceType,
-} from "@/lib/types";
+import { useTutorStore } from "@/lib/store";
+import type { ResourcePackage, ResourcePackageSummary, ResourceType } from "@/lib/types";
+import { cn, userFacingError } from "@/lib/utils";
 
 const TYPE_LABELS: Record<ResourceType, string> = {
-  document: "文档",
+  document: "讲解",
   mindmap: "思维导图",
   exercise: "练习",
   reading: "阅读",
   video: "视频",
   code: "代码",
-  ppt: "PPT",
+  ppt: "演示文稿",
 };
 
+type ViewMode = "gallery" | "list";
+type SortMode = "newest" | "name";
+
 export default function ResourcesPage() {
-  const userId = useTutorStore((s) => s.userId);
+  const userId = useTutorStore((state) => state.userId);
   const [items, setItems] = useState<ResourcePackageSummary[] | null>(null);
-  const [typeFilter, setTypeFilter] = useState<ResourceType | "all">("all");
-  const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<ResourcePackage | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [query, setQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState<ResourceType | "all">("all");
+  const [sort, setSort] = useState<SortMode>("newest");
+  const [view, setView] = useState<ViewMode>("gallery");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    listResourcePackages(userId)
-      .then((r) => setItems(r.items))
-      .catch((e) => setError(e?.message ?? String(e)));
+    let cancelled = false;
+    void listResourcePackages(userId)
+      .then(async (response) => {
+        if (cancelled) return;
+        setItems(response.items);
+        const packageId = new URLSearchParams(window.location.search).get("package");
+        if (packageId) await openPackage(packageId, true);
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        setError(userFacingError(cause, "资料暂时无法读取，请稍后重试。"));
+        setItems([]);
+      });
+    return () => { cancelled = true; };
+    // userId is the persistence boundary; openPackage intentionally stays local.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  if (items === null) {
-    return (
-      <div className="flex items-center justify-center p-12 text-fg-muted">
-        <Loader2 className="w-5 h-5 animate-spin mr-2" /> 正在加载资源…
-      </div>
-    );
-  }
+  const openPackage = async (packageId: string, preserveResource = false) => {
+    setPreviewLoading(true);
+    try {
+      const detail = await getResourcePackageDetail(userId, packageId);
+      setPreview(detail);
+      setError(null);
+      const url = new URL(window.location.href);
+      url.searchParams.set("package", packageId);
+      if (!preserveResource) url.searchParams.delete("resource");
+      window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+    } catch (cause) {
+      setError(userFacingError(cause, "资料详情暂时无法打开，请稍后重试。"));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
 
-  const filtered = items.filter(
-    (p) => typeFilter === "all" || (p.types ?? []).includes(typeFilter),
-  );
+  const closePreview = () => {
+    setPreview(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("package");
+    url.searchParams.delete("resource");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+  };
+
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return [...(items ?? [])]
+      .filter((item) => typeFilter === "all" || (item.types ?? []).includes(typeFilter))
+      .filter((item) => !normalized || item.topic.toLowerCase().includes(normalized))
+      .sort((left, right) => sort === "name" ? left.topic.localeCompare(right.topic, "zh-CN") : new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+  }, [items, query, sort, typeFilter]);
+
+  if (items === null) return <div className="knowledge-canvas flex h-full items-center justify-center text-fg-muted"><Loader2 className="mr-2 h-5 w-5 animate-spin" />正在打开最近资料…</div>;
 
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 space-y-5">
-      <header>
-        <h1 className="text-xl font-semibold">资源中心</h1>
-        <p className="text-xs text-fg-muted mt-1">
-          历次生成的学习资源包；按类型筛选并预览。
-        </p>
+    <div className="knowledge-canvas h-full overflow-y-auto">
+      <header className="mx-auto max-w-[1480px] px-5 pb-5 pt-8 sm:px-8 lg:px-10 lg:pt-10">
+        <div className="text-4xl" aria-hidden="true">🗂️</div>
+        <h1 className="mt-4 font-display text-4xl font-bold tracking-[-0.03em] sm:text-5xl">最近资料</h1>
+        <p className="mt-3 max-w-2xl text-sm leading-6 text-fg-muted">学习过程中整理出的讲解、练习和阅读内容。打开一组资料后，可以在右侧逐项阅读。</p>
+
+        {error && <div className="mt-5 rounded-lg border border-border bg-bg-panel px-4 py-3 text-sm">资料加载未完成：{error}</div>}
+
+        <div className="mt-8 flex flex-wrap items-center gap-2 border-b border-border pb-3">
+          <label className="flex min-h-10 min-w-[220px] flex-1 items-center gap-2 rounded-md bg-bg-panel px-3 text-sm text-fg-muted sm:max-w-sm"><Search className="h-4 w-4" /><input value={query} onChange={(event) => setQuery(event.target.value)} className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-fg-subtle" placeholder="查找学习主题" /></label>
+          <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value as ResourceType | "all")} className="input min-h-10 w-auto py-0 text-xs" aria-label="资料类型"><option value="all">全部类型</option>{(Object.keys(TYPE_LABELS) as ResourceType[]).map((type) => <option key={type} value={type}>{TYPE_LABELS[type]}</option>)}</select>
+          <button type="button" onClick={() => setSort((value) => value === "newest" ? "name" : "newest")} className="flex min-h-10 items-center gap-2 rounded-md bg-bg-panel px-3 text-xs text-fg-muted hover:text-fg"><ArrowDownAZ className="h-4 w-4" />{sort === "newest" ? "最近更新" : "按名称"}</button>
+          <div className="ml-auto flex rounded-md border border-border bg-bg-panel p-0.5"><button className={cn("flex min-h-9 min-w-9 items-center justify-center rounded", view === "gallery" && "bg-bg-subtle")} onClick={() => setView("gallery")} aria-label="图库视图"><Grid2X2 className="h-4 w-4" /></button><button className={cn("flex min-h-9 min-w-9 items-center justify-center rounded", view === "list" && "bg-bg-subtle")} onClick={() => setView("list")} aria-label="列表视图"><List className="h-4 w-4" /></button></div>
+        </div>
       </header>
 
-      {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-          加载失败：{error}
-        </div>
-      )}
+      <div className={cn("mx-auto grid max-w-[1480px] gap-8 px-5 pb-12 sm:px-8 lg:px-10", preview && "lg:grid-cols-[minmax(0,0.88fr)_minmax(480px,1.12fr)]")}>
+        {filtered.length === 0 ? (
+          <div className="flex min-h-[360px] flex-col items-center justify-center text-center text-fg-muted"><BookOpen className="h-8 w-8" /><p className="mt-4 text-sm font-semibold text-fg">还没有符合条件的资料</p><p className="mt-2 text-xs">在学习任务中整理内容后，会保存在这里。</p></div>
+        ) : (
+          <section className={cn("content-start", view === "gallery" ? "grid gap-3 sm:grid-cols-2" : "space-y-1")} aria-label="学习资料列表">
+            {filtered.map((item) => <PackageItem key={item.package_id} item={item} view={view} selected={preview?.package_id === item.package_id} loading={previewLoading && preview?.package_id !== item.package_id} onClick={() => void openPackage(item.package_id)} />)}
+          </section>
+        )}
 
-      <div className="flex items-center gap-2 flex-wrap">
-        <Filter className="w-4 h-4 text-fg-muted" />
-        <button
-          className={`btn-secondary text-xs h-7 ${typeFilter === "all" ? "ring-1 ring-brand-500" : ""}`}
-          onClick={() => setTypeFilter("all")}
-        >
-          全部
-        </button>
-        {(Object.keys(TYPE_LABELS) as ResourceType[]).map((t) => (
-          <button
-            key={t}
-            className={`btn-secondary text-xs h-7 ${typeFilter === t ? "ring-1 ring-brand-500" : ""}`}
-            onClick={() => setTypeFilter(t)}
-          >
-            {TYPE_LABELS[t]}
-          </button>
-        ))}
+        {preview && (
+          <aside className="fixed inset-0 z-[60] min-h-0 overflow-hidden bg-bg-panel lg:sticky lg:top-6 lg:z-auto lg:h-[calc(100vh-48px)] lg:rounded-lg lg:border lg:border-border" aria-label="资料详情">
+            <ResourcePackagePreview pkg={preview} onClose={closePreview} />
+          </aside>
+        )}
       </div>
-
-      {filtered.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-fg/10 p-8 text-center text-fg-muted">
-          <BookOpen className="w-8 h-8 mx-auto mb-2 opacity-50" />
-          还没有资源。
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {filtered.map((p) => (
-            <button
-              key={p.package_id}
-              onClick={async () => {
-                try {
-                  const d = await getResourcePackageDetail(userId, p.package_id);
-                  setPreview(d);
-                } catch (e) {
-                  setError(String(e));
-                }
-              }}
-              className="w-full text-left rounded-xl border border-fg/10 bg-bg-panel p-3 hover:border-brand-500/40 transition-colors"
-              data-testid={`resource-card-${p.package_id}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="font-medium text-sm truncate">
-                  {p.topic}
-                </div>
-                <div className="text-[11px] text-fg-muted shrink-0">
-                  {new Date(p.created_at).toLocaleString()}
-                </div>
-              </div>
-              <div className="text-[11px] text-fg-muted mt-1">
-                {p.resource_count} 项 · {(p.types ?? []).map((t) => TYPE_LABELS[t as ResourceType] ?? t).join("、") || "—"} · 平均置信度 {Math.round((p.avg_confidence ?? 0) * 100)}%
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {preview && (
-        <ResourcePackagePreview
-          pkg={preview}
-          onClose={() => setPreview(null)}
-        />
-      )}
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Two-pane package preview
-// ---------------------------------------------------------------------------
-
-function ResourcePackagePreview({
-  pkg,
-  onClose,
-}: {
-  pkg: ResourcePackage;
-  onClose: () => void;
-}) {
-  // Selected resource id; defaults to the first item so the detail
-  // pane is never empty when there is at least one resource.
-  const [selectedResourceId, setSelectedResourceId] = useState<string | null>(
-    pkg.resources[0]?.resource_id ?? null,
+function PackageItem({ item, view, selected, loading, onClick }: { item: ResourcePackageSummary; view: ViewMode; selected: boolean; loading: boolean; onClick: () => void }) {
+  const types = item.types ?? [];
+  return (
+    <button type="button" onClick={onClick} className={cn("group w-full border border-border bg-bg-panel text-left transition-all duration-200 hover:border-fg-subtle", view === "gallery" ? "min-h-[200px] rounded-lg p-5" : "flex min-h-16 items-center gap-4 rounded-md px-4 py-3", selected && "ring-2 ring-fg ring-offset-2 ring-offset-[rgb(var(--knowledge-bg))]")} data-testid={`resource-card-${item.package_id}`}>
+      <span className={cn("flex shrink-0 items-center justify-center bg-bg-subtle", view === "gallery" ? "h-11 w-11 rounded-lg text-xl" : "h-9 w-9 rounded text-sm")} aria-hidden="true">📄</span>
+      <span className="min-w-0 flex-1"><span className={cn("block truncate font-semibold", view === "gallery" && "mt-6 text-base")}>{item.topic}</span><span className="mt-2 block text-xs text-fg-muted">{item.resource_count} 项 · {item.total_minutes} 分钟</span><span className={cn("block truncate text-[11px] text-fg-muted", view === "gallery" ? "mt-4" : "mt-1")}>{types.map((type) => TYPE_LABELS[type as ResourceType] ?? type).join("、") || "内容整理中"}</span></span>
+      {loading && <Loader2 className="h-4 w-4 animate-spin text-fg-muted" />}
+    </button>
   );
-  const selected =
-    pkg.resources.find((r) => r.resource_id === selectedResourceId) ??
-    pkg.resources[0] ??
-    null;
+}
+
+function ResourcePackagePreview({ pkg, onClose }: { pkg: ResourcePackage; onClose: () => void }) {
+  const fromUrl = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("resource") : null;
+  const [selectedResourceId, setSelectedResourceId] = useState<string | null>(fromUrl || pkg.resources[0]?.resource_id || null);
+  const selected = pkg.resources.find((resource) => resource.resource_id === selectedResourceId) ?? pkg.resources[0] ?? null;
+
+  const selectResource = (resourceId: string) => {
+    setSelectedResourceId(resourceId);
+    const url = new URL(window.location.href);
+    url.searchParams.set("resource", resourceId);
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+  };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-5xl max-h-[85vh] overflow-hidden rounded-xl border border-fg/10 bg-bg-panel flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-        data-testid="resource-package-preview"
-      >
-        <header className="px-5 py-3 border-b border-fg/10 flex items-center justify-between gap-2">
-          <div>
-            <h3 className="text-base font-semibold">{pkg.topic}</h3>
-            <p className="text-xs text-fg-muted mt-0.5">
-              {pkg.resources.length} 项资源
-            </p>
-          </div>
-          <button
-            className="btn-secondary text-sm h-9"
-            onClick={onClose}
-            data-testid="resource-preview-close"
-          >
-            关闭
-          </button>
-        </header>
-
-        <div className="flex-1 grid grid-cols-1 md:grid-cols-[260px_1fr] min-h-0">
-          {/* Left: resource list as accessible buttons */}
-          <nav
-            className="border-r border-fg/10 overflow-y-auto p-2 space-y-1"
-            aria-label="资源列表"
-            data-testid="resource-list"
-          >
-            {pkg.resources.map((r) => {
-              const isSelected = r.resource_id === selected.resource_id;
-              return (
-                <button
-                  key={r.resource_id}
-                  type="button"
-                  onClick={() => setSelectedResourceId(r.resource_id)}
-                  className={
-                    "w-full text-left rounded-lg border px-3 py-2 transition-colors " +
-                    (isSelected
-                      ? "border-brand-500/50 bg-brand-500/10"
-                      : "border-transparent hover:border-fg/10 hover:bg-bg-card")
-                  }
-                  aria-pressed={isSelected}
-                  data-testid={`resource-list-item-${r.resource_id}`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-sm truncate">
-                      {r.title || r.type}
-                    </span>
-                    <span className="text-[10px] text-fg-muted shrink-0">
-                      {Math.round(r.confidence_score * 100)}%
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-fg-muted mt-0.5 truncate">
-                    {TYPE_LABELS[r.type as ResourceType] ?? r.type} ·{" "}
-                    {r.estimated_minutes} 分钟
-                  </div>
-                </button>
-              );
-            })}
-          </nav>
-
-          {/* Right: detail viewer */}
-          <section
-            className="overflow-y-auto p-4 min-h-0"
-            data-testid="resource-detail"
-          >
-            {selected ? (
-              <ResourceDetail resource={selected} />
-            ) : (
-              <div className="text-sm text-fg-muted">未选择资源</div>
-            )}
-          </section>
-        </div>
+    <div className="flex h-full flex-col" data-testid="resource-package-preview">
+      <header className="flex min-h-16 shrink-0 items-center justify-between gap-3 border-b border-border px-4 sm:px-5"><div className="min-w-0"><h2 className="truncate font-display text-xl font-semibold">{pkg.topic}</h2><p className="mt-1 text-xs text-fg-muted">{pkg.resources.length} 项学习资料</p></div><button type="button" className="flex min-h-10 min-w-10 items-center justify-center rounded-full text-fg-muted hover:bg-bg-subtle hover:text-fg" onClick={onClose} data-testid="resource-preview-close" aria-label="关闭资料详情"><X className="h-4 w-4" /></button></header>
+      <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)]">
+        <nav className="max-h-52 overflow-y-auto border-b border-border bg-bg-subtle p-2 md:max-h-none md:border-b-0 md:border-r" aria-label="资料列表" data-testid="resource-list">{pkg.resources.map((resource) => { const active = resource.resource_id === selected?.resource_id; return <button key={resource.resource_id} type="button" onClick={() => selectResource(resource.resource_id)} className={cn("mb-1 w-full rounded-md px-3 py-2.5 text-left transition-colors", active ? "bg-bg-panel" : "hover:bg-bg-panel/70")} aria-pressed={active} data-testid={`resource-list-item-${resource.resource_id}`}><span className="block truncate text-sm font-medium">{resource.title || TYPE_LABELS[resource.type]}</span><span className="mt-1 block text-[11px] text-fg-muted">{TYPE_LABELS[resource.type]} · {resource.estimated_minutes} 分钟</span></button>; })}</nav>
+        <section className="min-h-0 overflow-y-auto" data-testid="resource-detail">{selected ? <ResourceDetail resource={selected} /> : <div className="p-6 text-sm text-fg-muted">选择一项资料开始阅读。</div>}</section>
       </div>
     </div>
   );

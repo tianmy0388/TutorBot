@@ -14,7 +14,7 @@ git checkout main-jsc
 powershell -ExecutionPolicy Bypass -File scripts\start-dev.ps1 -BackendPort 8010 -FrontendPort 3010
 ```
 
-访问 `http://localhost:3010/demo`。停止服务：
+访问 `http://localhost:3010`。停止服务：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\stop-dev.ps1
@@ -51,14 +51,14 @@ TUTOR_LLM_BASE_URL=https://api.deepseek.com
 TUTOR_LLM_API_KEY=<本地密钥>
 ```
 
-LLM 与 Embedding 独立配置。没有 Embedding 时固定比赛场景可运行，但知识库向量化和语义检索会降级。
+LLM 与 Embedding 独立配置。没有 Embedding 时项目仍可启动，但知识库向量化和语义检索会降级。
 
 ## 5. 健康检查
 
 ```powershell
 Invoke-RestMethod http://localhost:8010/api/v1/health
 Invoke-RestMethod http://localhost:8010/api/v1/capabilities
-Invoke-RestMethod http://localhost:3010/api/v1/demo/scenarios
+Invoke-RestMethod http://localhost:8010/api/v1/profile/local-student
 ```
 
 能力列表应包含 `profile`、`resource_generation`、`path_planning`、`tutoring` 和 `assessment`。
@@ -72,4 +72,4 @@ npm run type-check --workspace frontend
 npm run build --workspace frontend
 ```
 
-比赛现场优先使用“加载演示数据”完成稳定演示，再使用“实时生成”展示真实任务 ID 和流式阶段。固定数据必须明确标注为演示快照。
+发布前应从首页完成一次真实学习任务，并确认刷新后仍能恢复任务、路径与资料上下文。

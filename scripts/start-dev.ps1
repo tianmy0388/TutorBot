@@ -22,7 +22,7 @@ if (Test-Path -LiteralPath $PidFile) {
   }
   if ($alive.Count -gt 0) {
     Write-Host "TutorBot dev services already appear to be running. Use scripts\stop-dev.ps1 first." -ForegroundColor Yellow
-    Write-Host "Frontend: http://localhost:$FrontendPort/demo"
+    Write-Host "Frontend: http://localhost:$FrontendPort"
     Write-Host "Backend : http://localhost:$BackendPort/api/v1/health"
     exit 0
   }
@@ -90,6 +90,6 @@ $frontend = Start-DevProcess -Name "frontend" -CommandText $frontendCommand -Out
 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $PidFile -Encoding UTF8
 
 Write-Host "TutorBot dev services started." -ForegroundColor Green
-Write-Host "Frontend demo: http://localhost:$FrontendPort/demo"
+Write-Host "Frontend: http://localhost:$FrontendPort"
 Write-Host "Backend health: http://localhost:$BackendPort/api/v1/health"
 Write-Host "Logs: $LogDir"
