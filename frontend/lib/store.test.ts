@@ -404,3 +404,61 @@ describe("per-conversation web search state", () => {
     });
   });
 });
+
+describe("workflow timeline hydration", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("upserts duplicate persisted timelines to the stable id before a terminal replay", async () => {
+    const workflow = {
+      kind: "workflow_timeline",
+      job_id: "job-workflow",
+      client_message_id: "workflow:job-workflow",
+      workflow: { status: "succeeded", stages: [] },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      conversation: {
+        session_id: "session-workflow", user_id: "local-user", title: "workflow",
+        message_count: 2, last_message_preview: "", web_search_enabled: false,
+        created_at: "2026-07-18T00:00:00Z", updated_at: "2026-07-18T00:00:00Z",
+        messages: [
+          { id: "server-1", role: "assistant", content: "", capability: null, created_at: "2026-07-18T00:00:00Z", metadata: workflow },
+          { id: "server-2", role: "assistant", content: "", capability: null, created_at: "2026-07-18T00:01:00Z", metadata: workflow },
+        ],
+      },
+      jobs: [], packages: [], profile_summary: {}, path_summary: {}, recovery_warnings: [],
+    }), { status: 200, headers: { "content-type": "application/json" } })));
+
+    await useTutorStore.getState().loadConversationAggregate("local-user", "session-workflow");
+    useTutorStore.getState().applyReducerEvent({
+      type: "job_terminal",
+      job_id: "job-workflow",
+      capability: "tutoring",
+      result: {
+        job_id: "job-workflow", capability: "tutoring", status: "succeeded",
+        assistant_message: "done",
+      },
+      event_id: "terminal-workflow",
+    });
+
+    const timelines = useTutorStore.getState().messages.filter(
+      (message) => message.id === "workflow:job-workflow",
+    );
+    expect(timelines).toHaveLength(1);
+    expect(timelines[0].metadata?.kind).toBe("workflow_timeline");
+  });
+});
+
+describe("job removal", () => {
+  it("removes stale job order entries even when the job map no longer has the job", () => {
+    useTutorStore.setState({
+      jobsById: {},
+      jobOrder: ["stale-job"],
+    });
+
+    useTutorStore.getState().removeJob("stale-job");
+
+    expect(useTutorStore.getState().jobOrder).not.toContain("stale-job");
+  });
+});

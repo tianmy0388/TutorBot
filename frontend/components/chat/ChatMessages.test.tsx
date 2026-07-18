@@ -172,6 +172,25 @@ describe("ChatMessages — terminal state", () => {
     expect(screen.queryByText("正在调用 Agent…")).not.toBeInTheDocument();
   });
 
+  it("ignores malformed workflow metadata instead of rendering an invalid stage", () => {
+    mockStoreState({
+      messages: [{
+        id: "workflow:broken",
+        role: "assistant",
+        content: "fallback content",
+        timestamp: 1,
+        metadata: {
+          kind: "workflow_timeline",
+          workflow: { status: "not-terminal", stages: [null] },
+        },
+      }],
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText("fallback content")).toBeInTheDocument();
+  });
+
   it("trusts a canonical terminal event when the replayed status is stale", () => {
     const job = {
       ...baseTerminalJob("job-canonical"),

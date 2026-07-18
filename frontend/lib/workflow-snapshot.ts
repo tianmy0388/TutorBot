@@ -38,6 +38,7 @@ export function workflowMessage(
     metadata: {
       kind: "workflow_timeline",
       job_id: job.job_id,
+      client_message_id: `workflow:${job.job_id}`,
       workflow: buildWorkflowSnapshot(job, status),
     },
   };

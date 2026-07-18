@@ -86,6 +86,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<JobStatsResponse | null>(null);
   const [tick, setTick] = useState(0); // bump on optimistic updates to re-render
+  const jobsRef = useRef<JobSummary[]>([]);
 
   // In-flight subscribers (so we can tear them down on unmount)
   const liveClients = useRef<Map<string, WsClient>>(new Map());
@@ -99,6 +100,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         listJobs(userId, { limit: 50 }),
         getJobStats(userId).catch(() => null),
       ]);
+      jobsRef.current = listResp.items;
       setJobs(listResp.items);
       setTotal(listResp.total);
       for (const item of listResp.items) {
@@ -236,7 +238,9 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
                   has_result: false,
                   error: null,
                 };
-                return [optimistic, ...prev];
+                const next = [optimistic, ...prev];
+                jobsRef.current = next;
+                return next;
               });
               setTotal((t) => t + 1);
               setTick((x) => x + 1);
@@ -310,8 +314,8 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
             userId: userId || "anonymous",
           });
           if (streamEv.type === "stage_start") {
-            setJobs((prev) =>
-              prev.map((j) =>
+            setJobs((prev) => {
+              const next: JobSummary[] = prev.map((j) =>
                 j.job_id === jobId && j.status === "pending"
                   ? {
                       ...j,
@@ -319,8 +323,10 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
                       started_at: new Date().toISOString(),
                     }
                   : j,
-              ),
-            );
+              );
+              jobsRef.current = next;
+              return next;
+            });
           } else if (
             streamEv.type === "job_terminal" ||
             streamEv.type === "done" ||
@@ -367,16 +373,21 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
   const remove = useCallback(
     async (jobId: string): Promise<boolean> => {
       if (!userId) return false;
+      const removeFromQueue = () => {
+        const existed = jobsRef.current.some((job) => job.job_id === jobId);
+        const next = jobsRef.current.filter((job) => job.job_id !== jobId);
+        jobsRef.current = next;
+        setJobs(next);
+        if (existed) setTotal((total) => Math.max(0, total - 1));
+      };
       try {
         await apiDeleteJob(userId, jobId);
-        setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
-        setTotal((t) => Math.max(0, t - 1));
+        removeFromQueue();
         useTutorStore.getState().removeJob(jobId);
         return true;
       } catch (e) {
         if ((e as { status?: number }).status === 404) {
-          setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
-          setTotal((t) => Math.max(0, t - 1));
+          removeFromQueue();
           useTutorStore.getState().removeJob(jobId);
           return true;
         }

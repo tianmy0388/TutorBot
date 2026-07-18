@@ -699,10 +699,10 @@ export const useTutorStore = create<TutorState>()(
 
     removeJob: (jobId) =>
       set((state) => {
-        if (!state.jobsById[jobId]) return {};
-        const { [jobId]: _removed, ...jobsById } = state.jobsById;
+        const hasJob = Object.prototype.hasOwnProperty.call(state.jobsById, jobId);
+        const { [jobId]: _removed, ...remainingJobs } = state.jobsById;
         return {
-          jobsById,
+          jobsById: hasJob ? remainingJobs : state.jobsById,
           jobOrder: state.jobOrder.filter((id) => id !== jobId),
         };
       }),
@@ -763,14 +763,7 @@ export const useTutorStore = create<TutorState>()(
     loadConversationIntoStore: async (userId, sessionId) => {
       const { getConversation } = await import("./api");
       const detail = await getConversation(userId, sessionId);
-      const messages = (detail.messages || []).map((m) => ({
-        id: m.id,
-        role: m.role as "user" | "assistant" | "system",
-        content: m.content,
-        agent: m.capability ?? undefined,
-        timestamp: new Date(m.created_at).getTime(),
-        metadata: m.metadata ?? {},
-      }));
+      const messages = hydrateConversationMessages(detail.messages || []);
       const serverWebSearch = detail.web_search_enabled ?? false;
       const webSearchView = webSearchViewForSession(sessionId, serverWebSearch);
       if (!webSearchView.pending) {
@@ -829,14 +822,7 @@ export const useTutorStore = create<TutorState>()(
         return;
       }
       const conv = agg.conversation;
-      const messages = (conv.messages || []).map((m) => ({
-        id: m.id,
-        role: m.role as "user" | "assistant" | "system",
-        content: m.content,
-        agent: m.capability ?? undefined,
-        timestamp: new Date(m.created_at).getTime(),
-        metadata: m.metadata ?? {},
-      }));
+      const messages = hydrateConversationMessages(conv.messages || []);
 
       // Hydrate the per-job state from the snapshot. Terminal jobs
       // keep their final events; live ones keep streaming — the
@@ -1029,6 +1015,42 @@ export const useTutorStore = create<TutorState>()(
 );
 
 // helpers
+
+function hydrateConversationMessages(messages: Array<{
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  capability?: string | null;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}>): ChatMessage[] {
+  const hydrated: ChatMessage[] = [];
+  const indexById = new Map<string, number>();
+  for (const message of messages) {
+    const metadata = message.metadata ?? {};
+    const workflowJobId =
+      metadata.kind === "workflow_timeline" && typeof metadata.job_id === "string"
+        ? metadata.job_id
+        : null;
+    const id = workflowJobId ? `workflow:${workflowJobId}` : message.id;
+    const next: ChatMessage = {
+      id,
+      role: message.role,
+      content: message.content,
+      agent: message.capability ?? undefined,
+      timestamp: new Date(message.created_at).getTime(),
+      metadata,
+    };
+    const existingIndex = indexById.get(id);
+    if (existingIndex === undefined) {
+      indexById.set(id, hydrated.length);
+      hydrated.push(next);
+    } else {
+      hydrated[existingIndex] = next;
+    }
+  }
+  return hydrated;
+}
 
 function cryptoRandom(): string {
   if (typeof window !== "undefined" && window.crypto) {

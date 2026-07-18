@@ -645,7 +645,16 @@ function workflowFromMetadata(metadata: Record<string, unknown> | undefined): Wo
   const workflow = metadata.workflow;
   if (!workflow || typeof workflow !== "object") return null;
   const candidate = workflow as Partial<WorkflowSnapshot>;
-  if (!Array.isArray(candidate.stages) || typeof candidate.status !== "string") return null;
+  if (
+    !Array.isArray(candidate.stages) ||
+    !["succeeded", "partial", "failed", "cancelled"].includes(candidate.status ?? "")
+  ) return null;
+  if (!candidate.stages.every((stage) =>
+    !!stage &&
+    typeof stage === "object" &&
+    typeof (stage as { name?: unknown }).name === "string" &&
+    ["completed", "incomplete"].includes((stage as { status?: unknown }).status as string),
+  )) return null;
   return candidate as WorkflowSnapshot;
 }
 

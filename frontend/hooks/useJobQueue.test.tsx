@@ -240,7 +240,7 @@ describe("useJobQueue durable child refresh", () => {
         .mockResolvedValueOnce({ items: [job("pending")], total: 1 })
         .mockResolvedValue({ items: [job(terminalStatus)], total: 1 });
 
-      const { result } = renderHook(() => useJobQueue("local-user"));
+      renderHook(() => useJobQueue("local-user"));
       render(<VideoViewer resource={{ ...resource, format_specific: {} }} />);
       await act(flushPromises);
       expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
@@ -249,16 +249,6 @@ describe("useJobQueue durable child refresh", () => {
         await vi.advanceTimersByTimeAsync(5000);
         await flushPromises();
         await flushPromises();
-      });
-      await act(async () => {
-        await result.current.refresh();
-      });
-      await act(async () => {
-        useTutorStore.getState().rehydrateJobFromDetail({
-          ...job(terminalStatus),
-          events: [],
-          result: null,
-        });
       });
 
       expect(
@@ -284,7 +274,7 @@ describe("useJobQueue durable child refresh", () => {
   });
 
   it("removes a missing deleted job from both queue and Zustand", async () => {
-    apiMocks.listJobs.mockResolvedValue({ items: [job("succeeded")], total: 1 });
+    apiMocks.listJobs.mockResolvedValue({ items: [job("succeeded")], total: 2 });
     apiMocks.deleteJob.mockRejectedValue({ status: 404 });
     useTutorStore.getState().rehydrateJobFromDetail({ ...job("succeeded"), events: [], result: null });
 
@@ -297,6 +287,25 @@ describe("useJobQueue durable child refresh", () => {
 
     expect(result.current.jobs.find((item) => item.job_id === "parent-live")).toBeUndefined();
     expect(useTutorStore.getState().jobsById["parent-live"]).toBeUndefined();
+  });
+
+  it("does not decrement the queue total on a repeated 404 delete", async () => {
+    apiMocks.listJobs.mockResolvedValue({ items: [job("succeeded")], total: 2 });
+    apiMocks.deleteJob.mockRejectedValue({ status: 404 });
+    useTutorStore.setState({
+      jobsById: {},
+      jobOrder: ["parent-live"],
+    });
+    const { result } = renderHook(() => useJobQueue("local-user"));
+    await act(flushPromises);
+
+    await act(async () => {
+      await result.current.remove("parent-live");
+      await result.current.remove("parent-live");
+    });
+
+    expect(result.current.total).toBe(1);
+    expect(useTutorStore.getState().jobOrder).not.toContain("parent-live");
   });
 
   it("hydrates only the current session when another session has the same resource id", async () => {

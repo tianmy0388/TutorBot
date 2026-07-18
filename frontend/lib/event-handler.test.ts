@@ -33,6 +33,7 @@ const mockStoreState = {
   applyStreamEvent: vi.fn(),
   addMessage: vi.fn(),
   completeActiveTurn: vi.fn(),
+  messages: [] as Array<{ id: string; role: "assistant"; content: string; timestamp: number; metadata?: Record<string, unknown> }>,
   userId: "u-test",
   sessionId: "s-test",
 };
@@ -343,6 +344,7 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
 
   it("persists session A terminal assistant to A without mutating active session B", async () => {
     mockStoreState.sessionId = "session-b";
+    const persist = vi.fn().mockResolvedValue(undefined);
     const event = jobTerminalEvent([]);
     event.session_id = "";
     event.metadata = {
@@ -353,12 +355,13 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     dispatchStreamEvent(event, {
       sessionId: "session-a",
       userId: "u-test",
+      appendConversationMessage: persist,
     });
     await vi.waitFor(() =>
-      expect(appendConversationMessage).toHaveBeenCalledTimes(1),
+      expect(persist).toHaveBeenCalledTimes(2),
     );
 
-    expect(appendConversationMessage).toHaveBeenCalledWith(
+    expect(persist).toHaveBeenCalledWith(
       "u-test",
       "session-a",
       expect.objectContaining({
@@ -371,6 +374,17 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
     expect(mockStoreState.addMessage).not.toHaveBeenCalled();
     expect(mockStoreState.completeActiveTurn).not.toHaveBeenCalled();
+    expect(persist).toHaveBeenCalledWith(
+      "u-test",
+      "session-a",
+      expect.objectContaining({
+        content: "",
+        metadata: expect.objectContaining({
+          kind: "workflow_timeline",
+          client_message_id: "workflow:job-bbf6ddbf",
+        }),
+      }),
+    );
   });
 
   it("uses the injected persistence adapter without falling back to fetch", async () => {

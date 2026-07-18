@@ -14,6 +14,7 @@
 import { useTutorStore } from "./store";
 import { getJobIdFromEvent } from "./job-reducer";
 import type { ClientJob } from "./job-reducer";
+import { workflowMessage } from "./workflow-snapshot";
 import type {
   ConversationMessageInput,
   StreamEvent,
@@ -142,6 +143,14 @@ export function dispatchStreamEvent(
         inactiveJobId,
         context.userId || stateAtDispatch.userId,
         authoritativeSessionId,
+        context.appendConversationMessage,
+      );
+      persistTerminalWorkflow(
+        contract,
+        inactiveJobId,
+        context.userId || stateAtDispatch.userId,
+        authoritativeSessionId,
+        streamEv,
         context.appendConversationMessage,
       );
     }
@@ -339,6 +348,55 @@ function persistTerminalAssistant(
       metadata: { job_id: jobId, capability },
     },
     "assistant",
+  );
+}
+
+function persistTerminalWorkflow(
+  contract: Record<string, unknown> | undefined,
+  jobId: string,
+  userId: string | null | undefined,
+  sessionId: string,
+  event: StreamEvent,
+  appendConversationMessage?: ConversationMessageAppender,
+): void {
+  const status = contract?.status;
+  if (
+    !userId ||
+    !sessionId ||
+    !["succeeded", "partial", "failed", "cancelled"].includes(status as string)
+  ) return;
+  const job: ClientJob = {
+    job_id: jobId,
+    capability: typeof contract?.capability === "string" ? contract.capability : "",
+    status: status as ClientJob["status"],
+    message_preview: "",
+    submitted_at: Date.now(),
+    started_at: null,
+    finished_at: event.timestamp ? event.timestamp * 1000 : Date.now(),
+    last_seq: event.seq ?? 0,
+    events: [event],
+    result: null,
+    error: null,
+    event_count: 1,
+    seen_event_ids: new Set(event.event_id ? [event.event_id] : []),
+    text_buffer: "",
+    thinking_buffer: "",
+    stage: "",
+    open_stages: [],
+  };
+  const workflow = workflowMessage(job, status as import("./types").JobTerminalStatus);
+  persistConversationMessage(
+    appendConversationMessage,
+    userId,
+    sessionId,
+    {
+      role: "assistant",
+      content: workflow.content,
+      job_id: jobId,
+      capability: job.capability || null,
+      metadata: workflow.metadata,
+    },
+    "workflow_timeline",
   );
 }
 
