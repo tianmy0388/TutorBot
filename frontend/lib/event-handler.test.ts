@@ -421,6 +421,32 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     await vi.waitFor(() => expect(mockStoreState.setLatestPackage).toHaveBeenCalledTimes(1));
   });
 
+  it("does not collide recovery dedupe keys across distinct user/package tuples", async () => {
+    let resolveRecovery!: (value: unknown) => void;
+    const recovery = new Promise<unknown>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    vi.mocked(getResourcePackageDetail).mockReturnValue(recovery as never);
+    const invalidEvent = (packageId: string) =>
+      resourceEvent("r-truncated", "exercise", "练习题", {
+        format_specific: {
+          questions: [{ id: "q-1", options: ["[TRUNCATED]"] }],
+        },
+        metadata: { package_id: packageId },
+      });
+
+    dispatchStreamEvent(invalidEvent("c"), { userId: "a:b" });
+    dispatchStreamEvent(invalidEvent("c"), { userId: "a:b" });
+    dispatchStreamEvent(invalidEvent("b:c"), { userId: "a" });
+    dispatchStreamEvent(invalidEvent("b:c"), { userId: "a" });
+
+    await vi.waitFor(() => expect(getResourcePackageDetail).toHaveBeenCalledTimes(2));
+    expect(getResourcePackageDetail).toHaveBeenCalledWith("a:b", "c");
+    expect(getResourcePackageDetail).toHaveBeenCalledWith("a", "b:c");
+
+    resolveRecovery(undefined);
+  });
+
   it("allows recovery to retry after a synchronous request failure", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.mocked(getResourcePackageDetail)

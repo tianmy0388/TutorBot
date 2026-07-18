@@ -893,7 +893,7 @@ function scheduleResourcePackageRecovery(
   const userId = context.userId || useTutorStore.getState().userId;
   if (!userId || !packageId) return;
 
-  const key = `${userId}:${packageId}`;
+  const key = JSON.stringify([userId, packageId]);
   if (resourceRecoveryInFlight.has(key)) return;
 
   const recovery = Promise.resolve()
