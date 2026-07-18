@@ -67,10 +67,22 @@ interface InactiveStageHistory {
   openStages: string[];
 }
 
+interface InactiveTerminalPersistence {
+  userId: string;
+  sessionId: string;
+  assistant: ConversationMessageInput | null;
+  workflow: ConversationMessageInput;
+  assistantDone: boolean;
+  workflowDone: boolean;
+  assistantInFlight: boolean;
+  workflowInFlight: boolean;
+  finalizedAt: number | null;
+}
+
 const inactiveStageHistory = new Map<string, InactiveStageHistory>();
-const finalizedInactiveWorkflows = new Map<string, number>();
+const inactiveTerminalPersistence = new Map<string, InactiveTerminalPersistence>();
 const MAX_INACTIVE_STAGE_HISTORIES = 256;
-const MAX_INACTIVE_WORKFLOW_RECORDS = 256;
+const MAX_INACTIVE_TERMINAL_RECORDS = 256;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -154,25 +166,23 @@ export function dispatchStreamEvent(
       const inactiveUserId = context.userId || stateAtDispatch.userId;
       if (
         inactiveUserId &&
-        hasTerminalWorkflowStatus(contract) &&
-        markInactiveWorkflowFinalized(authoritativeSessionId, inactiveJobId)
+        hasTerminalWorkflowStatus(contract)
       ) {
-        persistTerminalAssistant(
-          contract,
-          inactiveJobId,
-          inactiveUserId,
-          authoritativeSessionId,
-          context.appendConversationMessage,
-        );
-        persistTerminalWorkflow(
+        const persistence = getOrCreateInactiveTerminalPersistence(
           contract,
           inactiveJobId,
           inactiveUserId,
           authoritativeSessionId,
           streamEv,
           takeInactiveStageHistory(authoritativeSessionId, inactiveJobId),
-          context.appendConversationMessage,
         );
+        if (persistence) {
+          attemptInactiveTerminalPersistence(
+            stageHistoryKey(authoritativeSessionId, inactiveJobId),
+            persistence,
+            context.appendConversationMessage,
+          );
+        }
       }
     }
     return;
@@ -294,7 +304,11 @@ export function dispatchStreamEvent(
               content: assistantText,
               job_id: jobId,
               capability: cap,
-              metadata: { job_id: jobId, capability: cap },
+              metadata: {
+                job_id: jobId,
+                capability: cap,
+                client_message_id: `terminal:${jobId}`,
+              },
             },
             "assistant",
           );
@@ -340,49 +354,37 @@ export function dispatchStreamEvent(
   }
 }
 
-function persistTerminalAssistant(
+function terminalAssistantMessage(
   contract: Record<string, unknown> | undefined,
   jobId: string,
-  userId: string | null | undefined,
-  sessionId: string,
-  appendConversationMessage?: ConversationMessageAppender,
-): void {
-  if (!contract || !userId || !sessionId) return;
+): ConversationMessageInput | null {
+  if (!contract) return null;
   const content =
     typeof contract.assistant_message === "string"
       ? contract.assistant_message
       : typeof contract.message === "string"
         ? contract.message
         : "";
-  if (!content) return;
+  if (!content) return null;
   const capability =
     typeof contract.capability === "string" ? contract.capability : null;
-  persistConversationMessage(
-    appendConversationMessage,
-    userId,
-    sessionId,
-    {
-      role: "assistant",
-      content,
-      job_id: jobId,
-      capability,
-      metadata: { job_id: jobId, capability },
-    },
-    "assistant",
-  );
+  return {
+    role: "assistant",
+    content,
+    job_id: jobId,
+    capability,
+    metadata: { job_id: jobId, capability, client_message_id: `terminal:${jobId}` },
+  };
 }
 
-function persistTerminalWorkflow(
+function terminalWorkflowMessage(
   contract: Record<string, unknown> | undefined,
   jobId: string,
-  userId: string | null | undefined,
-  sessionId: string,
   event: StreamEvent,
   stageHistory: InactiveStageHistory | undefined,
-  appendConversationMessage?: ConversationMessageAppender,
-): void {
+): ConversationMessageInput | null {
   const status = contract?.status;
-  if (!userId || !sessionId || !hasTerminalWorkflowStatus(contract)) return;
+  if (!hasTerminalWorkflowStatus(contract)) return null;
   const job: ClientJob = {
     job_id: jobId,
     capability: typeof contract?.capability === "string" ? contract.capability : "",
@@ -403,19 +405,13 @@ function persistTerminalWorkflow(
     open_stages: stageHistory?.openStages ?? [],
   };
   const workflow = workflowMessage(job, status as import("./types").JobTerminalStatus);
-  persistConversationMessage(
-    appendConversationMessage,
-    userId,
-    sessionId,
-    {
-      role: "assistant",
-      content: workflow.content,
-      job_id: jobId,
-      capability: job.capability || null,
-      metadata: workflow.metadata,
-    },
-    "workflow_timeline",
-  );
+  return {
+    role: "assistant",
+    content: workflow.content,
+    job_id: jobId,
+    capability: job.capability || null,
+    metadata: workflow.metadata,
+  };
 }
 
 function hasTerminalWorkflowStatus(contract: Record<string, unknown> | undefined): boolean {
@@ -458,16 +454,83 @@ function takeInactiveStageHistory(
   return history;
 }
 
-function markInactiveWorkflowFinalized(sessionId: string, jobId: string): boolean {
+function getOrCreateInactiveTerminalPersistence(
+  contract: Record<string, unknown> | undefined,
+  jobId: string,
+  userId: string,
+  sessionId: string,
+  event: StreamEvent,
+  stageHistory: InactiveStageHistory | undefined,
+): InactiveTerminalPersistence | null {
   const key = stageHistoryKey(sessionId, jobId);
-  if (finalizedInactiveWorkflows.has(key)) return false;
-  finalizedInactiveWorkflows.set(key, Date.now());
-  while (finalizedInactiveWorkflows.size > MAX_INACTIVE_WORKFLOW_RECORDS) {
-    const oldest = finalizedInactiveWorkflows.keys().next().value;
+  const existing = inactiveTerminalPersistence.get(key);
+  if (existing) return existing;
+  const workflow = terminalWorkflowMessage(contract, jobId, event, stageHistory);
+  if (!workflow) return null;
+  const assistant = terminalAssistantMessage(contract, jobId);
+  const persistence: InactiveTerminalPersistence = {
+    userId,
+    sessionId,
+    assistant,
+    workflow,
+    assistantDone: assistant === null,
+    workflowDone: false,
+    assistantInFlight: false,
+    workflowInFlight: false,
+    finalizedAt: null,
+  };
+  inactiveTerminalPersistence.set(key, persistence);
+  while (inactiveTerminalPersistence.size > MAX_INACTIVE_TERMINAL_RECORDS) {
+    const oldest = inactiveTerminalPersistence.keys().next().value;
     if (oldest === undefined) break;
-    finalizedInactiveWorkflows.delete(oldest);
+    inactiveTerminalPersistence.delete(oldest);
   }
-  return true;
+  return persistence;
+}
+
+function attemptInactiveTerminalPersistence(
+  key: string,
+  persistence: InactiveTerminalPersistence,
+  appendConversationMessage?: ConversationMessageAppender,
+): void {
+  if (!persistence.assistantDone && !persistence.assistantInFlight && persistence.assistant) {
+    persistence.assistantInFlight = true;
+    void persistConversationMessage(
+      appendConversationMessage,
+      persistence.userId,
+      persistence.sessionId,
+      persistence.assistant,
+      "assistant",
+    ).then((success) => {
+      persistence.assistantInFlight = false;
+      if (success) persistence.assistantDone = true;
+      finalizeInactiveTerminalPersistence(key, persistence);
+    });
+  }
+  if (!persistence.workflowDone && !persistence.workflowInFlight) {
+    persistence.workflowInFlight = true;
+    void persistConversationMessage(
+      appendConversationMessage,
+      persistence.userId,
+      persistence.sessionId,
+      persistence.workflow,
+      "workflow_timeline",
+    ).then((success) => {
+      persistence.workflowInFlight = false;
+      if (success) persistence.workflowDone = true;
+      finalizeInactiveTerminalPersistence(key, persistence);
+    });
+  }
+}
+
+function finalizeInactiveTerminalPersistence(
+  key: string,
+  persistence: InactiveTerminalPersistence,
+): void {
+  if (inactiveTerminalPersistence.get(key) !== persistence) return;
+  if (persistence.assistantDone && persistence.workflowDone && persistence.finalizedAt === null) {
+    persistence.finalizedAt = Date.now();
+  }
 }
 
 function persistConversationMessage(
@@ -476,15 +539,19 @@ function persistConversationMessage(
   sessionId: string,
   message: ConversationMessageInput,
   label: string,
-): void {
+): Promise<boolean> {
   const pending = adapter
     ? Promise.resolve().then(() => adapter(userId, sessionId, message))
     : import("./api").then(({ appendConversationMessage }) =>
         appendConversationMessage(userId, sessionId, message),
       );
-  void pending.catch((error: unknown) => {
-    console.warn(`appendConversationMessage(${label}) failed`, error);
-  });
+  return pending.then(
+    () => true,
+    (error: unknown) => {
+      console.warn(`appendConversationMessage(${label}) failed`, error);
+      return false;
+    },
+  );
 }
 
 function parseStructuredError(value: unknown): StructuredError | null {

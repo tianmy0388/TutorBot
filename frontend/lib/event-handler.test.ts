@@ -475,6 +475,73 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     });
   });
 
+  it("retries only a failed inactive append after replay without parallel duplicates", async () => {
+    mockStoreState.sessionId = "session-b";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let resolveAssistant!: () => void;
+    let rejectWorkflow!: (error: Error) => void;
+    const assistantPending = new Promise<void>((resolve) => {
+      resolveAssistant = resolve;
+    });
+    const workflowPending = new Promise<void>((_, reject) => {
+      rejectWorkflow = reject;
+    });
+    const persist = vi.fn()
+      .mockImplementationOnce(() => assistantPending)
+      .mockImplementationOnce(() => workflowPending)
+      .mockResolvedValueOnce(undefined);
+    const context = {
+      sessionId: "session-retry-a",
+      userId: "u-test",
+      appendConversationMessage: persist,
+    };
+    const stage = (type: "stage_start" | "stage_end", name: string, id: string) => ({
+      ...inactiveStageEvent(type, name, id),
+      session_id: "session-retry-a",
+      metadata: { job_id: "job-bbf6ddbf", session_id: "session-retry-a" },
+    });
+    dispatchStreamEvent(stage("stage_start", "plan", "retry-plan-start"), context);
+    dispatchStreamEvent(stage("stage_end", "plan", "retry-plan-end"), context);
+    dispatchStreamEvent(stage("stage_start", "execute", "retry-execute-start"), context);
+    const terminal = jobTerminalEvent([]);
+    terminal.session_id = "session-retry-a";
+    terminal.metadata = { ...terminal.metadata, session_id: "session-retry-a" };
+
+    dispatchStreamEvent(terminal, context);
+    dispatchStreamEvent(terminal, context);
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(2));
+
+    resolveAssistant();
+    rejectWorkflow(new Error("workflow append failed"));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    dispatchStreamEvent(terminal, context);
+
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(3));
+    const assistantCalls = persist.mock.calls.filter(
+      ([, , message]) => message.metadata?.client_message_id === "terminal:job-bbf6ddbf",
+    );
+    const workflowCalls = persist.mock.calls.filter(
+      ([, , message]) => message.metadata?.kind === "workflow_timeline",
+    );
+    expect(assistantCalls).toHaveLength(1);
+    expect(workflowCalls).toHaveLength(2);
+    expect(workflowCalls[1][2]).toEqual(workflowCalls[0][2]);
+    expect(workflowCalls[1][2].metadata?.workflow).toEqual({
+      status: "failed",
+      stages: [
+        { name: "plan", status: "completed" },
+        { name: "execute", status: "incomplete" },
+      ],
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "appendConversationMessage(workflow_timeline) failed",
+      expect.any(Error),
+    );
+    warnSpy.mockRestore();
+  });
+
   it("uses the injected persistence adapter without falling back to fetch", async () => {
     const persist = vi.fn().mockResolvedValue(undefined);
     const fetchSpy = vi.fn(() => {
