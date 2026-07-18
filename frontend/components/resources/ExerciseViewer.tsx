@@ -162,6 +162,7 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
   };
 
   const allSubmitted = stats.answered === stats.total && stats.total > 0;
+  const hasSubmitting = localQuestions.some((question) => responses.submitting[question.id]);
 
   return (
     <div className="space-y-4">
@@ -185,10 +186,10 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
           <div className="flex gap-2">
             <button
               onClick={submitAll}
-              disabled={stats.answered === stats.total}
+              disabled={stats.answered === stats.total || hasSubmitting}
               className={cn(
                 "btn-ghost text-xs px-3 py-1.5",
-                stats.answered === stats.total && "opacity-50 cursor-not-allowed",
+                (stats.answered === stats.total || hasSubmitting) && "opacity-50 cursor-not-allowed",
               )}
             >
               <Send className="w-3 h-3" />
@@ -289,6 +290,7 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
               question={q}
               isSub={isSub}
               correct={correct}
+              submitting={responses.submitting[q.id] === true}
               answer={responses.drafts[q.id]}
               setAnswer={(v) => responses.setDraft(q.id, v)}
               submit={() => { void responses.submit(q.id); }}
@@ -369,6 +371,7 @@ function QuestionCard({
   question: q,
   isSub,
   correct,
+  submitting,
   answer,
   setAnswer,
   submit,
@@ -378,6 +381,7 @@ function QuestionCard({
   question: ParsedQuestion;
   isSub: boolean;
   correct: boolean;
+  submitting: boolean;
   answer: any;
   setAnswer: (v: any) => void;
   submit: () => void;
@@ -542,14 +546,14 @@ function QuestionCard({
         {!isSub ? (
           <button
             onClick={submit}
-            disabled={answer === undefined}
+            disabled={answer === undefined || submitting}
             className={cn(
               "btn-primary text-xs px-3 py-1.5",
-              answer === undefined && "opacity-50 cursor-not-allowed",
+              (answer === undefined || submitting) && "opacity-50 cursor-not-allowed",
             )}
           >
             <Check className="w-3 h-3" />
-            提交
+            {submitting ? "提交中…" : "提交"}
           </button>
         ) : (
           <button onClick={reset} className="btn-ghost text-xs px-3 py-1.5">

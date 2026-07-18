@@ -48,6 +48,8 @@ export function CodeExerciseEditor({
   }, [question.id]);
   const draft = responses.drafts[question.id];
   const source = typeof draft === "string" ? draft : (spec?.starter_code ?? "");
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -115,7 +117,7 @@ export function CodeExerciseEditor({
         setResult(terminal);
         setHistory((items) => [terminal, ...items.filter((item) => item.attempt_id !== terminal.attempt_id)]);
         void responses.submit(question.id, {
-          answer: source,
+          answer: sourceRef.current,
           linkedCodeAttemptId: terminal.attempt_id,
           keepDraft: true,
         });

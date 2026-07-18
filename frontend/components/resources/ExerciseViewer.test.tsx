@@ -183,6 +183,27 @@ describe("ExerciseViewer code integration", () => {
     expect(screen.getByTestId("code-editor")).toBeVisible();
   });
 
+  it("reflects an ordinary submission in progress and prevents a duplicate click", async () => {
+    let resolve!: (value: unknown) => void;
+    api.submitExerciseResponse.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const resource = exerciseResource();
+    resource.format_specific.questions = [{
+      id: "q1", type: "true_false", question: "Python 是语言", answer: true,
+      options: [], explanation: "yes",
+    }];
+    render(<ExerciseViewer resource={resource} />);
+    fireEvent.click(screen.getByRole("button", { name: "✓ 正确" }));
+    fireEvent.click(screen.getByRole("button", { name: /^提交$/ }));
+    expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "提交中…" }));
+    expect(api.submitExerciseResponse).toHaveBeenCalledTimes(1);
+    resolve({
+      submission_id: "done", question_id: "q1", answer_json: true,
+      grading_status: "auto_graded", correct: true, score: 1,
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "提交中…" })).not.toBeInTheDocument());
+  });
+
   it("disables code submission when package persistence failed", () => {
     const resource = exerciseResource("pkg-failed", false);
     selectCurrentPackage(resource);

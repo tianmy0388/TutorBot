@@ -158,6 +158,25 @@ describe("CodeExerciseEditor", () => {
     expect(within(result).getByText("全部测试通过")).toBeVisible();
   });
 
+  it("keeps the latest draft when an in-flight execution resolves", async () => {
+    let resolveRun!: (value: ExerciseAttempt) => void;
+    api.submitExerciseAttempt.mockReturnValue(new Promise<ExerciseAttempt>((resolve) => { resolveRun = resolve; }));
+    renderEditor();
+    const editor = screen.getByRole("textbox", { name: "Python 代码" });
+    fireEvent.change(editor, { target: { value: "executed source" } });
+    fireEvent.click(screen.getByRole("button", { name: "运行并提交" }));
+    fireEvent.change(editor, { target: { value: "newer draft" } });
+    resolveRun(attempt({ source_code: "executed source" }));
+
+    expect(await screen.findByRole("region", { name: "本次运行结果" })).toBeVisible();
+    await waitFor(() => expect(editor).toHaveValue("newer draft"));
+    expect(api.submitExerciseResponse).toHaveBeenCalledWith(
+      "pkg-code", "resource-code", "q-code",
+      expect.objectContaining({ answer_json: "newer draft" }),
+    );
+    expect(screen.getByText("attempt-1")).toBeVisible();
+  });
+
   it("accepts only bounded .py uploads and preserves source on file errors", async () => {
     renderEditor();
     const editor = screen.getByRole("textbox", { name: "Python 代码" });
