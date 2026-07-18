@@ -61,6 +61,7 @@ _HOST_SYSTEM_ROOTS = frozenset(
         "sys",
         "tmp",
         "usr",
+        "Users",
         "var",
         "workspace",
         "workspaces",
@@ -276,11 +277,11 @@ def _is_host_path(value: str) -> bool:
     if _WINDOWS_OR_UNC_PATH_RE.search(value) or "file://" in value:
         return True
     for match in _UNIX_PATH_CANDIDATE_RE.finditer(value):
-        if _is_markdown_link_destination(value, match.start()):
-            continue
         root = match.group("path").split("/", 1)[0]
         if root in _HOST_SYSTEM_ROOTS:
             return True
+        if _is_markdown_link_destination(value, match.start()):
+            continue
         context = value[:match.start()].rstrip(" \t\"'")
         if _DIAGNOSTIC_PATH_CONTEXT_RE.search(context):
             return True

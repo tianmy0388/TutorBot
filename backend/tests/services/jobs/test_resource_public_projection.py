@@ -269,6 +269,23 @@ def test_public_resource_projection_uses_context_aware_unix_path_detection() -> 
     assert projected["metadata"]["prose"] == "Use a slash / only when discussing notation."
 
 
+def test_public_resource_projection_redacts_system_root_markdown_and_macos_paths() -> None:
+    event = exercise_resource_event(options=[{"label": "A", "text": "梯度"}])
+    metadata = event["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["etc_markdown"] = "[server file](/etc/passwd)"
+    metadata["var_markdown"] = "[logs](/var/log/app.log)"
+    metadata["macos_path"] = "/Users/alice/private.log"
+    metadata["docs_markdown"] = "[setup](/docs/setup)"
+
+    projected = project_public_event(event)
+
+    assert projected["metadata"]["etc_markdown"] == REDACTED
+    assert projected["metadata"]["var_markdown"] == REDACTED
+    assert projected["metadata"]["macos_path"] == REDACTED
+    assert projected["metadata"]["docs_markdown"] == "[setup](/docs/setup)"
+
+
 def test_public_event_handles_deep_acyclic_unknown_containers_without_recursion_error() -> None:
     nested: dict[str, object] = {}
     current = nested
