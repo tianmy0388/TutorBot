@@ -39,6 +39,7 @@ from tutor.services.manim_render.executor import (
     RenderStatus,
     failure_for_render_result,
     safe_failure_summary,
+    sanitize_public_diagnostic,
     tail_lines,
 )
 from tutor.services.manim_render.static_guard import StaticGuard, StaticGuardResult
@@ -308,19 +309,40 @@ class ManimRenderService:
         attempt_label: str,
         stdout: str,
         stderr: str,
+        operator_stdout: str | None = None,
+        operator_stderr: str | None = None,
     ) -> str:
-        """Persist complete captured streams under the canonical data root."""
+        """Persist raw operator streams and a sanitized downloadable log."""
         data_dir = Path(get_settings().data_dir)
         safe_job_id = "".join(
             character for character in job_id if character.isalnum() or character in "-_"
         )[:96] or uuid.uuid4().hex
-        log_path = data_dir / "manim_logs" / safe_job_id / f"{attempt_label}.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
+        filename = f"{attempt_label}.log"
+        public_log = (
             "[stdout]\n"
             + (stdout or "")
             + "\n[stderr]\n"
-            + (stderr or ""),
+            + (stderr or "")
+        )
+        raw_log = (
+            "[stdout]\n"
+            + (stdout if operator_stdout is None else operator_stdout)
+            + "\n[stderr]\n"
+            + (stderr if operator_stderr is None else operator_stderr)
+        )
+        operator_log_path = (
+            data_dir / "operator_logs" / "manim" / safe_job_id / filename
+        )
+        operator_log_path.parent.mkdir(parents=True, exist_ok=True)
+        operator_log_path.write_text(
+            raw_log,
+            encoding="utf-8",
+            errors="replace",
+        )
+        log_path = data_dir / "manim_logs" / safe_job_id / filename
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            sanitize_public_diagnostic(public_log),
             encoding="utf-8",
             errors="replace",
         )

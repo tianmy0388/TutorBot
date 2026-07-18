@@ -341,6 +341,146 @@ async def test_artifact_endpoint_package_less_404_wrong_user(
 
 
 @pytest.mark.asyncio
+async def test_downloadable_render_log_is_complete_sanitized_utf8(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_store,
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.manim_render.service import ManimRenderService
+    from tutor.services.resource_package.schema import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+    )
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    ordinary_lines = [f"progress {index:03d} 正常 Ω" for index in range(150)]
+    sensitive_lines = [
+        'File "C:\\Program Files\\Tutor Bot\\scene.py", line 2',
+        'File "\\\\render-host\\private share\\scene.py", line 3',
+        'File "/srv/private project/scene.py", line 4',
+        'File "file:///home/alice/private scene.py", line 5',
+        "api_key=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+        "provider-token=private-value",
+        "ValueError: 颜色无效 Ω",
+    ]
+    raw_stderr = "\n".join([*ordinary_lines, *sensitive_lines])
+    artifact_key = ManimRenderService._write_log_artifact(
+        "public-log-child",
+        attempt_label="attempt-01",
+        stdout="stdout 开始 Ω",
+        stderr=raw_stderr,
+    )
+
+    await isolated_store.init()
+    resource = Resource(
+        resource_id="public-log-video",
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "artifacts": [
+                {
+                    "name": "attempt-01.log",
+                    "kind": "render_log",
+                    "artifact_key": artifact_key,
+                }
+            ],
+        },
+    )
+    package = ResourcePackage(
+        package_id="public-log-package",
+        topic="topic",
+        resources=[resource],
+    )
+    await isolated_store.save(package, user_id="u-test")
+
+    response = _make_client().get(
+        "/api/v1/resources/packages/u-test/public-log-package/resources/"
+        "public-log-video/artifacts/attempt-01.log"
+    )
+
+    assert response.status_code == 200, response.text
+    public_log = response.content.decode("utf-8")
+    assert ordinary_lines[0] in public_log
+    assert ordinary_lines[-1] in public_log
+    assert "stdout 开始 Ω" in public_log
+    assert "ValueError: 颜色无效 Ω" in public_log
+    for forbidden in (
+        "C:\\Program Files",
+        "render-host",
+        "/srv/private project",
+        "file:///home/alice",
+        "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+        "private-value",
+    ):
+        assert forbidden not in public_log
+
+    operator_log = (
+        data_dir
+        / "operator_logs"
+        / "manim"
+        / "public-log-child"
+        / "attempt-01.log"
+    )
+    assert operator_log.read_text(encoding="utf-8").endswith(raw_stderr)
+
+
+@pytest.mark.asyncio
+async def test_operator_render_log_cannot_be_served_from_tampered_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_store,
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+    )
+
+    data_dir = tmp_path / "data"
+    operator_log = data_dir / "operator_logs" / "manim" / "child" / "raw.log"
+    operator_log.parent.mkdir(parents=True)
+    operator_log.write_text("provider-token=private-value", encoding="utf-8")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        resource_id="operator-log-video",
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "artifacts": [
+                {
+                    "name": "raw.log",
+                    "kind": "render_log",
+                    "artifact_key": "operator_logs/manim/child/raw.log",
+                }
+            ]
+        },
+    )
+    package = ResourcePackage(
+        package_id="operator-log-package",
+        topic="topic",
+        resources=[resource],
+    )
+    await isolated_store.save(package, user_id="u-test")
+
+    response = _make_client().get(
+        "/api/v1/resources/packages/u-test/operator-log-package/resources/"
+        "operator-log-video/artifacts/raw.log"
+    )
+
+    assert response.status_code == 403
+    assert "private-value" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_local_mode_serves_historical_owner_artifacts_from_both_routes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
 ) -> None:

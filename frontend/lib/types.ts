@@ -510,6 +510,16 @@ export interface JobChildSummary {
   error?: string | null;
 }
 
+export interface VideoRetryResponse {
+  job_id: string;
+  parent_job_id: string;
+  package_id: string;
+  resource_id: string;
+  status: JobStatus;
+  child: JobChildSummary;
+  resource: Resource;
+}
+
 export interface JobDetail extends JobSummary {
   message: string;
   language: string;

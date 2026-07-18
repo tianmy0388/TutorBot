@@ -692,6 +692,37 @@ class JobStore:
             await operation()
             return True
 
+    async def run_if_child_active(
+        self,
+        job_id: str,
+        *,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> bool:
+        """Run an external commit only while a durable child is active.
+
+        The jobs write transaction stays open across ``operation`` so a child
+        cannot terminalize between the active-state check and the external
+        resource reset. The operation must not call this JobStore.
+        """
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if (
+                row is None
+                or row.parent_job_id is None
+                or row.status
+                not in {JobStatus.PENDING.value, JobStatus.RUNNING.value}
+            ):
+                return False
+            await operation()
+            return True
+
     async def append_event(
         self,
         job_id: str,

@@ -30,6 +30,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from tutor.core.redaction import redact_text
+
 
 class RenderStatus(str, enum.Enum):  # noqa: UP042 - public enum compatibility
     """Outcome of a render attempt."""
@@ -383,26 +385,70 @@ def tail_lines(text: str, limit: int = 120) -> tuple[str, ...]:
     if not text:
         return ()
     return tuple(
-        _redact_host_paths(line)
+        sanitize_public_diagnostic(line)
         for line in text.splitlines()[-max(1, limit) :]
     )
 
 
 def safe_failure_summary(text: str, *, fallback: str) -> str:
-    """Bound a concise summary and hide Windows host paths."""
+    """Bound a concise public summary and remove private diagnostics."""
     summary = " ".join((text or fallback).split())
-    summary = _redact_host_paths(summary)
+    summary = sanitize_public_diagnostic(summary)
     return summary[:200] or fallback
 
 
+_QUOTED_HOST_PATH_RE = re.compile(
+    r"(?P<quote>[\"'])(?P<path>"
+    r"(?:file:(?:/{1,3})?|[a-z]:[\\/]|\\\\|/)"
+    r"[^\"'\r\n]+)(?P=quote)",
+    flags=re.IGNORECASE,
+)
+_FILE_URI_RE = re.compile(r"(?i)\bfile:(?:/{1,3})?[^\s\"']+")
+_WINDOWS_HOST_PATH_RE = re.compile(
+    r"(?i)(?<![\w])(?:[a-z]:[\\/])[^\s\"']+"
+)
+_UNC_HOST_PATH_RE = re.compile(
+    r"(?<!\\)\\\\[^\\/\s\"']+(?:[\\/][^\s\"']*)?"
+)
+_POSIX_HOST_PATH_RE = re.compile(r"(?<![:\w])/(?!/)[^\s\"']+")
+_DIAGNOSTIC_CREDENTIAL_RE = re.compile(
+    r"(?i)(?P<prefix>\b(?:"
+    r"api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|"
+    r"provider[-_]?token|client[-_]?secret|password|passwd|secret|"
+    r"credential|authorization|token"
+    r")\s*[:=]\s*)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|bearer\s+\S+|\S+)"
+)
+
+
 def _redact_host_paths(text: str) -> str:
-    """Remove absolute host paths from API-facing diagnostics."""
-    return re.sub(
-        r"(?i)(?:\b[a-z]:[\\/]|/(?:tmp|private/tmp|var/tmp|home|users)/)"
-        r"[^\s\"']+",
-        "<path>",
+    """Remove quoted/spaced Windows, UNC, POSIX, and file-URI paths."""
+    redacted = _QUOTED_HOST_PATH_RE.sub(
+        lambda match: f"{match.group('quote')}<path>{match.group('quote')}",
         text,
     )
+    for pattern in (
+        _FILE_URI_RE,
+        _UNC_HOST_PATH_RE,
+        _WINDOWS_HOST_PATH_RE,
+        _POSIX_HOST_PATH_RE,
+    ):
+        redacted = pattern.sub("<path>", redacted)
+    return redacted
+
+
+def sanitize_public_diagnostic(text: str) -> str:
+    """Return complete UTF-8-safe diagnostic text without paths or secrets."""
+    if not text:
+        return ""
+    # Diagnostic logs are downloadable in full, so credential redaction must
+    # not apply the generic projection's 32 KiB truncation.
+    redacted = redact_text(text, max_length=max(1, len(text)))
+    redacted = _DIAGNOSTIC_CREDENTIAL_RE.sub(
+        lambda match: f"{match.group('prefix')}[REDACTED]",
+        redacted,
+    )
+    return _redact_host_paths(redacted)
 
 
 def failure_for_render_result(
@@ -412,10 +458,16 @@ def failure_for_render_result(
 ) -> RenderFailure:
     """Map an executor result to one stable public failure."""
     if result.failure is not None:
+        fallback = result.failure.summary or "Video rendering failed"
         return RenderFailure(
             error_code=result.failure.error_code,
-            summary=result.failure.summary,
-            traceback_tail=result.failure.traceback_tail,
+            summary=safe_failure_summary(
+                result.failure.summary,
+                fallback=fallback,
+            ),
+            traceback_tail=tail_lines(
+                "\n".join(result.failure.traceback_tail),
+            ),
             log_artifact_key=(
                 log_artifact_key or result.failure.log_artifact_key
             ),
@@ -453,6 +505,7 @@ __all__ = [
     "RenderFailure",
     "RenderStatus",
     "failure_for_render_result",
+    "sanitize_public_diagnostic",
     "safe_failure_summary",
     "tail_lines",
 ]

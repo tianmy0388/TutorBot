@@ -44,7 +44,7 @@ class _FakeRenderService:
         self.video_path = video_path
         self.calls: list[tuple[str, str]] = []
 
-    async def render(self, *, code: str, scene_class: str):  # type: ignore[no-untyped-def]
+    async def render(self, *, code: str, scene_class: str, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append((code, scene_class))
         if self.delay > 0:
             await asyncio.sleep(self.delay)
@@ -63,7 +63,7 @@ class _FakeRenderService:
 
 
 class _PerSceneRenderService:
-    async def render(self, *, code: str, scene_class: str):  # type: ignore[no-untyped-def]
+    async def render(self, *, code: str, scene_class: str, **kwargs):  # type: ignore[no-untyped-def]
         return await _FakeRenderService(success=scene_class == "ReadyScene").render(
             code=code,
             scene_class=scene_class,
@@ -78,7 +78,7 @@ class _LeaseRaceRenderService:
         self.release_first = asyncio.Event()
         self.calls = 0
 
-    async def render(self, *, code: str, scene_class: str):  # type: ignore[no-untyped-def]
+    async def render(self, *, code: str, scene_class: str, **kwargs):  # type: ignore[no-untyped-def]
         self.calls += 1
         call = self.calls
         if call == 1:
@@ -238,7 +238,7 @@ async def test_durable_video_child_updates_package_and_terminal_job(
     if not render_success:
         assert (
             reloaded.resources[0].format_specific["render_error_code"]
-            == "VIDEO_RENDER_FAILED"
+            == "internal_error"
         )
     assert durable_parent is not None
     assert durable_parent.status == JobStatus.SUCCEEDED
@@ -726,8 +726,11 @@ async def test_render_failure_emits_resource_event_with_failed_status() -> None:
     md = evt.metadata
     payload = md["resource"]
     assert payload["format_specific"]["render_status"] == "failed"
-    assert payload["format_specific"]["render_error_code"] == "VIDEO_RENDER_FAILED"
-    assert payload["format_specific"]["render_error"] == "Video rendering failed"
+    assert payload["format_specific"]["render_error_code"] == "internal_error"
+    assert (
+        payload["format_specific"]["render_error"]
+        == "Video rendering failed internally"
+    )
     assert "manim exit 1" not in str(payload)
 
 

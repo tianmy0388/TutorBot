@@ -230,6 +230,40 @@ def test_internal_failure_projection_does_not_expose_exception_internals():
     assert "private-value" not in str(failure.to_dict())
 
 
+def test_public_tail_redacts_spaced_unc_posix_file_uri_and_credentials():
+    diagnostics = "\n".join(
+        (
+            '  File "C:\\Program Files\\Tutor Bot\\scene.py", line 2',
+            '  File "\\\\render-host\\private share\\scene.py", line 3',
+            '  File "/opt/private project/scene.py", line 4',
+            '  File "file:///C:/Users/Alice/secret scene.py", line 5',
+            "api_key=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+            "provider-token=private-value",
+            "ValueError: 颜色无效 Ω",
+        )
+    )
+    result = ManimRenderResult(
+        status=RenderStatus.FAILED,
+        exit_code=1,
+        error_message="manim process failed",
+        stderr=diagnostics,
+    )
+
+    failure = failure_for_render_result(result)
+
+    projection = "\n".join(failure.traceback_tail)
+    for forbidden in (
+        "C:\\Program Files",
+        "render-host",
+        "/opt/private project",
+        "file:///C:/Users",
+        "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+        "private-value",
+    ):
+        assert forbidden not in projection
+    assert "ValueError: 颜色无效 Ω" in projection
+
+
 # ---------------------------------------------------------------------------
 # Real manim rendering
 # ---------------------------------------------------------------------------

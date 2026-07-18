@@ -170,3 +170,107 @@ git diff --check
 - API/resource projections contain artifact keys/URLs rather than host paths; structured tails and summaries are redacted and internal exceptions are generic.
 - Concern: the repository-wide TypeScript check is still non-zero solely because of the pre-existing unrelated files listed above. Task 12 focused frontend tests and Task 12 TypeScript files are clean.
 - Concern: pytest reports existing `pytest_asyncio` fixture and Starlette/httpx deprecation warnings; no Task 12 failure is hidden by them.
+
+## Fix wave 1 — review findings
+
+### Retry completion race and ready-resource guard
+
+RED command:
+
+```powershell
+$env:PYTHONPATH='backend'
+& 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/api/test_video_render_retry.py -k "completion_race or rejects_ready" -q
+```
+
+- Result: `2 failed, 2 deselected`.
+- Expected failures: the completion race returned stale `status='pending'` instead of `succeeded` and overwrote the terminal resource; a ready video returned HTTP 200 instead of 409.
+
+GREEN with child-active serialization, retry revision tagging, and the ready guard: `2 passed, 2 deselected` in 9.88s. The full retry API file then passed `4 passed` in 10.69s, preserving repeated-click active-child idempotency.
+
+### Frontend retry lifecycle reconciliation
+
+RED command:
+
+```powershell
+npm test -- --run components/resources/VideoViewer.test.tsx -t "reconciles a new retry revision"
+```
+
+- Result: `1 failed, 6 skipped`.
+- Expected failure: after a successful retry response, the viewer continued to render the old child failure (`旧渲染失败`) because neither the new child nor the current resource snapshot was reconciled into the canonical store.
+
+GREEN added typed retry snapshots, immutable historical-child preservation, current-revision child selection, parent-detail polling, and terminal package refresh. The focused regression passed `1 passed, 6 skipped`; the complete focused frontend set then passed `3 files, 17 tests` after the pending-state banner retained the queue feedback.
+
+### Public diagnostics and downloadable render logs
+
+RED command:
+
+```powershell
+$env:PYTHONPATH='backend'
+& 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/services/manim_render/test_executor.py::test_public_tail_redacts_spaced_unc_posix_file_uri_and_credentials backend/tests/api/test_resources_artifact_endpoint.py::test_downloadable_render_log_is_complete_sanitized_utf8 -q
+```
+
+- Result: `2 failed`.
+- Expected failures: the public tail leaked UNC/POSIX paths and short provider credentials, while the downloadable artifact exposed raw paths and credentials and had no separate operator-only copy.
+
+GREEN added one complete public-diagnostic sanitizer for quoted/spaced drive, UNC, POSIX, and file-URI paths plus strict diagnostic credential assignments. Raw UTF-8 streams now live only under `operator_logs/manim`; the downloadable artifact is a full, non-truncated sanitized copy. Result: `2 passed` in 7.99s.
+
+### Keyword and sound asset discovery
+
+RED command:
+
+```powershell
+$env:PYTHONPATH='backend'
+& 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/services/manim_render/test_static_guard.py -k "keyword_and_sound" -q
+```
+
+- Result: `3 failed, 2 passed, 15 deselected`.
+- Expected failures: keyword-only `ImageMobject`/`SVGMobject` references were omitted, and positional/qualified `add_sound` expressions were ignored instead of classified as external or dynamic assets.
+
+GREEN uses source-position-ordered AST calls and per-API positional/keyword argument specifications for direct and qualified `SVGMobject`, `ImageMobject`, and `add_sound` forms. Literal references retain containment/existence validation; non-literals fail closed. Result: `5 passed, 15 deselected` in 8.42s.
+
+### Missing-code and unexpected-internal terminal failures
+
+After correcting a test-fixture-only directory setup mistake, the valid RED command was:
+
+```powershell
+$env:PYTHONPATH='backend'
+& 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/services/jobs/test_video_render_follow_up.py -k "missing_code_child or internal_exception_child" -q
+```
+
+- Result: `2 failed, 4 deselected`.
+- Expected failures: both persisted failed resources lacked the durable `render_job_id`; the missing-code path had no structured failure/log, and the unexpected-exception path had an empty tail/log projection.
+
+GREEN routes both branches through one safe structured-failure writer, creates a public render-log manifest before the durable child terminal event, and stores full unexpected exception details only in the operator log. Result: `2 passed, 4 deselected` in 9.50s.
+
+### Integration correction
+
+The first exact backend integration run found `7 failed, 77 passed`: legacy capability fakes did not accept the already-established durable `job_id` render argument, so success fixtures entered the new internal-exception branch; two assertions also expected the obsolete unstructured `VIDEO_RENDER_FAILED` code. Updating only those fixtures/assertions made the complete capability file pass `14 passed` in 12.44s.
+
+### Fix-wave integration verification
+
+The exact required backend command passed `84 passed` in 62.85s:
+
+```powershell
+$env:PYTHONPATH='backend'
+& 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/services/manim_render backend/tests/services/jobs/test_video_render_follow_up.py backend/tests/api/test_video_render_retry.py backend/tests/capabilities/test_video_render_fire_and_forget.py backend/tests/agents/resource/test_manim_video_inline_resource.py -q
+```
+
+The review note's literal frontend command combines `npm --prefix frontend` with paths already prefixed by `frontend/`, so Vitest correctly reported no matching files from its `frontend/` root. The repository-equivalent command passed `3 files, 17 tests` in 9.17s:
+
+```powershell
+npm --prefix frontend test -- --run components/resources/VideoViewer.test.tsx lib/api.test.ts lib/store.test.ts
+```
+
+- Focused Ruff initially found one import-order issue in `service.py`; Ruff's mechanical import fix was applied, and the complete changed-backend/test path set then reported `All checks passed!`.
+- `npm --prefix frontend run type-check` remains non-zero only for the same pre-existing unrelated files listed above; no Task 12 file appears in the output.
+- The complete public resource artifact endpoint file passed `10 passed` in 10.16s.
+- The explicit real-Manim service pipeline plus durable child pair passed `2 passed` in 23.89s. The durable missing-SVG preflight plus real child pairing also passed `2 passed, 4 deselected` in 16.01s.
+- `git diff --check` passed; Git emitted only the repository's LF-to-CRLF working-copy notices.
+
+Final privacy self-review found one defense-in-depth gap: a tampered historical resource manifest could point directly at `operator_logs/` even though Task 12 itself never emits such a manifest. The regression was RED at `1 failed` (HTTP 200), then GREEN at `1 passed` in 3.13s after the artifact resolver made the operator subtree categorically non-public.
+
+The same review injected a raw credential and spaced drive path into a child that terminalized during the retry race. RED was `1 failed` because the retry snapshot echoed `child.error`; after routing that field through the public diagnostic sanitizer, the retry privacy regression and operator-subtree regression passed together: `2 passed` in 9.67s.
+
+The final retry review strengthened repeated-click idempotency to cover scheduler wakeups as well as child creation. RED showed two `resume_pending` awaits for one active revision; the reset now recognizes an already-tagged pending/rendering revision, and the complete retry API file passed `4 passed` in 10.70s with exactly one wakeup.
+
+Final post-review evidence: the exact required backend command passed `84 passed` in 64.96s; the complete artifact endpoint file passed `11 passed` in 9.99s; and the repository-corrected focused frontend command passed `3 files, 17 tests` in 8.45s.

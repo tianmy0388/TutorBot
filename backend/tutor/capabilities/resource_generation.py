@@ -27,6 +27,7 @@ the whole generation. The package will simply have one fewer resource.
 from __future__ import annotations
 
 import asyncio
+import traceback
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -1097,17 +1098,35 @@ class ResourceGenerationCapability(BaseCapability):
         placeholder for a real video player.
         """
         try:
+            from tutor.services.manim_render.executor import RenderFailure
             from tutor.services.manim_render.service import (
+                ManimRenderService,
                 get_manim_render_service,
             )
 
-            manim_service = get_manim_render_service()
+            if context.job_id:
+                res.format_specific["render_job_id"] = context.job_id
             code = (res.format_specific or {}).get("manim_code", "")
             scene = (res.format_specific or {}).get("scene_class", "GeneratedScene")
             if not code:
-                res.format_specific["render_status"] = "failed"
-                res.format_specific["render_error"] = "no manim_code in resource"
+                message = "Manim source code is missing"
+                log_key = ManimRenderService._write_log_artifact(
+                    context.job_id or res.resource_id,
+                    attempt_label="missing-code",
+                    stdout="",
+                    stderr=message,
+                )
+                self._apply_video_failure(
+                    res,
+                    RenderFailure(
+                        error_code="missing_manim_code",
+                        summary=message,
+                        traceback_tail=(message,),
+                        log_artifact_key=log_key,
+                    ),
+                )
             else:
+                manim_service = get_manim_render_service()
                 render_result = await manim_service.render(
                     code=code,
                     scene_class=scene,
@@ -1143,32 +1162,29 @@ class ResourceGenerationCapability(BaseCapability):
                         render_result.duration_seconds
                     )
                 if not render_result.success:
-                    failure = render_result.failure
+                    failure = getattr(render_result, "failure", None)
                     if failure is not None:
-                        res.format_specific["render_failure"] = failure.to_dict()
-                        res.format_specific["render_error_code"] = failure.error_code
-                        res.format_specific["render_error"] = failure.summary
-                        if failure.log_artifact_key:
-                            log_name = failure.log_artifact_key.rsplit("/", 1)[-1]
-                            artifacts = [
-                                item
-                                for item in (res.format_specific.get("artifacts") or [])
-                                if not (
-                                    isinstance(item, dict)
-                                    and item.get("kind") == "render_log"
-                                )
-                            ]
-                            artifacts.append(
-                                {
-                                    "name": log_name,
-                                    "kind": "render_log",
-                                    "artifact_key": failure.log_artifact_key,
-                                }
-                            )
-                            res.format_specific["artifacts"] = artifacts
+                        self._apply_video_failure(res, failure)
                     else:
-                        res.format_specific["render_error_code"] = "internal_error"
-                        res.format_specific["render_error"] = "Video rendering failed"
+                        message = "Video rendering failed internally"
+                        log_key = ManimRenderService._write_log_artifact(
+                            context.job_id or res.resource_id,
+                            attempt_label="internal-error",
+                            stdout="",
+                            stderr=message,
+                            operator_stderr=str(
+                                getattr(render_result, "error", "") or message
+                            ),
+                        )
+                        self._apply_video_failure(
+                            res,
+                            RenderFailure(
+                                error_code="internal_error",
+                                summary=message,
+                                traceback_tail=(message,),
+                                log_artifact_key=log_key,
+                            ),
+                        )
                 else:
                     for key in (
                         "render_failure",
@@ -1190,15 +1206,28 @@ class ResourceGenerationCapability(BaseCapability):
                     },
                 )
         except Exception:  # noqa: BLE001
-            res.format_specific["render_status"] = "failed"
-            res.format_specific["render_error_code"] = "internal_error"
-            res.format_specific["render_error"] = "Video rendering failed"
-            res.format_specific["render_failure"] = {
-                "error_code": "internal_error",
-                "summary": "Video rendering failed internally",
-                "traceback_tail": [],
-                "log_artifact_key": "",
-            }
+            from tutor.services.manim_render.executor import RenderFailure
+            from tutor.services.manim_render.service import ManimRenderService
+
+            message = "Video rendering failed internally"
+            log_key = ManimRenderService._write_log_artifact(
+                context.job_id or res.resource_id,
+                attempt_label="internal-error",
+                stdout="",
+                stderr=message,
+                operator_stderr=traceback.format_exc(),
+            )
+            if context.job_id:
+                res.format_specific["render_job_id"] = context.job_id
+            self._apply_video_failure(
+                res,
+                RenderFailure(
+                    error_code="internal_error",
+                    summary=message,
+                    traceback_tail=(message,),
+                    log_artifact_key=log_key,
+                ),
+            )
             await report_degraded(
                 stream,
                 code="VIDEO_RENDER_FAILED",
@@ -1219,6 +1248,7 @@ class ResourceGenerationCapability(BaseCapability):
                         source="resource_capability",
                         stage="video_rendering",
                     )
+
                 except Exception:  # noqa: BLE001
                     log_degraded(
                         code="RESOURCE_STREAM_EMIT_FAILED",
@@ -1236,6 +1266,57 @@ class ResourceGenerationCapability(BaseCapability):
                         source="resource_capability",
                         stage="video_rendering",
                     )
+
+    @staticmethod
+    def _apply_video_failure(res: Resource, failure: Any) -> None:
+        """Persist one safe, structured terminal failure plus its log."""
+        from tutor.services.manim_render.executor import (
+            RenderFailure,
+            safe_failure_summary,
+            tail_lines,
+        )
+
+        error_code = str(getattr(failure, "error_code", "") or "internal_error")
+        if not all(
+            character.isalnum() or character == "_" for character in error_code
+        ):
+            error_code = "internal_error"
+        fallback = "Video rendering failed internally"
+        summary = safe_failure_summary(
+            str(getattr(failure, "summary", "") or fallback),
+            fallback=fallback,
+        )
+        diagnostic_tail = tail_lines(
+            "\n".join(str(line) for line in getattr(failure, "traceback_tail", ()))
+        ) or (summary,)
+        log_artifact_key = str(getattr(failure, "log_artifact_key", "") or "")
+        public_failure = RenderFailure(
+            error_code=error_code,
+            summary=summary,
+            traceback_tail=diagnostic_tail,
+            log_artifact_key=log_artifact_key,
+        )
+        res.format_specific["render_status"] = "failed"
+        res.format_specific["render_failure"] = public_failure.to_dict()
+        res.format_specific["render_error_code"] = error_code
+        res.format_specific["render_error"] = summary
+        if log_artifact_key:
+            log_name = log_artifact_key.rsplit("/", 1)[-1]
+            artifacts = [
+                item
+                for item in (res.format_specific.get("artifacts") or [])
+                if not (
+                    isinstance(item, dict) and item.get("kind") == "render_log"
+                )
+            ]
+            artifacts.append(
+                {
+                    "name": log_name,
+                    "kind": "render_log",
+                    "artifact_key": log_artifact_key,
+                }
+            )
+            res.format_specific["artifacts"] = artifacts
 
     # ------------------------------------------------------------------
     # Resource planning

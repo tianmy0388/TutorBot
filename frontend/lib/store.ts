@@ -24,6 +24,7 @@ import type {
   StrategyDecision,
   TutoringAnswer,
   EnrichmentSuggestion,
+  VideoRetryResponse,
 } from "./types";
 import type { RecoveryWarning } from "./api";
 import { createJobState, reduceJobEvent, type JobsState } from "./job-reducer";
@@ -224,6 +225,8 @@ export interface TutorState {
     children?: import("./types").JobChildSummary[];
     background_status?: import("./types").JobStatus | null;
   }) => void;
+  /** Reconcile a durable video retry without reopening historical children. */
+  reconcileVideoRetry: (snapshot: VideoRetryResponse) => void;
 }
 
 const newActiveTurn = (): ActiveTurn => ({
@@ -745,6 +748,50 @@ export const useTutorStore = create<TutorState>()(
           jobsById: next.jobsById,
           jobOrder: next.jobOrder,
           messages: next.messages,
+        };
+      }),
+    reconcileVideoRetry: (snapshot) =>
+      set((state) => {
+        const existingParent = state.jobsById[snapshot.parent_job_id];
+        const baseParent =
+          existingParent ??
+          createJobState(
+            snapshot.parent_job_id,
+            "resource_generation",
+            [],
+          ).jobsById[snapshot.parent_job_id];
+        const children = [
+          ...(baseParent.children ?? []).filter(
+            (child) => child.job_id !== snapshot.child.job_id,
+          ),
+          snapshot.child,
+        ];
+        const parent = {
+          ...baseParent,
+          status: existingParent?.status ?? ("succeeded" as const),
+          children,
+          background_status: snapshot.child.status,
+        };
+        const latestPackage =
+          state.latestPackage?.package_id === snapshot.package_id
+            ? {
+                ...state.latestPackage,
+                resources: state.latestPackage.resources.map((resource) =>
+                  resource.resource_id === snapshot.resource_id
+                    ? snapshot.resource
+                    : resource,
+                ),
+              }
+            : state.latestPackage;
+        return {
+          jobsById: {
+            ...state.jobsById,
+            [snapshot.parent_job_id]: parent,
+          },
+          jobOrder: state.jobOrder.includes(snapshot.parent_job_id)
+            ? state.jobOrder
+            : [snapshot.parent_job_id, ...state.jobOrder],
+          latestPackage,
         };
       }),
   })),

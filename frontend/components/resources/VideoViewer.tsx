@@ -11,7 +11,7 @@
  *  - Scene class + duration metadata
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Play,
   Code2,
@@ -27,30 +27,55 @@ import {
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import type { Resource } from "@/lib/types";
-import { retryVideoRender } from "@/lib/api";
+import {
+  getJobDetail,
+  getResourcePackageDetail,
+  retryVideoRender,
+} from "@/lib/api";
 import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
 export function VideoViewer({ resource }: { resource: Resource }) {
+  const latestPackage = useTutorStore((state) => state.latestPackage);
+  const canonicalResource =
+    latestPackage?.resources.find(
+      (candidate) => candidate.resource_id === resource.resource_id,
+    ) ?? resource;
+  const canonicalPackageId =
+    typeof canonicalResource.metadata?.package_id === "string"
+      ? canonicalResource.metadata.package_id
+      : "";
+  const canonicalRenderJobId =
+    typeof canonicalResource.format_specific?.render_job_id === "string"
+      ? canonicalResource.format_specific.render_job_id
+      : "";
   const child = useTutorStore((state) =>
     Object.values(state.jobsById)
       .flatMap((job) => job.children ?? [])
       .filter(
         (candidate) =>
           candidate.task_kind === "video_render" &&
-          (candidate.metadata?.resource_id === resource.resource_id ||
-            candidate.dedupe_key?.endsWith(`:${resource.resource_id}`)),
+          (candidate.metadata?.resource_id === canonicalResource.resource_id ||
+            candidate.dedupe_key?.endsWith(`:${canonicalResource.resource_id}`)) &&
+          (!canonicalRenderJobId || candidate.job_id === canonicalRenderJobId),
       )
       .at(-1),
   );
   const userId = useTutorStore((state) => state.userId);
+  const reconcileVideoRetry = useTutorStore(
+    (state) => state.reconcileVideoRetry,
+  );
+  const rehydrateJobFromDetail = useTutorStore(
+    (state) => state.rehydrateJobFromDetail,
+  );
+  const setLatestPackage = useTutorStore((state) => state.setLatestPackage);
   // **2026-07-08 fix (fdb26152 regression):** ``resource.format_specific``
   // can be undefined for partial resources (e.g. the placeholder
   // cards emitted via ``contract.partial_artifacts`` on a FAILED
   // contract). The previous code did a non-null cast and crashed at
   // ``formatSpec.video_url``. Default to an empty object so all the
   // optional-chain reads below stay safe.
-  const formatSpec = (resource.format_specific ?? {}) as {
+  const formatSpec = (canonicalResource.format_specific ?? {}) as {
     video_url?: string;
     manim_code?: string;
     scene_class?: string;
@@ -72,6 +97,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     concept?: string;
     fps?: number;
     resolution?: string;
+    render_job_id?: string;
   };
 
   const [showCode, setShowCode] = useState(false);
@@ -85,6 +111,11 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState("");
   const [retryQueued, setRetryQueued] = useState(false);
+  const [retryTracking, setRetryTracking] = useState<{
+    jobId: string;
+    parentJobId: string;
+    packageId: string;
+  } | null>(null);
 
   const isReady = !!formatSpec.video_url && !videoLoadFailed;
   // When ``formatSpec.video_url`` is set but the network failed we
@@ -135,14 +166,66 @@ export function VideoViewer({ resource }: { resource: Resource }) {
       (!!failure?.log_artifact_key &&
         artifact.artifact_key === failure.log_artifact_key),
   );
-  const packageId =
-    typeof resource.metadata?.package_id === "string"
-      ? resource.metadata.package_id
-      : "";
+  const packageId = canonicalPackageId;
   const logUrl = logArtifact?.name
     ? `/api/v1/resources/packages/${encodeURIComponent(userId)}/${encodeURIComponent(packageId)}`
-      + `/resources/${encodeURIComponent(resource.resource_id)}/artifacts/${encodeURIComponent(logArtifact.name)}`
+      + `/resources/${encodeURIComponent(canonicalResource.resource_id)}/artifacts/${encodeURIComponent(logArtifact.name)}`
     : "";
+
+  useEffect(() => {
+    if (!retryTracking) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const track = async () => {
+      try {
+        while (!cancelled) {
+          const detail = await getJobDetail(userId, retryTracking.parentJobId);
+          if (cancelled) return;
+          rehydrateJobFromDetail(detail);
+          const current = detail.children?.find(
+            (candidate) => candidate.job_id === retryTracking.jobId,
+          );
+          if (
+            current &&
+            ["succeeded", "partial", "failed", "cancelled"].includes(
+              current.status,
+            )
+          ) {
+            const persisted = await getResourcePackageDetail(
+              userId,
+              retryTracking.packageId,
+            );
+            if (!cancelled) {
+              setLatestPackage(persisted);
+              setRetryQueued(false);
+              setRetryTracking(null);
+            }
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, 1_000);
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRetryError(
+            error instanceof Error ? error.message : "重试状态刷新失败",
+          );
+        }
+      }
+    };
+    void track();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [
+    rehydrateJobFromDetail,
+    retryTracking,
+    setLatestPackage,
+    userId,
+  ]);
 
   const retry = async () => {
     if (!packageId || retrying) return;
@@ -150,8 +233,18 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     setRetryError("");
     setRetryQueued(false);
     try {
-      await retryVideoRender(userId, packageId, resource.resource_id);
+      const snapshot = await retryVideoRender(
+        userId,
+        packageId,
+        canonicalResource.resource_id,
+      );
+      reconcileVideoRetry(snapshot);
       setRetryQueued(true);
+      setRetryTracking({
+        jobId: snapshot.job_id,
+        parentJobId: snapshot.parent_job_id,
+        packageId: snapshot.package_id,
+      });
     } catch (error) {
       setRetryError(error instanceof Error ? error.message : "重试请求失败");
     } finally {
@@ -223,6 +316,9 @@ export function VideoViewer({ resource }: { resource: Resource }) {
               ? "正在执行 Manim 渲染任务"
               : "任务已排队 — 通常 30 秒内完成"}
           </div>
+          {retryQueued && (
+            <div className="mt-2 text-xs text-green-300">重试任务已排队</div>
+          )}
           <div className="mt-3 h-1 bg-bg-panel rounded-full overflow-hidden max-w-xs mx-auto">
             <div className="h-full bg-gradient-to-r from-pink-500 to-pink-400 animate-pulse w-2/3" />
           </div>

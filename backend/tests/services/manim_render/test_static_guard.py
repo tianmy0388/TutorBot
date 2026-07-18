@@ -184,3 +184,55 @@ class MainScene(Scene):
     assert result.passed is False
     assert result.external_assets == ()
     assert result.error_code == "dynamic_external_asset"
+
+
+def test_keyword_and_sound_assets_preserve_source_order_and_report_missing(
+    tmp_path,
+):
+    (tmp_path / "photo.png").write_bytes(b"png")
+    (tmp_path / "diagram.svg").write_text("<svg/>", encoding="utf-8")
+    code = '''
+import manim
+from manim import *
+class MainScene(manim.Scene):
+    def construct(self):
+        self.add(manim.ImageMobject(filename_or_array="photo.png"))
+        self.add(SVGMobject(file_name="diagram.svg"))
+        self.add_sound("audio/theme.wav")
+'''
+
+    result = StaticGuard().check(code, workdir=tmp_path)
+
+    assert not result.passed
+    assert result.external_assets == (
+        "photo.png",
+        "diagram.svg",
+        "audio/theme.wav",
+    )
+    assert result.error_code == "missing_external_asset"
+
+
+@pytest.mark.parametrize(
+    "asset_call",
+    (
+        "SVGMobject(file_name=asset_name)",
+        "manim.ImageMobject(filename_or_array=asset_name)",
+        "self.add_sound(asset_name)",
+        "manim.Scene.add_sound(self, sound_file=asset_name)",
+    ),
+)
+def test_keyword_and_sound_dynamic_asset_expressions_fail(tmp_path, asset_call):
+    code = f'''
+import manim
+from manim import *
+class MainScene(manim.Scene):
+    def construct(self):
+        asset_name = "invented.asset"
+        {asset_call}
+'''
+
+    result = StaticGuard().check(code, workdir=tmp_path)
+
+    assert not result.passed
+    assert result.external_assets == ()
+    assert result.error_code == "dynamic_external_asset"

@@ -37,6 +37,7 @@ import type {
   RuntimeConfig,
   StrategyDecision,
   WebSearchSectionPatch,
+  VideoRetryResponse,
 } from "./types";
 
 const API_BASE =
@@ -476,13 +477,7 @@ export const retryVideoRender = (
   packageId: string,
   resourceId: string,
 ) =>
-  request<{
-    job_id: string;
-    parent_job_id: string;
-    package_id: string;
-    resource_id: string;
-    status: string;
-  }>(
+  request<VideoRetryResponse>(
     `/resources/packages/${encodeURIComponent(userId)}/${encodeURIComponent(packageId)}`
       + `/resources/${encodeURIComponent(resourceId)}/retry-video`,
     { method: "POST" },

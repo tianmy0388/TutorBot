@@ -37,6 +37,7 @@ from tutor.services.config.settings import get_settings
 from tutor.services.identity import identity_policy_for
 from tutor.services.jobs.follow_up import FollowUpScheduler
 from tutor.services.jobs.schema import JobStatus
+from tutor.services.manim_render.executor import sanitize_public_diagnostic
 from tutor.services.resource_package.schema import (
     Resource,
     ResourceType,
@@ -275,6 +276,11 @@ async def retry_video_render(
         ),
         None,
     )
+    render_status = str((resource.format_specific or {}).get("render_status") or "")
+    if render_status == "ready":
+        raise HTTPException(status_code=409, detail="ready video cannot be retried")
+    if child is None and render_status != "failed":
+        raise HTTPException(status_code=409, detail="video is not retryable")
     if child is None:
         revision = len(matching) + 1
         child = (
@@ -296,33 +302,77 @@ async def retry_video_render(
             )
         )[0]
 
-    # Durable child creation is the commit point. Only then reopen the resource.
-    resource.format_specific["render_status"] = "pending"
-    for key in (
-        "render_failure",
-        "render_error_code",
-        "render_error",
-        "video_url",
-        "artifact_key",
-    ):
-        resource.format_specific.pop(key, None)
-    resource.format_specific["artifacts"] = [
-        item
-        for item in (resource.format_specific.get("artifacts") or [])
-        if not (isinstance(item, dict) and item.get("kind") == "render_log")
-    ]
-    await package_store.update_resource(
-        package_id,
-        resource,
-        user_id=parent.user_id,
-    )
-    await runner.resume_pending()
+    # Durable child creation is the commit point. Serialize the resource reset
+    # with child terminalization, and never overwrite a terminal write from the
+    # same retry revision during the claim->terminal handoff window.
+    reset_applied = False
+
+    async def reset_resource() -> None:
+        nonlocal reset_applied
+        current = await package_store.get_resource(resource_id)
+        if current is None:
+            return
+        current_format = current.format_specific or {}
+        if (
+            current_format.get("render_job_id") == child.job_id
+            and current_format.get("render_status")
+            in {"pending", "rendering", "ready", "failed"}
+        ):
+            return
+        current.format_specific["render_status"] = "pending"
+        current.format_specific["render_job_id"] = child.job_id
+        for key in (
+            "render_failure",
+            "render_error_code",
+            "render_error",
+            "video_url",
+            "artifact_key",
+        ):
+            current.format_specific.pop(key, None)
+        current.format_specific["artifacts"] = [
+            item
+            for item in (current.format_specific.get("artifacts") or [])
+            if not (isinstance(item, dict) and item.get("kind") == "render_log")
+        ]
+        await package_store.update_resource(
+            package_id,
+            current,
+            user_id=parent.user_id,
+        )
+        reset_applied = True
+
+    await job_store.run_if_child_active(child.job_id, operation=reset_resource)
+    current_child = await job_store.get(child.job_id) or child
+    if reset_applied and current_child.status in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+    }:
+        await runner.resume_pending()
+    current_resource = await package_store.get_resource(resource_id) or resource
     return {
-        "job_id": child.job_id,
+        "job_id": current_child.job_id,
         "parent_job_id": parent.job_id,
         "package_id": package_id,
         "resource_id": resource_id,
-        "status": child.status.value,
+        "status": current_child.status.value,
+        "child": {
+            "job_id": current_child.job_id,
+            "capability": current_child.capability,
+            "status": current_child.status.value,
+            "parent_job_id": current_child.parent_job_id,
+            "task_kind": current_child.task_kind,
+            "dedupe_key": current_child.dedupe_key,
+            "metadata": {
+                "package_id": package_id,
+                "resource_id": resource_id,
+            },
+            "error": (
+                sanitize_public_diagnostic(str(current_child.error))
+                if current_child.error
+                else None
+            ),
+        },
+        "resource": current_resource.model_dump(mode="json"),
     }
 
 
@@ -572,19 +622,27 @@ def _resolve_stored_artifact(raw: str, *, is_key: bool) -> Path:
     data_dir = get_settings().data_dir
     try:
         if is_key:
-            return resolve_artifact_key(raw, data_dir)
-        legacy = Path(raw)
-        key = (
-            to_artifact_key(legacy, data_dir)
-            if legacy.is_absolute()
-            else raw.replace("\\", "/")
-        )
-        return resolve_artifact_key(key, data_dir)
+            resolved = resolve_artifact_key(raw, data_dir)
+        else:
+            legacy = Path(raw)
+            key = (
+                to_artifact_key(legacy, data_dir)
+                if legacy.is_absolute()
+                else raw.replace("\\", "/")
+            )
+            resolved = resolve_artifact_key(key, data_dir)
     except UnsafeArtifactKey:
         raise HTTPException(
             status_code=403,
             detail="artifact path is outside the data directory",
         ) from None
+    relative = resolved.resolve().relative_to(data_dir.resolve())
+    if relative.parts and relative.parts[0].casefold() == "operator_logs":
+        raise HTTPException(
+            status_code=403,
+            detail="operator artifacts are not publicly accessible",
+        )
+    return resolved
 
 
 def _safe_filename(name: str) -> str:

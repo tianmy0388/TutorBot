@@ -287,26 +287,48 @@ class StaticGuard:
         workdir: Path | None,
     ) -> tuple[tuple[str, ...], bool, tuple[str, ...]]:
         """Collect literal Manim assets and reject dynamic/unsafe references."""
-        constructors = {"SVGMobject", "ImageMobject"}
+        asset_arguments = {
+            "SVGMobject": (0, {"file_name", "filename"}),
+            "ImageMobject": (
+                0,
+                {"filename_or_array", "image_data_or_file", "file_name"},
+            ),
+            "add_sound": (0, {"sound_file", "file_name", "filename"}),
+        }
         ordered: list[str] = []
         seen: set[str] = set()
         dynamic = False
         unavailable: list[str] = []
         root = Path(workdir).resolve() if workdir is not None else None
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
+        calls = sorted(
+            (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        for node in calls:
             call_name = self._call_name(node.func)
-            if call_name.rsplit(".", 1)[-1] not in constructors:
+            short_name = call_name.rsplit(".", 1)[-1]
+            specification = asset_arguments.get(short_name)
+            if specification is None:
                 continue
-            if not node.args or not (
-                isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
+            positional_index, keyword_names = specification
+            value_node = next(
+                (
+                    keyword.value
+                    for keyword in node.keywords
+                    if keyword.arg in keyword_names
+                ),
+                None,
+            )
+            if value_node is None and len(node.args) > positional_index:
+                value_node = node.args[positional_index]
+            if not (
+                isinstance(value_node, ast.Constant)
+                and isinstance(value_node.value, str)
             ):
                 dynamic = True
                 continue
-            reference = node.args[0].value
+            reference = value_node.value
             if reference not in seen:
                 seen.add(reference)
                 ordered.append(reference)

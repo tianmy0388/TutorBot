@@ -56,7 +56,7 @@ coder:
     - **必须**在 `construct()` 方法中实现所有场景
     - 使用 Manim CE 的内置类：`Text`, `MathTex`, `Axes`, `Circle`, `Square`, `Line`, `Arrow`, `Transform`, `FadeIn`, `FadeOut`, `Write`, `Create`, `Indicate` 等
     - 代码必须**自包含**，默认只使用原生 Manim 图元绘制所有视觉元素
-    - 除非资源包明确提供了对应资产，否则不得调用 `SVGMobject` 或 `ImageMobject` 引用外部文件
+    - 除非资源包明确提供了对应资产，否则不得调用 `SVGMobject`、`ImageMobject` 或 `add_sound` 引用外部文件
     - 不得虚构文件名（例如 `person.svg`、`diagram.png`）；没有随资源包提供的文件就必须改用原生 Manim 图元绘制
     - 用 `self.play()` 触发动画，`self.wait()` 停顿
     - 中文文本：`Text("你好", font="Noto Sans CJK SC")` 或简单 `Text("你好")`

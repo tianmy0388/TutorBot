@@ -45,6 +45,13 @@ class _FakeManimService:
         return self.result
 
 
+class _ExplodingManimService:
+    async def render(self, **kwargs):
+        raise RuntimeError(
+            'provider-token=private-value at "C:\\Program Files\\Tutor Bot\\scene.py"'
+        )
+
+
 async def _wait_terminal(store: JobStore, job_id: str) -> Job:
     for _ in range(12_000):
         job = await store.get(job_id)
@@ -163,6 +170,112 @@ async def test_failed_video_child_persists_structured_failure_and_terminal_event
     assert persisted.format_specific["render_error_code"] == "missing_external_asset"
     assert persisted.format_specific["render_error"] == failure.summary
     assert fake.calls == 1
+    await runner.shutdown()
+    await jobs.close()
+    await packages.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_code_child_persists_structured_failure_and_public_log(
+    tmp_path,
+    monkeypatch,
+):
+    from tutor.services.config.settings import get_settings
+
+    jobs, packages, child = await _fixture(tmp_path)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    resource = await packages.get_resource("video-1")
+    assert resource is not None
+    resource.format_specific["manim_code"] = ""
+    await packages.update_resource(
+        "package-video",
+        resource,
+        user_id="local-user",
+    )
+    fake = _FakeManimService(RenderedVideo(success=True, code=""))
+    monkeypatch.setattr(
+        "tutor.services.manim_render.service.get_manim_render_service",
+        lambda: fake,
+    )
+    runner = _runner(jobs, packages)
+
+    assert await runner.resume_pending() == 1
+    terminal = await _wait_terminal(jobs, child.job_id)
+    persisted = await packages.get_resource("video-1")
+
+    assert terminal.status == JobStatus.FAILED
+    assert sum(event.get("type") == "job_terminal" for event in terminal.events) == 1
+    assert persisted is not None
+    fields = persisted.format_specific
+    assert fields["render_status"] == "failed"
+    assert fields["render_job_id"] == child.job_id
+    assert fields["render_error_code"] == "missing_manim_code"
+    failure = fields["render_failure"]
+    assert failure["summary"] == "Manim source code is missing"
+    assert failure["traceback_tail"] == ["Manim source code is missing"]
+    assert failure["log_artifact_key"]
+    assert fields["artifacts"][-1]["artifact_key"] == failure["log_artifact_key"]
+    public_log = (data_dir / failure["log_artifact_key"]).read_text(
+        encoding="utf-8"
+    )
+    assert "Manim source code is missing" in public_log
+    assert fake.calls == 0
+    await runner.shutdown()
+    await jobs.close()
+    await packages.close()
+
+
+@pytest.mark.asyncio
+async def test_internal_exception_child_persists_generic_failure_and_public_log(
+    tmp_path,
+    monkeypatch,
+):
+    from tutor.services.config.settings import get_settings
+
+    jobs, packages, child = await _fixture(tmp_path)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    monkeypatch.setattr(
+        "tutor.services.manim_render.service.get_manim_render_service",
+        lambda: _ExplodingManimService(),
+    )
+    runner = _runner(jobs, packages)
+
+    assert await runner.resume_pending() == 1
+    terminal = await _wait_terminal(jobs, child.job_id)
+    persisted = await packages.get_resource("video-1")
+
+    assert terminal.status == JobStatus.FAILED
+    assert sum(event.get("type") == "job_terminal" for event in terminal.events) == 1
+    assert persisted is not None
+    fields = persisted.format_specific
+    assert fields["render_status"] == "failed"
+    assert fields["render_job_id"] == child.job_id
+    assert fields["render_error_code"] == "internal_error"
+    failure = fields["render_failure"]
+    assert failure["summary"] == "Video rendering failed internally"
+    assert failure["traceback_tail"] == ["Video rendering failed internally"]
+    assert failure["log_artifact_key"]
+    assert "private-value" not in str(fields)
+    assert "Program Files" not in str(fields)
+    public_log = (data_dir / failure["log_artifact_key"]).read_text(
+        encoding="utf-8"
+    )
+    assert "Video rendering failed internally" in public_log
+    assert "private-value" not in public_log
+    assert "Program Files" not in public_log
+    operator_log = (
+        data_dir
+        / "operator_logs"
+        / "manim"
+        / child.job_id
+        / "internal-error.log"
+    ).read_text(encoding="utf-8")
+    assert "private-value" in operator_log
+    assert "Program Files" in operator_log
     await runner.shutdown()
     await jobs.close()
     await packages.close()
