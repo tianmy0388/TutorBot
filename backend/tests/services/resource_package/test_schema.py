@@ -189,6 +189,67 @@ def test_video_resource_accepts_structured_render_failure_and_log_manifest():
     assert v.artifacts[0].kind == "render_log"
 
 
+@pytest.mark.parametrize(
+    ("render_status", "state_fields"),
+    (
+        ("pending", {}),
+        (
+            "ready",
+            {
+                "video_url": "/static/manim/MainScene.mp4",
+                "artifact_key": "manim_videos/MainScene.mp4",
+            },
+        ),
+        (
+            "failed",
+            {
+                "render_error_code": "process_exit",
+                "render_error": "Manim exited before producing a video",
+            },
+        ),
+    ),
+)
+def test_video_render_job_id_round_trips_through_strict_schema(
+    render_status,
+    state_fields,
+):
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="durable video",
+        format_specific={
+            "manim_code": "from manim import *",
+            "scene_class": "MainScene",
+            "render_status": render_status,
+            "render_job_id": f"child-{render_status}",
+            **state_fields,
+        },
+    )
+
+    reloaded = Resource.model_validate(resource.model_dump(mode="json"))
+    parsed = reloaded.parsed_format_specific()
+
+    assert isinstance(parsed, VideoResource)
+    assert parsed.render_job_id == f"child-{render_status}"
+    assert parsed.model_dump()["render_job_id"] == f"child-{render_status}"
+
+
+def test_legacy_video_without_render_job_id_still_parses():
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="legacy video",
+        format_specific={
+            "manim_code": "from manim import *",
+            "render_status": "ready",
+            "video_url": "/static/manim/legacy.mp4",
+        },
+    )
+
+    parsed = resource.parsed_format_specific()
+
+    assert isinstance(parsed, VideoResource)
+    assert parsed.render_job_id is None
+
+
 # ---------------------------------------------------------------------------
 # CodeResource
 # ---------------------------------------------------------------------------

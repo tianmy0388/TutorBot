@@ -274,3 +274,49 @@ The same review injected a raw credential and spaced drive path into a child tha
 The final retry review strengthened repeated-click idempotency to cover scheduler wakeups as well as child creation. RED showed two `resume_pending` awaits for one active revision; the reset now recognizes an already-tagged pending/rendering revision, and the complete retry API file passed `4 passed` in 10.70s with exactly one wakeup.
 
 Final post-review evidence: the exact required backend command passed `84 passed` in 64.96s; the complete artifact endpoint file passed `11 passed` in 9.99s; and the repository-corrected focused frontend command passed `3 files, 17 tests` in 8.45s.
+
+## Fix wave 2 — re-review findings
+
+### Retry polling, refresh recovery, and deterministic cleanup
+
+RED command:
+
+```powershell
+npm --prefix frontend test -- --run components/resources/VideoViewer.test.tsx -t "transient|visible recovery|settles|cancelling"
+```
+
+- Result: `4 failed, 2 passed, 7 skipped`.
+- Expected failures: transient poll and terminal-refresh errors were invisible and stopped synchronization, repeated failures exposed no recovery action, and the requested cancellable polling primitive did not exist. The two behavioral cleanup assertions passed because `clearTimeout` removed timers, but the direct settlement regression correctly proved the awaited Promise remained unsupported.
+
+GREEN retries polling and terminal package refresh independently, preserves the terminal-refresh phase, pauses after three consecutive failures with a visible `继续同步视频状态` action, and uses a cancellable delay whose cancel operation settles the active wait. Focused result: `6 passed, 7 skipped` in 8.09s. The complete Viewer plus store set then passed `2 files, 17 tests` in 8.06s.
+
+### Durable render revision in the strict video schema
+
+RED command:
+
+```powershell
+$env:PYTHONPATH='backend'
+& 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/services/resource_package/test_schema.py -k "render_job_id" -q
+```
+
+- Result: `4 failed, 20 deselected`.
+- Expected failures: pending, ready, and failed payloads carrying `render_job_id` returned `None` from strict parsing, while a legacy payload parsed but exposed no optional revision attribute.
+
+GREEN declares `VideoResource.render_job_id: str | None = None`; all three durable states round-trip and legacy resources retain compatibility. Result: `4 passed, 20 deselected` in 1.78s.
+
+### Fix-wave-2 phase-boundary review
+
+Self-review strengthened the terminal-refresh regression so two transient job-detail failures precede a successful terminal observation and a transient package-refresh failure. Before resetting the consecutive-failure budget at the phase boundary, the focused test was RED (`1 failed, 12 skipped` in 8.60s): the package refresh paused after its first failure and was called only once. Resetting the budget after a successful job-detail response made the same test GREEN (`1 passed, 12 skipped` in 8.38s), with exactly three job-detail calls and two package-detail calls.
+
+The final implementation keeps the current retry revision visible while synchronization is pending, uses bounded linear backoff per phase, and offers an explicit recovery action after three consecutive failures. Effect cleanup both cancels the timer and settles the awaited delay; responses that arrive after an unmount or dependency change are ignored. Existing historical/current-revision selection, request-failure, and store behavior remain covered by the complete Viewer/store test set.
+
+### Fix-wave-2 integration verification
+
+- The exact required frontend command passed `2 files, 17 tests` in 8.41s.
+- The exact required backend command passed `34 passed` in 22.88s (35 existing warnings).
+- Focused Ruff for both changed backend paths reported `All checks passed!`.
+- `git diff --check` passed; Git emitted only the repository's LF-to-CRLF working-copy notices.
+- `npm --prefix frontend run type-check` remains non-zero only for pre-existing unrelated files; neither changed Task 12 TypeScript path appears in its diagnostics.
+- A changed-path ESLint invocation cannot run because this repository has ESLint 9 dependencies but no flat `eslint.config.*`; this is a repository tooling limitation, not a reported Task 12 source diagnostic.
+
+Remaining concerns: repository-wide TypeScript checking is still blocked by the pre-existing unrelated errors described above, and scoped ESLint remains unavailable until the repository adds an ESLint 9 flat configuration.

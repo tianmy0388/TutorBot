@@ -10,7 +10,7 @@ import {
 
 import { useTutorStore } from "@/lib/store";
 import type { JobChildSummary, Resource, ResourcePackage } from "@/lib/types";
-import { VideoViewer } from "./VideoViewer";
+import { createRetryPollingDelay, VideoViewer } from "./VideoViewer";
 
 const mocks = vi.hoisted(() => ({
   retryVideoRender: vi.fn(),
@@ -82,6 +82,43 @@ function setCanonicalResource(resource: Resource) {
   useTutorStore.getState().setLatestPackage(packageWith(resource));
 }
 
+function retryChild(status: JobChildSummary["status"]): JobChildSummary {
+  return {
+    ...childSummary(status),
+    job_id: "retry-child",
+  };
+}
+
+function parentDetail(status: JobChildSummary["status"]) {
+  return {
+    job_id: "parent",
+    capability: "resource_generation",
+    status: "succeeded" as const,
+    message_preview: "",
+    created_at: "2026-07-17T00:00:00Z",
+    events: [],
+    event_count: 0,
+    children: [childSummary("failed"), retryChild(status)],
+  };
+}
+
+const readyResource = {
+  ...baseResource,
+  format_specific: {
+    render_status: "ready",
+    render_job_id: "retry-child",
+    video_url: "/static/manim/retry.mp4",
+    artifact_key: "manim_videos/retry.mp4",
+  },
+} satisfies Resource;
+
+async function beginRetry() {
+  fireEvent.click(screen.getByRole("button", { name: "重新渲染视频" }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
 beforeEach(() => {
   useTutorStore.setState({
     userId: "local-user",
@@ -118,7 +155,10 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe("VideoViewer durable render lifecycle", () => {
   it("renders a failed child after refresh instead of stale rendering state", () => {
@@ -298,7 +338,195 @@ describe("VideoViewer durable render lifecycle", () => {
     expect(
       useTutorStore.getState().jobsById.parent.children?.[0].status,
     ).toBe("failed");
-    vi.useRealTimers();
+  });
+
+  it("recovers after a transient job polling failure", async () => {
+    vi.useFakeTimers();
+    setChildren(childSummary("failed"));
+    mocks.getJobDetail
+      .mockRejectedValueOnce(new Error("temporary poll failure"))
+      .mockResolvedValueOnce(parentDetail("running"))
+      .mockResolvedValueOnce(parentDetail("succeeded"));
+    mocks.getResourcePackageDetail.mockResolvedValue(
+      packageWith(readyResource),
+    );
+    render(<VideoViewer resource={baseResource} />);
+
+    await beginRetry();
+
+    expect(screen.getByText(/temporary poll failure/)).toBeInTheDocument();
+    expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(2);
+    expect(
+      useTutorStore.getState().jobsById.parent.children?.at(-1)?.status,
+    ).toBe("running");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(3);
+    expect(document.querySelector("source")).toHaveAttribute(
+      "src",
+      "/static/manim/retry.mp4",
+    );
+    expect(screen.queryByText(/temporary poll failure/)).not.toBeInTheDocument();
+  });
+
+  it("retries terminal package refresh independently without re-polling", async () => {
+    vi.useFakeTimers();
+    setChildren(childSummary("failed"));
+    mocks.getJobDetail
+      .mockRejectedValueOnce(new Error("temporary poll failure one"))
+      .mockRejectedValueOnce(new Error("temporary poll failure two"))
+      .mockResolvedValueOnce(parentDetail("succeeded"));
+    mocks.getResourcePackageDetail
+      .mockRejectedValueOnce(new Error("temporary package refresh failure"))
+      .mockResolvedValueOnce(packageWith(readyResource));
+    render(<VideoViewer resource={baseResource} />);
+
+    await beginRetry();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    expect(
+      screen.getByText(/temporary package refresh failure/),
+    ).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(3);
+    expect(mocks.getResourcePackageDetail).toHaveBeenCalledTimes(2);
+    expect(document.querySelector("source")).toHaveAttribute(
+      "src",
+      "/static/manim/retry.mp4",
+    );
+  });
+
+  it("exposes a visible recovery action after repeated polling failures", async () => {
+    vi.useFakeTimers();
+    setChildren(childSummary("failed"));
+    mocks.getJobDetail
+      .mockRejectedValueOnce(new Error("permanent poll failure"))
+      .mockRejectedValueOnce(new Error("permanent poll failure"))
+      .mockRejectedValueOnce(new Error("permanent poll failure"))
+      .mockResolvedValueOnce(parentDetail("succeeded"));
+    mocks.getResourcePackageDetail.mockResolvedValue(
+      packageWith(readyResource),
+    );
+    render(<VideoViewer resource={baseResource} />);
+
+    await beginRetry();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    expect(screen.getByText(/permanent poll failure/)).toBeInTheDocument();
+    expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+    const recover = screen.getByRole("button", {
+      name: "继续同步视频状态",
+    });
+    expect(vi.getTimerCount()).toBe(0);
+
+    fireEvent.click(recover);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(4);
+    expect(document.querySelector("source")).toHaveAttribute(
+      "src",
+      "/static/manim/retry.mp4",
+    );
+  });
+
+  it("settles the active polling sleep when unmounted", async () => {
+    vi.useFakeTimers();
+    setChildren(childSummary("failed"));
+    mocks.getJobDetail.mockResolvedValue(parentDetail("running"));
+    const view = render(<VideoViewer resource={baseResource} />);
+
+    await beginRetry();
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    view.unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(1);
+    expect(mocks.getResourcePackageDetail).not.toHaveBeenCalled();
+  });
+
+  it("cancelling the polling primitive settles its active wait", async () => {
+    vi.useFakeTimers();
+    const delay = createRetryPollingDelay(1_000);
+    let settled = false;
+    void delay.wait.then(() => {
+      settled = true;
+    });
+
+    delay.cancel();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(settled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("settles the old sleep on dependency change without a stale update", async () => {
+    vi.useFakeTimers();
+    setChildren(childSummary("failed"));
+    let resolveReplacement: (value: ReturnType<typeof parentDetail>) => void =
+      () => {};
+    mocks.getJobDetail
+      .mockResolvedValueOnce(parentDetail("running"))
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveReplacement = resolve;
+        }),
+      );
+    const view = render(<VideoViewer resource={baseResource} />);
+
+    await beginRetry();
+    expect(vi.getTimerCount()).toBe(1);
+    await act(async () => {
+      useTutorStore.setState({ userId: "replacement-user" });
+      await Promise.resolve();
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenNthCalledWith(
+      2,
+      "replacement-user",
+      "parent",
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    view.unmount();
+    await act(async () => {
+      resolveReplacement(parentDetail("succeeded"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.getResourcePackageDetail).not.toHaveBeenCalled();
+    expect(
+      useTutorStore.getState().jobsById.parent.children?.at(-1)?.status,
+    ).toBe("running");
   });
 
   it("surfaces retry request failure and leaves terminal failure visible", async () => {

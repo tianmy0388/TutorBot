@@ -255,6 +255,7 @@ class VideoResource(BaseModel):
     thumbnail_url: str | None = None
     duration_seconds: int = 0
     render_status: Literal["pending", "rendering", "ready", "failed"] = "pending"
+    render_job_id: str | None = None
     render_error: str | None = None
     render_error_code: str | None = None
     render_failure: dict[str, Any] | None = None

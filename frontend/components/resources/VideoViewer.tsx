@@ -35,6 +35,28 @@ import {
 import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
+const RETRY_POLL_INTERVAL_MS = 1_000;
+const MAX_AUTOMATIC_SYNC_FAILURES = 3;
+
+export function createRetryPollingDelay(milliseconds: number): {
+  wait: Promise<void>;
+  cancel: () => void;
+} {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settle = () => {};
+  const wait = new Promise<void>((resolve) => {
+    let settled = false;
+    settle = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(settle, milliseconds);
+  });
+  return { wait, cancel: settle };
+}
+
 export function VideoViewer({ resource }: { resource: Resource }) {
   const latestPackage = useTutorStore((state) => state.latestPackage);
   const canonicalResource =
@@ -116,6 +138,8 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     parentJobId: string;
     packageId: string;
   } | null>(null);
+  const [retrySyncPaused, setRetrySyncPaused] = useState(false);
+  const [retrySyncRevision, setRetrySyncRevision] = useState(0);
 
   const isReady = !!formatSpec.video_url && !videoLoadFailed;
   // When ``formatSpec.video_url`` is set but the network failed we
@@ -173,25 +197,39 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     : "";
 
   useEffect(() => {
-    if (!retryTracking) return;
+    if (!retryTracking || retrySyncPaused) return;
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let activeDelay: ReturnType<typeof createRetryPollingDelay> | null = null;
+
+    const wait = async (milliseconds: number) => {
+      const delay = createRetryPollingDelay(milliseconds);
+      activeDelay = delay;
+      await delay.wait;
+      if (activeDelay === delay) activeDelay = null;
+    };
 
     const track = async () => {
-      try {
-        while (!cancelled) {
-          const detail = await getJobDetail(userId, retryTracking.parentJobId);
-          if (cancelled) return;
-          rehydrateJobFromDetail(detail);
-          const current = detail.children?.find(
-            (candidate) => candidate.job_id === retryTracking.jobId,
-          );
-          if (
-            current &&
-            ["succeeded", "partial", "failed", "cancelled"].includes(
-              current.status,
-            )
-          ) {
+      let terminalObserved = false;
+      let consecutiveFailures = 0;
+      while (!cancelled) {
+        try {
+          if (!terminalObserved) {
+            const detail = await getJobDetail(
+              userId,
+              retryTracking.parentJobId,
+            );
+            if (cancelled) return;
+            rehydrateJobFromDetail(detail);
+            consecutiveFailures = 0;
+            const current = detail.children?.find(
+              (candidate) => candidate.job_id === retryTracking.jobId,
+            );
+            terminalObserved = !!current &&
+              ["succeeded", "partial", "failed", "cancelled"].includes(
+                current.status,
+              );
+          }
+          if (terminalObserved) {
             const persisted = await getResourcePackageDetail(
               userId,
               retryTracking.packageId,
@@ -199,29 +237,37 @@ export function VideoViewer({ resource }: { resource: Resource }) {
             if (!cancelled) {
               setLatestPackage(persisted);
               setRetryQueued(false);
+              setRetryError("");
               setRetryTracking(null);
             }
             return;
           }
-          await new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, 1_000);
-          });
-        }
-      } catch (error) {
-        if (!cancelled) {
+          consecutiveFailures = 0;
+          setRetryError("");
+          await wait(RETRY_POLL_INTERVAL_MS);
+        } catch (error) {
+          if (cancelled) return;
+          consecutiveFailures += 1;
           setRetryError(
             error instanceof Error ? error.message : "重试状态刷新失败",
           );
+          if (consecutiveFailures >= MAX_AUTOMATIC_SYNC_FAILURES) {
+            setRetrySyncPaused(true);
+            return;
+          }
+          await wait(RETRY_POLL_INTERVAL_MS * consecutiveFailures);
         }
       }
     };
     void track();
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      activeDelay?.cancel();
     };
   }, [
     rehydrateJobFromDetail,
+    retrySyncPaused,
+    retrySyncRevision,
     retryTracking,
     setLatestPackage,
     userId,
@@ -232,6 +278,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     setRetrying(true);
     setRetryError("");
     setRetryQueued(false);
+    setRetrySyncPaused(false);
     try {
       const snapshot = await retryVideoRender(
         userId,
@@ -250,6 +297,13 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     } finally {
       setRetrying(false);
     }
+  };
+
+  const resumeRetrySync = () => {
+    if (!retryTracking) return;
+    setRetryError("");
+    setRetrySyncPaused(false);
+    setRetrySyncRevision((revision) => revision + 1);
   };
 
   const copy = async () => {
@@ -302,6 +356,29 @@ export function VideoViewer({ resource }: { resource: Resource }) {
             <source src={formatSpec.video_url} type="video/mp4" />
             您的浏览器不支持 video 标签。
           </video>
+        </div>
+      )}
+
+      {retryTracking && retryError && (
+        <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-left">
+          <div className="text-xs text-amber-200">
+            状态同步失败：{retryError}
+          </div>
+          {retrySyncPaused ? (
+            <button
+              type="button"
+              aria-label="继续同步视频状态"
+              onClick={resumeRetrySync}
+              className="mt-2 inline-flex items-center gap-1 rounded border border-amber-700/50 px-2 py-1 text-xs text-amber-100 hover:bg-amber-900/30"
+            >
+              <RefreshCw className="h-3 w-3" />
+              继续同步
+            </button>
+          ) : (
+            <div className="mt-1 text-[11px] text-amber-300/80">
+              正在自动重试…
+            </div>
+          )}
         </div>
       )}
 
