@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import threading
 import time
@@ -9,7 +10,9 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from sqlalchemy import text
+from tutor.agents.resource.exercise_generator import ExerciseGeneratorAgent
 from tutor.api.main import create_app
+from tutor.core.context import UnifiedContext
 from tutor.services.config.settings import Settings
 from tutor.services.exercise_attempts.schema import (
     AttemptStatus,
@@ -21,7 +24,24 @@ from tutor.services.exercise_attempts.schema import (
 )
 from tutor.services.exercise_responses.schema import ExerciseSubmission
 from tutor.services.learning_events.schema import EventType
+from tutor.services.llm.base import LLMResponse
 from tutor.services.resource_package.schema import ResourcePackage, ResourceType, build_resource
+
+
+def _static_exercise_llm(payload: dict):
+    class StaticExerciseLLM:
+        model = "static-exercise"
+        default_temperature = 0.0
+        default_max_tokens = 4096
+
+        async def call(self, request):
+            return LLMResponse(
+                content=json.dumps(payload, ensure_ascii=False),
+                model=self.model,
+                finish_reason="stop",
+            )
+
+    return StaticExerciseLLM()
 
 
 def _package(
@@ -1069,6 +1089,117 @@ async def test_general_resource_api_hides_all_ordinary_canonical_answers(
         assert all("accepted_answers" not in question for question in questions)
         assert "dynamic programming" not in response.text.casefold()
         assert "legacy model answer" not in response.text.casefold()
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_generated_short_answers_grade_closed_keep_open_manual_and_hide_secrets(
+    tmp_path,
+) -> None:
+    generated = await ExerciseGeneratorAgent(
+        llm=_static_exercise_llm(
+            {
+                "questions": [
+                    {
+                        "id": "generated-closed",
+                        "tier": "advanced",
+                        "type": "short_answer",
+                        "difficulty": 3,
+                        "knowledge_point": "dynamic-programming",
+                        "question": "What does DP stand for?",
+                        "answer": "SECRET_ANSWER_DYNAMIC_PROGRAMMING",
+                        "accepted_answers": ["dynamic programming", "DP"],
+                        "explanation": "SECRET_EXPLANATION_CLOSED",
+                    },
+                    {
+                        "id": "generated-open",
+                        "tier": "challenge",
+                        "type": "short_answer",
+                        "difficulty": 4,
+                        "knowledge_point": "reflection",
+                        "question": "请用自己的话解释动态规划的价值",
+                        "answer": "(开放式回答)",
+                        "accepted_answers": [],
+                        "explanation": "SECRET_EXPLANATION_OPEN",
+                    },
+                    {
+                        "id": "generated-choice",
+                        "tier": "basic",
+                        "type": "single_choice",
+                        "difficulty": 1,
+                        "question": "VISIBLE_GENERATED_PROMPT",
+                        "options": [
+                            {"label": "A", "text": "VISIBLE_GENERATED_OPTION"},
+                            {"label": "B", "text": "other"},
+                        ],
+                        "answer": "A",
+                        "explanation": "SECRET_EXPLANATION_CHOICE",
+                    },
+                ]
+            }
+        )
+    ).process(UnifiedContext(), topic="generated-short-answers")
+    generated.resource_id = "resource-generated-short"
+    package = ResourcePackage(
+        package_id="pkg-generated-short",
+        topic="algorithms",
+        resources=[generated],
+        metadata={"user_id": "local-user"},
+    )
+    app = await _ready_app(tmp_path)
+    await app.state.resource_package_store.save(package, user_id="local-user")
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            public = await client.get(
+                "/api/v1/resources/packages/local-user/pkg-generated-short"
+            )
+            assert public.status_code == 200
+            assert "SECRET_ANSWER" not in public.text
+            assert "SECRET_EXPLANATION" not in public.text
+            public_resource = public.json()["resources"][0]
+            assert public_resource["content"] == ""
+            public_questions = public_resource["format_specific"]["questions"]
+            assert all("answer" not in item for item in public_questions)
+            assert all("accepted_answers" not in item for item in public_questions)
+            assert all("explanation" not in item for item in public_questions)
+            choice = next(
+                item for item in public_questions if item["id"] == "generated-choice"
+            )
+            assert choice["question"] == "VISIBLE_GENERATED_PROMPT"
+            assert choice["options"][0]["text"] == "VISIBLE_GENERATED_OPTION"
+
+            closed = await client.post(
+                "/api/v1/exercises/pkg-generated-short/resources/resource-generated-short/questions/generated-closed/submit",
+                json={
+                    "session_id": "sess-generated",
+                    "answer_json": " dp ",
+                    "client_submission_id": "generated-closed-submit",
+                },
+            )
+            opened = await client.post(
+                "/api/v1/exercises/pkg-generated-short/resources/resource-generated-short/questions/generated-open/submit",
+                json={
+                    "session_id": "sess-generated",
+                    "answer_json": "A learner-authored explanation",
+                    "client_submission_id": "generated-open-submit",
+                },
+            )
+        assert closed.status_code == opened.status_code == 200
+        assert closed.json()["grading_status"] == "auto_graded"
+        assert closed.json()["correct"] is True
+        assert closed.json()["score"] == 1.0
+        assert opened.json()["grading_status"] == "manual_review"
+        assert opened.json()["correct"] is None
+        assert opened.json()["score"] is None
+        events = await app.state.learning_workflow.event_store.query(
+            "local-user", event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert [(event.target_id, event.score) for event in events] == [
+            ("generated-closed", 1.0)
+        ]
     finally:
         await _close_app(app)
 

@@ -244,6 +244,35 @@ async def test_init_adds_grading_status_to_pre_review_submission_table(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_two_store_instances_concurrently_migrate_legacy_grading_status(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "responses.db"
+    prepared = ExerciseResponseStore(db_path)
+    await prepared.init()
+    await prepared.close()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "ALTER TABLE exercise_submissions DROP COLUMN grading_status"
+        )
+
+    first = ExerciseResponseStore(db_path)
+    second = ExerciseResponseStore(db_path)
+    try:
+        await asyncio.gather(first.init(), second.init())
+    finally:
+        await first.close()
+        await second.close()
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(exercise_submissions)")
+        }
+    assert "grading_status" in columns
+
+
+@pytest.mark.asyncio
 async def test_manual_submission_round_trips_nullable_grading(tmp_path) -> None:
     store = ExerciseResponseStore(tmp_path / "responses.db")
     await store.init()

@@ -159,6 +159,10 @@ async def test_exercise_generator_produces_tiered_questions():
             {"id": "q2", "tier": "advanced", "type": "short_answer",
              "difficulty": 3, "question": "解释 LSTM 的遗忘门",
              "answer": "控制上一时刻信息保留多少",
+             "accepted_answers": [
+                 "控制上一时刻信息保留多少",
+                 "决定保留多少过去信息",
+             ],
              "explanation": "f_t = σ(W_f · [h_{t-1}, x_t] + b_f)",
              "estimated_seconds": 120},
             {"id": "q3", "tier": "challenge", "type": "code",
@@ -176,6 +180,12 @@ async def test_exercise_generator_produces_tiered_questions():
                  }],
                  "time_limit_seconds": 5,
              }},
+            {"id": "q4", "tier": "challenge", "type": "short_answer",
+             "difficulty": 4, "question": "请用自己的话解释 LSTM 的价值",
+             "answer": "(开放式回答)",
+             "accepted_answers": ["模型不应把开放题自动判分"],
+             "explanation": "根据学习者自己的表述人工评阅",
+             "estimated_seconds": 180},
         ]
     }, ensure_ascii=False))
     agent = ExerciseGeneratorAgent(llm=llm)
@@ -183,13 +193,20 @@ async def test_exercise_generator_produces_tiered_questions():
     resource = await agent.process(ctx, topic="LSTM")
     assert resource.type == ResourceType.EXERCISE
     assert "LSTM" in resource.title
-    assert len(resource.format_specific.get("questions", [])) == 3
+    assert len(resource.format_specific.get("questions", [])) == 4
     breakdown = resource.format_specific["difficulty_breakdown"]
     assert breakdown.get("basic") == 1
     assert breakdown.get("advanced") == 1
-    assert breakdown.get("challenge") == 1
+    assert breakdown.get("challenge") == 2
+    closed_short = resource.format_specific["questions"][1]
+    assert closed_short["accepted_answers"] == [
+        "控制上一时刻信息保留多少",
+        "决定保留多少过去信息",
+    ]
     code_question = resource.format_specific["questions"][2]
     assert code_question["code_spec"]["tests"][0]["expected_json"] == 3
+    open_short = resource.format_specific["questions"][3]
+    assert open_short["accepted_answers"] == []
 
 
 @pytest.mark.asyncio

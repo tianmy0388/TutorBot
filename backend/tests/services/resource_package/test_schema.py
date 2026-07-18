@@ -304,7 +304,17 @@ def test_public_video_projection_resanitizes_structured_failure() -> None:
 
 def test_public_exercise_projection_hides_every_canonical_answer() -> None:
     questions = [
-        {"id": "single", "type": "single_choice", "question": "single", "answer": "SECRET-S"},
+        {
+            "id": "single",
+            "type": "single_choice",
+            "question": "VISIBLE_PROMPT",
+            "options": [
+                {"label": "A", "text": "VISIBLE_OPTION"},
+                {"label": "B", "text": "other"},
+            ],
+            "answer": "SECRET-S",
+            "explanation": "SECRET_EXPLANATION_SINGLE",
+        },
         {"id": "multiple", "type": "multiple_choice", "question": "multiple", "answer": ["SECRET-M1", "SECRET-M2"]},
         {"id": "boolean", "type": "true_false", "question": "boolean", "answer": True},
         {"id": "fill", "type": "fill_blank", "question": "fill", "answer": "SECRET-F"},
@@ -314,11 +324,16 @@ def test_public_exercise_projection_hides_every_canonical_answer() -> None:
             "question": "short",
             "answer": "(开放式回答)",
             "accepted_answers": ["SECRET-SA"],
+            "explanation": "SECRET_EXPLANATION_SHORT",
         },
     ]
     resource = Resource(
         type=ResourceType.EXERCISE,
         title="ordinary exercises",
+        content=(
+            "### VISIBLE_PROMPT\n\n**答案**：SECRET_ANSWER\n\n"
+            "**解析**：SECRET_CONTENT_EXPLANATION"
+        ),
         format_specific={"questions": questions},
     )
 
@@ -334,6 +349,10 @@ def test_public_exercise_projection_hides_every_canonical_answer() -> None:
     ]
     assert all("answer" not in question for question in projected)
     assert all("accepted_answers" not in question for question in projected)
+    assert all("explanation" not in question for question in projected)
+    assert public["content"] == ""
+    assert projected[0]["question"] == "VISIBLE_PROMPT"
+    assert projected[0]["options"][0]["text"] == "VISIBLE_OPTION"
     assert "SECRET-" not in str(public)
 
 

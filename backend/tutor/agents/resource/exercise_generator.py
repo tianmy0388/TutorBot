@@ -70,6 +70,10 @@ EXERCISE_OUTPUT_SCHEMA: dict[str, Any] = {
                         },
                     },
                     "answer": {},
+                    "accepted_answers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
                     "explanation": {"type": "string"},
                     "estimated_seconds": {"type": "integer"},
                     "code_spec": {
@@ -194,14 +198,31 @@ class ExerciseGeneratorAgent(BaseAgent):
                     for o in (q.get("options") or [])
                     if isinstance(o, dict)
                 ]
+                question_type = str(q.get("type", "single_choice"))
+                question_text = str(q.get("question") or "")
+                answer = q.get("answer")
+                open_short_answer = question_type == "short_answer" and (
+                    "用自己的话" in question_text
+                    or str(answer).strip() == "(开放式回答)"
+                )
+                accepted_answers = (
+                    [
+                        item.strip()
+                        for item in (q.get("accepted_answers") or [])
+                        if isinstance(item, str) and item.strip()
+                    ]
+                    if question_type == "short_answer" and not open_short_answer
+                    else []
+                )
                 eq = ExerciseQuestion(
                     id=str(q.get("id") or f"q-{len(questions) + 1}"),
-                    type=str(q.get("type", "single_choice")),
+                    type=question_type,
                     difficulty=int(q.get("difficulty") or 3),
                     knowledge_point=str(q.get("knowledge_point") or ""),
-                    question=str(q.get("question") or ""),
+                    question=question_text,
                     options=options,
-                    answer=q.get("answer"),
+                    answer=answer,
+                    accepted_answers=accepted_answers,
                     explanation=str(q.get("explanation") or ""),
                     estimated_seconds=int(q.get("estimated_seconds") or 60),
                     code_spec=q.get("code_spec"),
@@ -222,6 +243,7 @@ class ExerciseGeneratorAgent(BaseAgent):
                     difficulty=2,
                     question=f"请用自己的话总结「{topic}」的核心概念。",
                     answer="(开放式回答)",
+                    accepted_answers=[],
                     explanation="这是开放性问题，没有标准答案。",
                     estimated_seconds=120,
                 )

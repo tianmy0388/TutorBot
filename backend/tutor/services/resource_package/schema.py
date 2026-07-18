@@ -612,9 +612,9 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
     format_specific = dict(data.get("format_specific") or {})
     questions = format_specific.get("questions")
     if not isinstance(questions, list):
+        data["content"] = ""
         return data
     public_questions: list[Any] = []
-    has_code = False
     for raw in questions:
         if not isinstance(raw, dict):
             public_questions.append(raw)
@@ -622,10 +622,10 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
         question = dict(raw)
         question.pop("answer", None)
         question.pop("accepted_answers", None)
+        question.pop("explanation", None)
         if raw.get("type") != "code":
             public_questions.append(question)
             continue
-        has_code = True
         spec = question.get("code_spec")
         if isinstance(spec, dict):
             tests = spec.get("tests")
@@ -638,10 +638,9 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
         public_questions.append(question)
     format_specific["questions"] = public_questions
     data["format_specific"] = format_specific
-    if has_code:
-        # Generator content historically embeds every answer, including code
-        # reference solutions. The structured viewer does not need this copy.
-        data["content"] = ""
+    # Generated exercise Markdown historically embeds answers and explanations.
+    # The structured question/options projection is the only browser surface.
+    data["content"] = ""
     return data
 
 

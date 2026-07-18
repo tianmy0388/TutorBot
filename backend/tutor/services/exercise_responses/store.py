@@ -23,6 +23,7 @@ from sqlalchemy import (
     text,
     update,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -139,21 +140,38 @@ class ExerciseResponseStore:
 
     async def init(self) -> None:
         engine = self._ensure_engine()
-        async with engine.begin() as connection:
-            await connection.run_sync(_Base.metadata.create_all)
-            columns = {
-                str(row[1])
-                for row in (
-                    await connection.exec_driver_sql(
-                        "PRAGMA table_info(exercise_submissions)"
-                    )
-                ).fetchall()
-            }
-            if "grading_status" not in columns:
-                await connection.exec_driver_sql(
-                    "ALTER TABLE exercise_submissions ADD COLUMN "
-                    "grading_status VARCHAR(32) NOT NULL DEFAULT 'auto_graded'"
-                )
+        async with engine.connect() as connection:
+            await connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                await connection.run_sync(_Base.metadata.create_all)
+                columns = await self._submission_columns(connection)
+                if "grading_status" not in columns:
+                    try:
+                        await connection.exec_driver_sql(
+                            "ALTER TABLE exercise_submissions ADD COLUMN "
+                            "grading_status VARCHAR(32) NOT NULL "
+                            "DEFAULT 'auto_graded'"
+                        )
+                    except OperationalError:
+                        # A cooperating initializer is serialized by the write
+                        # lock. Re-check also makes mixed-version startup safe.
+                        if "grading_status" not in await self._submission_columns(
+                            connection
+                        ):
+                            raise
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+
+    @staticmethod
+    async def _submission_columns(connection) -> set[str]:
+        rows = (
+            await connection.exec_driver_sql(
+                "PRAGMA table_info(exercise_submissions)"
+            )
+        ).fetchall()
+        return {str(row[1]) for row in rows}
 
     async def close(self) -> None:
         if self._engine is not None:

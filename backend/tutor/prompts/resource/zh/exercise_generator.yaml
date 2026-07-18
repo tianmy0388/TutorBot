@@ -29,6 +29,7 @@ system:
           "question": "...",
           "options": [{"label": "A", "text": "..."}, ...],
           "answer": "A",
+          "accepted_answers": [],
           "explanation": "为什么选 A（1-2 句话）",
           "estimated_seconds": 60,
           "code_spec": null
@@ -44,7 +45,10 @@ system:
       - multiple_choice → ["A", "C"]
       - true_false → true / false
       - fill_blank → "具体词或短语"
-      - short_answer → "要点"
+      - short_answer → "要点"，并且必须输出 `accepted_answers`
+        - 有客观、封闭标准答案的简答题：`accepted_answers` 必须是非空字符串数组，列出可自动判分的等价别名；不要加入仅部分正确或含义不同的表述
+        - “用自己的话”、分析、反思、举例等开放题：`answer` 写 "(开放式回答)"，`accepted_answers` 必须是空数组，交由人工评阅
+      - 其他题型的 `accepted_answers` 使用空数组
       - code → answer 可保存参考实现，并且 code_spec 必须为：
         {"language":"python","starter_code":"def solve(...):\n    pass","tests":[{"name":"基础用例","call":"solve(...) ","expected_json":可JSON序列化值}],"time_limit_seconds":5}
     - code_spec.tests 的 call 必须只调用学生需要实现的函数，不依赖网络、文件或第三方包

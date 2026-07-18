@@ -129,6 +129,11 @@ def test_legacy_code_question_without_spec_remains_viewable() -> None:
 def test_generator_schema_requires_code_spec_shape() -> None:
     item = EXERCISE_OUTPUT_SCHEMA["properties"]["questions"]["items"]
     assert "code_spec" in item["properties"]
+    accepted_answers = item["properties"]["accepted_answers"]
+    assert accepted_answers == {
+        "type": "array",
+        "items": {"type": "string"},
+    }
     code_spec = item["properties"]["code_spec"]
     assert code_spec["properties"]["language"]["const"] == "python"
     assert set(code_spec["required"]) == {"language", "starter_code", "tests"}
@@ -148,6 +153,9 @@ def test_generator_schema_requires_code_spec_shape() -> None:
     ).read_text(encoding="utf-8")
     assert "标准 JSON" in prompt
     assert "NaN" in prompt
+    assert "accepted_answers" in prompt
+    assert "用自己的话" in prompt
+    assert "空数组" in prompt
 
 
 def test_public_package_projection_never_exposes_code_answers_or_tests() -> None:
