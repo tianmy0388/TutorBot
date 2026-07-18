@@ -11,6 +11,9 @@ DONE_WITH_CONCERNS
 - The existing non-MCP `WebSearchTool` is an explicit empty placeholder and therefore cannot be accepted as evidence.
 - Tutoring and resource generation had no capability-local search gate. Merely registering `web_search` globally would grant no safe per-conversation control.
 - Zustand aggregate hydration is the active conversation boundary; draft creation and first-send are coordinated in `ChatComposer`.
+- Reviewer follow-up found that a failed draft PATCH left `conversationMaterialized=true`, so a retry skipped settings persistence and silently submitted under the server's false snapshot.
+- Reviewer follow-up also found that rapid `true -> false` mutations used the second call's optimistic UI value as rollback state; if both PATCHes failed, the UI ended true while the server remained false.
+- Non-document resource branches derived `source_content` only from a document/pedagogy resource. With no document planned, they advertised persisted web sources without receiving that evidence as grounding input.
 
 ## RED evidence
 
@@ -53,14 +56,23 @@ DONE_WITH_CONCERNS
 13. Command: `npm --prefix frontend test -- --run components/chat/ChatComposer.web-search.test.tsx`
     Expected: first-send submitted before persisting the draft choice and had no failure stop.
     Observed: `2 failed`; settings PATCH had zero calls and the failure case had no visible status.
+14. Command: `npm --prefix frontend test -- --run components/chat/ChatComposer.web-search.test.tsx lib/store.test.ts`
+    Expected: a failed draft PATCH should clean up the empty row, preserve retryable draft state/text, issue another PATCH before retry submit, and roll back against known server false.
+    Observed: `2 failed, 8 passed`; no draft delete occurred and the store retained optimistic true instead of the explicit server false rollback.
+15. Command: `npm --prefix frontend test -- --run lib/store.test.ts`
+    Expected: two serialized failed mutations from server false must end at confirmed false, while success-then-failure must end at confirmed true.
+    Observed: `1 failed, 9 passed`; the double-failure case ended true. The success-then-failure and existing success sequence already matched the intended matrix.
+16. Command: `$env:PYTHONPATH='backend'; & 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/capabilities/test_resource_generation_capability.py::test_web_evidence_grounds_non_document_resource_branches -q`
+    Expected: a non-document exercise branch must receive normalized web evidence in its actual agent `source_content`.
+    Observed: `1 failed`; the capturing real-agent wrapper was invoked once with `source_content == ''`. An earlier full-pipeline version reached an unrelated package failure before this assertion, so the test was narrowed to the validated branch boundary before production changed.
 
 ## Implementation summary
 
 - Conversation boundary: first-class default-off schema/row field, idempotent SQLite `ALTER TABLE`, narrow extra-forbid settings PATCH, canonical identity and existing owner checks, and all projections hydrated from the persisted row.
 - Job boundary: first-class immutable row/model/context boolean, idempotent job migration, authoritative metadata overwrite, normal submission lookup, false no-session plan behavior, trusted REST retry inheritance, and durable child inheritance.
 - Search boundary: shared two-factor `SearchPolicy` and lazy `SearchExecutor`; registry resolution occurs only after both gates. Results are bounded, sanitized, URL-validated, provider/timestamp normalized, and failures collapse to a stable typed outcome.
-- Capability boundary: only tutoring and resource generation declare/run a `web_search` stage. Tutoring merges evidence into answer context and returns sources; resource generation supplies evidence to source content and persists it through package/resource metadata.
-- Frontend boundary: a standalone accessible switch composes separately from RAG controls. Zustand owns per-conversation setting, pending/error/materialization state, serialized optimistic mutations, revision fencing, exact rollback, hydration, and draft reset. First-send materializes then persists opt-in before submit; sidebar new actions now create local drafts only. Job/message metadata exposes the requested choice without authorizing it.
+- Capability boundary: only tutoring and resource generation declare/run a `web_search` stage. Tutoring merges evidence into answer context and returns sources; resource generation supplies evidence to document generation and now also merges it into every non-document branch's `source_content`, while unavailable/empty search injects nothing. Sources persist through package/resource metadata.
+- Frontend boundary: a standalone accessible switch composes separately from RAG controls. Zustand owns per-conversation setting, pending/error/materialization state, serialized optimistic mutations, revision fencing, a per-session last-confirmed server value, exact existing-conversation rollback, hydration, and draft reset. Failed draft opt-in deletes the empty row best-effort, restores draft intent/text, defers the local user message, and must PATCH again before retry submit. Sidebar new actions create local drafts only. Job/message metadata exposes the requested choice without authorizing it.
 
 ## GREEN and broad verification
 
@@ -88,6 +100,12 @@ DONE_WITH_CONCERNS
     Observed: `All checks passed!` after safe Ruff import/style normalization and removal of one pre-existing unused assignment in the modified conversation store.
 12. Command: `git diff --check`
     Observed: exit 0 with no whitespace errors (only Git's configured LF-to-CRLF checkout warnings).
+13. Command: `npm --prefix frontend test -- --run components/chat/WebSearchToggle.test.tsx lib/api.test.ts lib/store.test.ts hooks/useJobQueue.test.tsx components/chat/ChatComposer.web-search.test.tsx`
+    Observed after reviewer fixes: `5 files passed, 26 tests passed`. The added matrix covers failed draft retry/cleanup, explicit server rollback, double failure, success-then-failure, and the existing all-success serialization path.
+14. Command: `$env:PYTHONPATH='backend'; & 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/capabilities/test_resource_generation_capability.py -q`
+    Observed after reviewer fix: `25 passed, 25 warnings in 78.04s`; warnings remain the existing pytest-asyncio deprecation. Both grounded non-document evidence and empty unavailable-search input are covered.
+15. Commands: `npm --prefix frontend run type-check`, changed-path Ruff, and `git diff --check`.
+    Observed after reviewer fixes: TypeScript retains the identical 13 baseline diagnostics listed above with no new Task 13 line; Ruff reports `All checks passed!`; diff-check exits 0.
 
 ## Evidence matrix
 
@@ -98,14 +116,18 @@ DONE_WITH_CONCERNS
 - Normalization/degradation: only `http`/`https` URLs survive; markup/control characters and excess results are stripped/bounded; placeholder, empty, malformed, failed, exception, missing-tool, and timeout outcomes expose only `WEB_SEARCH_UNAVAILABLE` without raw provider details.
 - Capability degradation: tutoring and resource tests each assert exactly one `WEB_SEARCH_UNAVAILABLE` observation and a normal answer/package result after provider unavailability.
 - Source persistence: resource evidence is read after closing and reopening `ResourcePackageStore`; the normalized URL survives in both package metadata and every restored resource's metadata.
-- Optimistic rollback/race: two rapid opposite mutations are asserted to issue server PATCHes serially in `true` then `false` order; pending remains set through the sequence and the final store/server value is false. A failed current revision rolls back to its exact prior false value and exposes a non-blocking status message.
-- Draft first-send: tests assert the default draft is false, draft opt-in PATCH invocation precedes the job submission, user-message metadata records the request, and PATCH failure produces a visible status with zero job submissions. Sidebar new-conversation actions no longer create empty server rows.
+- Optimistic rollback/race: per-session confirmed values are seeded from hydration or an explicit draft server baseline and updated by each serialized success, even when its UI revision is stale. Tests cover all-success, double-failure (`false`), and success-then-failure (`true`) results while preserving pending/revision fencing and exact existing-conversation rollback.
+- Draft first-send: tests assert the default draft is false, draft opt-in PATCH precedes job submission, and user/job metadata records true. On failure there are zero submits/appends, the empty row is deleted best-effort, draft state and text are restored, no user message pollutes local history, and the retry performs a second successful PATCH before its one submit.
+- Non-document grounding: the actual exercise agent receives the normalized web excerpt through branch `source_content`; a matching unavailable-search test receives an empty string, preventing metadata-only/fake grounding claims.
 
 ## Commits and self-review
 
 - Implementation commit: `06c340a` (`feat: add per-conversation web search policy`).
-- Report commit: created after this report is staged.
+- Initial report commit: `5e16896` (`docs: add Task 13 verification report`).
+- Reviewer frontend reliability commit: `06a02df` (`fix: preserve web search intent across draft retry`).
+- Reviewer capability grounding commit: `a9714bb` (`fix: ground non-document resources with web evidence`).
+- Reviewer follow-up report commit: created after this update is staged.
 - Security/privacy review: conversation settings use canonical identity and owner checks; missing sessions return 404; extra fields are forbidden. JobRunner overwrites client authorization aliases from server state. Disabled policy combinations make zero registry/provider calls. Provider exceptions and raw error data never leave the executor. Sources are bounded, stripped of HTML/control characters, restricted to HTTP(S), and contain only normalized display fields.
 - Durability review: both SQLite migrations are idempotent and default legacy rows off; conversation/job rows survive close/reopen; running jobs use the persisted first-class snapshot; retry and follow-up inheritance are explicit; resource source metadata survives package-store reopen.
-- Frontend review: aggregate hydration and draft reset fence stale mutation revisions; serialized PATCHes preserve server/store order; rollback applies only to the owning revision; first-send persists draft opt-in before submission and stops visibly on failure; sidebar draft creation does not create empty history rows.
+- Frontend review: aggregate hydration and draft reset fence stale mutation revisions; serialized PATCHes preserve server/store order and update per-session confirmed state; rollback applies only to the owning revision against the latest confirmed server value. First-send persists draft opt-in before submission, cleans/restores on failure, and keeps retry ordering strict; sidebar draft creation does not create empty history rows.
 - Concern: repository-wide TypeScript checking remains red only at the 13 unchanged baseline locations listed above. Task 13 focused frontend tests, backend broad tests, changed-path Ruff, and diff hygiene are green.
