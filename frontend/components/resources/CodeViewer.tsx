@@ -16,7 +16,7 @@
  *    code produced (``figure_N.png``) were invisible on the right pane.
  */
 
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Copy,
   Check,
@@ -31,6 +31,7 @@ import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import type { Resource } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useTutorStore } from "@/lib/store";
+import { ImageLightbox, type ImageArtifact } from "./ImageLightbox";
 
 interface CodeFile {
   name: string;
@@ -40,8 +41,20 @@ interface CodeFile {
 
 interface CodeArtifact {
   name: string;
-  path: string;
+  path?: string;
   kind?: string;
+}
+
+const IMAGE_KINDS = new Set(["png", "jpg", "jpeg", "svg"]);
+
+function artifactKind(artifact: CodeArtifact) {
+  const explicit = (artifact.kind || "")
+    .toLowerCase()
+    .replace(/^image\//, "")
+    .replace(/^\./, "");
+  if (explicit) return explicit;
+  const extension = artifact.name.split(".").pop();
+  return extension && extension !== artifact.name ? extension.toLowerCase() : "";
 }
 
 export function CodeViewer({ resource }: { resource: Resource }) {
@@ -70,6 +83,8 @@ export function CodeViewer({ resource }: { resource: Resource }) {
   };
 
   const [copied, setCopied] = useState(false);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
 
   const files: CodeFile[] =
     formatSpec.files && formatSpec.files.length > 0
@@ -113,7 +128,7 @@ export function CodeViewer({ resource }: { resource: Resource }) {
     (resource.metadata?.package_id as string | undefined) ||
     latestPackageId ||
     "";
-  const artifactUrl = (name: string) => {
+  const artifactUrl = useCallback((name: string) => {
     // **2026-07-09 fix (sess_ebb / 38a445a1 trace):** the package-
     // scoped artifact route on the backend is
     // ``/resources/packages/{user_id}/{package_id}/...`` — that is,
@@ -141,11 +156,26 @@ export function CodeViewer({ resource }: { resource: Resource }) {
     // persistence). Fall back to the package-less endpoint, which
     // resolves by resource_id alone.
     return `${apiBase}/resources/${encodedUser}/resources/${encodedRid}/artifacts/${encodedName}`;
-  };
+  }, [apiBase, realPackageId, resource.resource_id, userId]);
 
-  const artifacts: CodeArtifact[] = Array.isArray(formatSpec.artifacts)
-    ? formatSpec.artifacts
-    : [];
+  const artifacts = useMemo<CodeArtifact[]>(
+    () => (Array.isArray(formatSpec.artifacts) ? formatSpec.artifacts : []),
+    [formatSpec.artifacts],
+  );
+  const imageArtifacts = useMemo<ImageArtifact[]>(
+    () =>
+      artifacts.flatMap((artifact) => {
+        const kind = artifactKind(artifact);
+        return IMAGE_KINDS.has(kind)
+          ? [{ name: artifact.name, url: artifactUrl(artifact.name), kind }]
+          : [];
+      }),
+    [artifactUrl, artifacts],
+  );
+  const imageIndexByUrl = useMemo(
+    () => new Map(imageArtifacts.map((artifact, index) => [artifact.url, index])),
+    [imageArtifacts],
+  );
 
   return (
     <div className="space-y-4">
@@ -266,6 +296,12 @@ export function CodeViewer({ resource }: { resource: Resource }) {
                 key={art.name}
                 artifact={art}
                 url={artifactUrl(art.name)}
+                onOpen={() => {
+                  const imageIndex = imageIndexByUrl.get(artifactUrl(art.name));
+                  if (imageIndex === undefined) return;
+                  setLightboxIndex(imageIndex);
+                  setLightboxOpen(true);
+                }}
               />
             ))}
           </div>
@@ -290,6 +326,13 @@ export function CodeViewer({ resource }: { resource: Resource }) {
           </div>
         </div>
       )}
+
+      <ImageLightbox
+        images={imageArtifacts}
+        initialIndex={lightboxIndex}
+        open={lightboxOpen}
+        onOpenChange={setLightboxOpen}
+      />
     </div>
   );
 }
@@ -297,11 +340,13 @@ export function CodeViewer({ resource }: { resource: Resource }) {
 function ArtifactPreview({
   artifact,
   url,
+  onOpen,
 }: {
   artifact: CodeArtifact;
   url: string;
+  onOpen(): void;
 }) {
-  const kind = (artifact.kind || "").toLowerCase();
+  const kind = artifactKind(artifact);
   const [errored, setErrored] = useState(false);
 
   if (errored) {
@@ -313,13 +358,13 @@ function ArtifactPreview({
     );
   }
 
-  if (kind === "png" || kind === "jpg" || kind === "jpeg") {
+  if (IMAGE_KINDS.has(kind)) {
     return (
-      <a
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        className="block rounded-lg overflow-hidden border border-fg/10 bg-bg-card hover:border-brand-500/40 transition-colors"
+      <button
+        type="button"
+        aria-label={`查看 ${artifact.name}`}
+        onClick={onOpen}
+        className="block w-full rounded-lg overflow-hidden border border-fg/10 bg-bg-card text-left hover:border-brand-500/40 transition-colors"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
@@ -327,36 +372,12 @@ function ArtifactPreview({
           alt={artifact.name}
           loading="lazy"
           onError={() => setErrored(true)}
-          className="w-full h-auto"
+          className="image-artifact-preview w-full h-auto object-contain"
         />
         <div className="px-3 py-1.5 text-[10px] text-fg-muted font-mono border-t border-fg/5">
           {artifact.name}
         </div>
-      </a>
-    );
-  }
-
-  if (kind === "svg") {
-    return (
-      <a
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        className="block rounded-lg overflow-hidden border border-fg/10 bg-bg-card hover:border-brand-500/40 transition-colors"
-      >
-        <object
-          data={url}
-          type="image/svg+xml"
-          aria-label={artifact.name}
-          className="w-full h-auto"
-          onError={() => setErrored(true)}
-        >
-          <img src={url} alt={artifact.name} onError={() => setErrored(true)} />
-        </object>
-        <div className="px-3 py-1.5 text-[10px] text-fg-muted font-mono border-t border-fg/5">
-          {artifact.name}
-        </div>
-      </a>
+      </button>
     );
   }
 
