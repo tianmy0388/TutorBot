@@ -473,7 +473,10 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       jobOrder: state.jobOrder.includes(ev.job_id)
         ? state.jobOrder
         : [ev.job_id, ...state.jobOrder],
-      messages: upsertWorkflowMessage(messages, workflowMessage(fresh, ev.result.status)),
+      messages: upsertWorkflowMessage(
+        messages,
+        existingWorkflowTimeline(messages, ev.job_id) ?? workflowMessage(fresh, ev.result.status),
+      ),
     };
   }
 
@@ -499,7 +502,11 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       ? nextEvents.slice(nextEvents.length - MAX_EVENTS_PER_JOB)
       : nextEvents;
 
-  const timeline = workflowMessage(job, ev.result.status);
+  // A terminal replay arrives after `open_stages` has deliberately been
+  // cleared below. Never rebuild an already persisted timeline from that
+  // cleared state, or an incomplete stage becomes completed on replay.
+  const timeline =
+    existingWorkflowTimeline(messages, ev.job_id) ?? workflowMessage(job, ev.result.status);
   const next: ClientJob = {
     ...job,
     status,
@@ -693,6 +700,33 @@ function upsertWorkflowMessage(messages: ChatMessage[], message: ChatMessage): C
   const index = messages.findIndex((existing) => existing.id === message.id);
   if (index < 0) return [...messages, message];
   return messages.map((existing) => existing.id === message.id ? message : existing);
+}
+
+function existingWorkflowTimeline(
+  messages: ChatMessage[],
+  jobId: string,
+): ChatMessage | undefined {
+  const message = messages.find((candidate) => candidate.id === `workflow:${jobId}`);
+  const metadata = message?.metadata;
+  const workflow = metadata?.workflow;
+  if (
+    metadata?.kind !== "workflow_timeline" ||
+    metadata.job_id !== jobId ||
+    !workflow ||
+    typeof workflow !== "object"
+  ) return undefined;
+  const snapshot = workflow as { status?: unknown; stages?: unknown };
+  if (
+    !["succeeded", "partial", "failed", "cancelled"].includes(snapshot.status as string) ||
+    !Array.isArray(snapshot.stages) ||
+    !snapshot.stages.every((stage) =>
+      !!stage &&
+      typeof stage === "object" &&
+      typeof (stage as { name?: unknown }).name === "string" &&
+      ["completed", "incomplete"].includes((stage as { status?: unknown }).status as string),
+    )
+  ) return undefined;
+  return message;
 }
 
 /** Durable job state is the sole loading/terminal authority for the UI. */

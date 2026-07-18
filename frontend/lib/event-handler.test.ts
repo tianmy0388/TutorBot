@@ -128,6 +128,27 @@ function jobTerminalEvent(partialArtifacts: unknown[]): StreamEvent {
   };
 }
 
+function inactiveStageEvent(
+  type: "stage_start" | "stage_end",
+  stage: string,
+  eventId: string,
+): StreamEvent {
+  return {
+    ...RESOURCE_BASE,
+    type,
+    source: "resource_capability",
+    stage,
+    content: "",
+    metadata: {
+      job_id: "job-bbf6ddbf",
+      session_id: "session-a",
+    },
+    session_id: "session-a",
+    seq: 1,
+    event_id: eventId,
+  };
+}
+
 describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOURCE content", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -385,6 +406,36 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
         }),
       }),
     );
+  });
+
+  it("persists inactive terminal workflow stages from the real stream history", async () => {
+    mockStoreState.sessionId = "session-b";
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const context = {
+      sessionId: "session-a",
+      userId: "u-test",
+      appendConversationMessage: persist,
+    };
+
+    dispatchStreamEvent(inactiveStageEvent("stage_start", "plan", "plan-start"), context);
+    dispatchStreamEvent(inactiveStageEvent("stage_end", "plan", "plan-end"), context);
+    dispatchStreamEvent(inactiveStageEvent("stage_start", "execute", "execute-start"), context);
+    const terminal = jobTerminalEvent([]);
+    terminal.session_id = "session-a";
+    terminal.metadata = { ...terminal.metadata, session_id: "session-a" };
+    dispatchStreamEvent(terminal, context);
+
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(2));
+    const workflow = persist.mock.calls.find(
+      ([, , message]) => message.metadata?.kind === "workflow_timeline",
+    )?.[2];
+    expect(workflow?.metadata?.workflow).toEqual({
+      status: "failed",
+      stages: [
+        { name: "plan", status: "completed" },
+        { name: "execute", status: "incomplete" },
+      ],
+    });
   });
 
   it("uses the injected persistence adapter without falling back to fetch", async () => {

@@ -62,6 +62,13 @@ const STREAM_EVENT_TYPES = new Set<StreamEvent["type"]>([
   "job_terminal",
 ]);
 
+interface InactiveStageHistory {
+  events: StreamEvent[];
+  openStages: string[];
+}
+
+const inactiveStageHistory = new Map<string, InactiveStageHistory>();
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -134,6 +141,9 @@ export function dispatchStreamEvent(
     stateAtDispatch.sessionId !== authoritativeSessionId
   ) {
     const inactiveJobId = getJobIdFromEvent(streamEv);
+    if (inactiveJobId) {
+      recordInactiveStage(authoritativeSessionId, inactiveJobId, streamEv);
+    }
     if (streamEv.type === "job_terminal" && inactiveJobId) {
       const contract = (
         streamEv.metadata as Record<string, unknown> | undefined
@@ -151,6 +161,7 @@ export function dispatchStreamEvent(
         context.userId || stateAtDispatch.userId,
         authoritativeSessionId,
         streamEv,
+        takeInactiveStageHistory(authoritativeSessionId, inactiveJobId),
         context.appendConversationMessage,
       );
     }
@@ -357,6 +368,7 @@ function persistTerminalWorkflow(
   userId: string | null | undefined,
   sessionId: string,
   event: StreamEvent,
+  stageHistory: InactiveStageHistory | undefined,
   appendConversationMessage?: ConversationMessageAppender,
 ): void {
   const status = contract?.status;
@@ -374,7 +386,7 @@ function persistTerminalWorkflow(
     started_at: null,
     finished_at: event.timestamp ? event.timestamp * 1000 : Date.now(),
     last_seq: event.seq ?? 0,
-    events: [event],
+    events: [...(stageHistory?.events ?? []), event],
     result: null,
     error: null,
     event_count: 1,
@@ -382,7 +394,7 @@ function persistTerminalWorkflow(
     text_buffer: "",
     thinking_buffer: "",
     stage: "",
-    open_stages: [],
+    open_stages: stageHistory?.openStages ?? [],
   };
   const workflow = workflowMessage(job, status as import("./types").JobTerminalStatus);
   persistConversationMessage(
@@ -398,6 +410,37 @@ function persistTerminalWorkflow(
     },
     "workflow_timeline",
   );
+}
+
+function stageHistoryKey(sessionId: string, jobId: string): string {
+  return `${sessionId}:${jobId}`;
+}
+
+function recordInactiveStage(sessionId: string, jobId: string, event: StreamEvent): void {
+  if ((event.type !== "stage_start" && event.type !== "stage_end") || !event.stage) return;
+  const key = stageHistoryKey(sessionId, jobId);
+  const current = inactiveStageHistory.get(key) ?? { events: [], openStages: [] };
+  const events = event.type === "stage_start" ? [...current.events, event] : current.events;
+  let openStages = current.openStages;
+  if (event.type === "stage_start") {
+    openStages = [...openStages, event.stage];
+  } else {
+    const index = openStages.lastIndexOf(event.stage);
+    if (index >= 0) {
+      openStages = [...openStages.slice(0, index), ...openStages.slice(index + 1)];
+    }
+  }
+  inactiveStageHistory.set(key, { events, openStages });
+}
+
+function takeInactiveStageHistory(
+  sessionId: string,
+  jobId: string,
+): InactiveStageHistory | undefined {
+  const key = stageHistoryKey(sessionId, jobId);
+  const history = inactiveStageHistory.get(key);
+  inactiveStageHistory.delete(key);
+  return history;
 }
 
 function persistConversationMessage(

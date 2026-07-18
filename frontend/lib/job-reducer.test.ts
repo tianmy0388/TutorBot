@@ -105,6 +105,41 @@ describe("job-reducer", () => {
     expect(twice.messages.filter((message) => message.id === "workflow:job-3")).toHaveLength(1);
   });
 
+  it("preserves a stable workflow snapshot exactly on duplicate terminal replay", () => {
+    const started = reduceJobEvent(
+      createJobState("job-stable-workflow", "tutoring"),
+      streamEvent("job-stable-workflow", { stage: "plan", event_id: "plan-start" }),
+    );
+    const completed = reduceJobEvent(
+      started,
+      streamEvent("job-stable-workflow", {
+        type: "stage_end",
+        stage: "plan",
+        event_id: "plan-end",
+      }),
+    );
+    const open = reduceJobEvent(
+      completed,
+      streamEvent("job-stable-workflow", { stage: "execute", event_id: "execute-start" }),
+    );
+    const once = reduceJobEvent(open, terminalEvent("job-stable-workflow", "done"));
+    const beforeReplay = once.messages.find(
+      (message) => message.id === "workflow:job-stable-workflow",
+    );
+    const twice = reduceJobEvent(once, terminalEvent("job-stable-workflow", "done"));
+
+    expect(beforeReplay?.metadata?.workflow).toEqual({
+      status: "succeeded",
+      stages: [
+        { name: "plan", status: "completed" },
+        { name: "execute", status: "incomplete" },
+      ],
+    });
+    expect(twice.messages.find(
+      (message) => message.id === "workflow:job-stable-workflow",
+    )).toEqual(beforeReplay);
+  });
+
   it("dedupes the same canonical terminal across snapshot and live replay", () => {
     const state = createJobState("job-terminal-replay", "tutoring");
     const terminal = terminalEvent("job-terminal-replay", "ok");
