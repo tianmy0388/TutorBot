@@ -120,7 +120,22 @@ def _general_package(*, owner: str = "local-user") -> ResourcePackage:
             "type": "short_answer",
             "knowledge_point": "algorithms",
             "question": "Expand DP",
-            "answer": ["dynamic programming", "dynamic-programming"],
+            "answer": "(开放式回答)",
+            "accepted_answers": ["dynamic programming", "dynamic-programming"],
+        },
+        {
+            "id": "q-short-open",
+            "type": "short_answer",
+            "knowledge_point": "writing",
+            "question": "Rewrite this idea in your own words",
+            "answer": "(开放式回答)",
+        },
+        {
+            "id": "q-short-legacy",
+            "type": "short_answer",
+            "knowledge_point": "reasoning",
+            "question": "Explain an unrelated example",
+            "answer": "legacy model answer",
         },
     ]
     resource = build_resource(
@@ -758,7 +773,7 @@ async def test_general_draft_restores_without_event_and_submit_scores_server_sid
     ("question_id", "answer_json"),
     [
         ("q-single", " b "),
-        ("q-multiple", [" c ", "A", "a"]),
+        ("q-multiple", [" c ", "A"]),
         ("q-boolean", " YES "),
         ("q-fill", "  hello   world "),
         ("q-short", " Dynamic   Programming "),
@@ -834,6 +849,7 @@ async def test_general_wrong_retry_conflict_and_strict_request(tmp_path) -> None
     [
         ("q-single", ["B"]),
         ("q-multiple", "A,C"),
+        ("q-multiple", ["A", " a ", "C"]),
         ("q-boolean", "maybe"),
         ("q-fill", ["hello"]),
         ("q-short", {"text": "dynamic programming"}),
@@ -913,6 +929,146 @@ async def test_general_code_submission_links_existing_attempt_without_second_eve
         )
         assert len(events) == 1
         assert events[0].event_id.startswith("exercise-attempt:")
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_general_short_answer_without_explicit_accepted_answers_is_manual(
+    tmp_path,
+) -> None:
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            rewrite = await client.post(
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-short-open/submit",
+                json={
+                    "session_id": "sess-general",
+                    "answer_json": "A thoughtful rewrite in the learner's own words",
+                    "client_submission_id": "manual-rewrite",
+                },
+            )
+            unrelated = await client.post(
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-short-legacy/submit",
+                json={
+                    "session_id": "sess-general",
+                    "answer_json": "A valid but unrelated example",
+                    "client_submission_id": "manual-unrelated",
+                },
+            )
+        for response in (rewrite, unrelated):
+            assert response.status_code == 200
+            assert response.json()["grading_status"] == "manual_review"
+            assert response.json()["correct"] is None
+            assert response.json()["score"] is None
+        assert await app.state.learning_workflow.event_store.query(
+            "local-user", event_types=[EventType.EXERCISE_SCORED]
+        ) == []
+        assert await app.state.exercise_response_store.list_unpublished_page(
+            after_row_id=0
+        ) == []
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_idempotent_retry_survives_changed_then_deleted_canonical_resource(
+    tmp_path, monkeypatch
+) -> None:
+    app = await _ready_app(tmp_path)
+    event_store = app.state.learning_workflow.event_store
+    original_append = event_store.append
+    failures_remaining = 2
+
+    async def fail_initial_publications(event):
+        nonlocal failures_remaining
+        if failures_remaining:
+            failures_remaining -= 1
+            raise RuntimeError("defer publication")
+        return await original_append(event)
+
+    monkeypatch.setattr(event_store, "append", fail_initial_publications)
+    single_url = "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-single/submit"
+    fill_url = "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-fill/submit"
+    single_payload = {
+        "session_id": "sess-general",
+        "answer_json": "B",
+        "client_submission_id": "resource-changed-retry",
+    }
+    fill_payload = {
+        "session_id": "sess-general",
+        "answer_json": "hello world",
+        "client_submission_id": "resource-deleted-retry",
+    }
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            first_single = await client.post(single_url, json=single_payload)
+            first_fill = await client.post(fill_url, json=fill_payload)
+            assert first_single.status_code == first_fill.status_code == 200
+
+            changed = _general_package()
+            changed_questions = changed.resources[0].format_specific["questions"]
+            changed_questions[0]["answer"] = "A"
+            changed_questions[0]["knowledge_point"] = "changed-concept"
+            changed.topic = "changed-course"
+            await app.state.resource_package_store.save(changed, user_id="local-user")
+
+            retried_single = await client.post(single_url, json=single_payload)
+            assert retried_single.status_code == 200
+            assert retried_single.json()["submission_id"] == first_single.json()["submission_id"]
+            assert retried_single.json()["correct"] is True
+
+            assert await app.state.resource_package_store.delete("pkg-general")
+            retried_fill = await client.post(fill_url, json=fill_payload)
+            conflicting = await client.post(
+                fill_url, json={**fill_payload, "answer_json": "different"}
+            )
+            assert retried_fill.status_code == 200
+            assert retried_fill.json()["submission_id"] == first_fill.json()["submission_id"]
+            assert conflicting.status_code == 409
+            assert conflicting.json()["detail"]["code"] == "SUBMISSION_ID_CONFLICT"
+
+        events = await event_store.query(
+            "local-user", event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert len(events) == 2
+        by_target = {event.target_id: event for event in events}
+        assert by_target["q-single"].concept_id == "selection"
+        assert by_target["q-single"].course == "computer-science"
+        assert by_target["q-fill"].score == 1.0
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_general_resource_api_hides_all_ordinary_canonical_answers(
+    tmp_path,
+) -> None:
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                "/api/v1/resources/packages/local-user/pkg-general"
+            )
+        assert response.status_code == 200
+        questions = response.json()["resources"][0]["format_specific"]["questions"]
+        assert {question["type"] for question in questions} >= {
+            "single_choice",
+            "multiple_choice",
+            "true_false",
+            "fill_blank",
+            "short_answer",
+        }
+        assert all("answer" not in question for question in questions)
+        assert all("accepted_answers" not in question for question in questions)
+        assert "dynamic programming" not in response.text.casefold()
+        assert "legacy model answer" not in response.text.casefold()
     finally:
         await _close_app(app)
 

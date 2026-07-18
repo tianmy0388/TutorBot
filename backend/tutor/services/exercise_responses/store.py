@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     delete,
+    func,
     select,
     text,
     update,
@@ -33,6 +34,7 @@ from sqlalchemy.types import Integer as SqlInteger
 
 from tutor.services.exercise_responses.schema import (
     ExerciseDraft,
+    ExerciseGradingStatus,
     ExerciseResponseState,
     ExerciseSubmission,
 )
@@ -96,6 +98,9 @@ class ExerciseSubmissionRow(_Base):
     question_id = Column(String(64), nullable=False, index=True)
     question_type = Column(String(32), nullable=False)
     answer_json = Column(JSON, nullable=False)
+    grading_status = Column(
+        String(32), nullable=False, default=ExerciseGradingStatus.AUTO_GRADED.value
+    )
     correct = Column(Boolean, nullable=False)
     score = Column(Float, nullable=False)
     concept_id = Column(String(128), nullable=False, default="")
@@ -136,6 +141,19 @@ class ExerciseResponseStore:
         engine = self._ensure_engine()
         async with engine.begin() as connection:
             await connection.run_sync(_Base.metadata.create_all)
+            columns = {
+                str(row[1])
+                for row in (
+                    await connection.exec_driver_sql(
+                        "PRAGMA table_info(exercise_submissions)"
+                    )
+                ).fetchall()
+            }
+            if "grading_status" not in columns:
+                await connection.exec_driver_sql(
+                    "ALTER TABLE exercise_submissions ADD COLUMN "
+                    "grading_status VARCHAR(32) NOT NULL DEFAULT 'auto_graded'"
+                )
 
     async def close(self) -> None:
         if self._engine is not None:
@@ -306,8 +324,11 @@ class ExerciseResponseStore:
                     question_id=submission.question_id,
                     question_type=submission.question_type.value,
                     answer_json=submission.answer_json,
-                    correct=submission.correct,
-                    score=submission.score,
+                    grading_status=submission.grading_status.value,
+                    correct=(
+                        submission.correct if submission.correct is not None else False
+                    ),
+                    score=submission.score if submission.score is not None else 0.0,
                     concept_id=submission.concept_id,
                     course=submission.course,
                     linked_code_attempt_id=submission.linked_code_attempt_id,
@@ -340,10 +361,39 @@ class ExerciseResponseStore:
             ).scalar_one_or_none()
         return self._row_to_submission(row) if row is not None else None
 
+    async def get_by_client_id(
+        self, client_submission_id: str, user_id: str
+    ) -> ExerciseSubmission | None:
+        self._ensure_engine()
+        async with self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(ExerciseSubmissionRow).where(
+                        ExerciseSubmissionRow.client_submission_id
+                        == client_submission_id,
+                        ExerciseSubmissionRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        return self._row_to_submission(row) if row is not None else None
+
+    async def get_repair_high_watermark(self) -> int:
+        self._ensure_engine()
+        async with self._with_session() as session:
+            maximum = await session.scalar(select(func.max(ExerciseSubmissionRow.id)))
+        return int(maximum or 0)
+
     async def list_unpublished_page(
-        self, *, after_row_id: int, limit: int = 1000
+        self,
+        *,
+        after_row_id: int,
+        through_row_id: int | None = None,
+        limit: int = 1000,
     ) -> list[UnpublishedSubmissionRecord]:
         self._ensure_engine()
+        upper_bound = (
+            through_row_id if through_row_id is not None else 2**63 - 1
+        )
         async with self._with_session() as session:
             rows = (
                 await session.execute(
@@ -351,6 +401,7 @@ class ExerciseResponseStore:
                     .where(
                         ExerciseSubmissionRow.event_published.is_(False),
                         ExerciseSubmissionRow.id > max(0, after_row_id),
+                        ExerciseSubmissionRow.id <= max(0, upper_bound),
                     )
                     .order_by(ExerciseSubmissionRow.id)
                     .limit(limit)
@@ -379,20 +430,7 @@ class ExerciseResponseStore:
 
     @staticmethod
     def _idempotency_key(submission: ExerciseSubmission) -> tuple[object, ...]:
-        return (
-            submission.user_id,
-            submission.session_id,
-            submission.package_id,
-            submission.resource_id,
-            submission.question_id,
-            submission.question_type.value,
-            submission.answer_json,
-            submission.correct,
-            submission.score,
-            submission.concept_id,
-            submission.course,
-            submission.linked_code_attempt_id,
-        )
+        return (submission.user_id, *submission.client_request_identity())
 
     @staticmethod
     def _row_to_draft(row: ExerciseDraftRow) -> ExerciseDraft:
@@ -410,6 +448,9 @@ class ExerciseResponseStore:
 
     @staticmethod
     def _row_to_submission(row: ExerciseSubmissionRow) -> ExerciseSubmission:
+        grading_status = ExerciseGradingStatus(
+            row.grading_status or ExerciseGradingStatus.AUTO_GRADED.value
+        )
         return ExerciseSubmission.model_validate(
             {
                 "submission_id": row.submission_id,
@@ -421,8 +462,17 @@ class ExerciseResponseStore:
                 "question_id": row.question_id,
                 "question_type": row.question_type,
                 "answer_json": row.answer_json,
-                "correct": bool(row.correct),
-                "score": row.score,
+                "grading_status": grading_status,
+                "correct": (
+                    None
+                    if grading_status == ExerciseGradingStatus.MANUAL_REVIEW
+                    else bool(row.correct)
+                ),
+                "score": (
+                    None
+                    if grading_status == ExerciseGradingStatus.MANUAL_REVIEW
+                    else row.score
+                ),
                 "concept_id": row.concept_id or "",
                 "course": row.course or "",
                 "linked_code_attempt_id": row.linked_code_attempt_id,

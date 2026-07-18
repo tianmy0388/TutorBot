@@ -201,7 +201,7 @@ def test_public_package_projection_never_exposes_code_answers_or_tests() -> None
         "time_limit_seconds": 5,
         "test_count": 1,
     }
-    assert choice["answer"] is True
+    assert "answer" not in choice
     serialized = str(public)
     assert "private reference" not in serialized
     assert "expected_json" not in serialized

@@ -210,6 +210,7 @@ class ExerciseQuestion(BaseModel):
     question: str
     options: list[ExerciseOption] = Field(default_factory=list)
     answer: Any = None  # string, list[str], bool, or code string
+    accepted_answers: list[str] = Field(default_factory=list)
     explanation: str = ""
     estimated_seconds: int = 60
     # Optional keeps legacy packages readable. Submission validates the
@@ -615,12 +616,16 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
     public_questions: list[Any] = []
     has_code = False
     for raw in questions:
-        if not isinstance(raw, dict) or raw.get("type") != "code":
+        if not isinstance(raw, dict):
             public_questions.append(raw)
             continue
-        has_code = True
         question = dict(raw)
         question.pop("answer", None)
+        question.pop("accepted_answers", None)
+        if raw.get("type") != "code":
+            public_questions.append(question)
+            continue
+        has_code = True
         spec = question.get("code_spec")
         if isinstance(spec, dict):
             tests = spec.get("tests")

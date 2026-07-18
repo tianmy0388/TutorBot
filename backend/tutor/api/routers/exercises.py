@@ -26,8 +26,10 @@ from tutor.services.exercise_attempts.store import (
 from tutor.services.exercise_responses.publisher import publish_submission_event
 from tutor.services.exercise_responses.schema import (
     ExerciseDraft,
+    ExerciseGradingStatus,
     ExerciseQuestionType,
     ExerciseSubmission,
+    exercise_submission_request_identity,
 )
 from tutor.services.exercise_responses.store import (
     ExerciseResponseConflictError,
@@ -174,6 +176,16 @@ def _malformed_answer() -> HTTPException:
     )
 
 
+def _submission_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": ExerciseResponseConflictError.code,
+            "message": "The client submission id is already used",
+        },
+    )
+
+
 def _normalized_text(value: Any) -> str:
     if not isinstance(value, str):
         raise _malformed_answer()
@@ -197,7 +209,10 @@ def _score_answer(question_type: ExerciseQuestionType, submitted: Any, canonical
     elif question_type == ExerciseQuestionType.MULTIPLE_CHOICE:
         if not isinstance(submitted, list) or not isinstance(canonical, list):
             raise _malformed_answer()
-        submitted_set = {_normalized_text(item) for item in submitted}
+        submitted_items = [_normalized_text(item) for item in submitted]
+        if len(set(submitted_items)) != len(submitted_items):
+            raise _malformed_answer()
+        submitted_set = set(submitted_items)
         canonical_set = {_normalized_text(item) for item in canonical}
         if not submitted_set or not canonical_set:
             raise _malformed_answer()
@@ -338,6 +353,29 @@ async def submit_exercise_response(
     request: Request,
 ) -> dict[str, Any]:
     user_id = _canonical_user(request, body.user_id)
+    response_store = _response_store(request)
+    if body.client_submission_id:
+        existing = await response_store.get_by_client_id(
+            body.client_submission_id, user_id
+        )
+        if existing is not None:
+            try:
+                retry_identity = exercise_submission_request_identity(
+                    session_id=body.session_id,
+                    package_id=package_id,
+                    resource_id=resource_id,
+                    question_id=question_id,
+                    question_type=existing.question_type,
+                    answer_json=body.answer_json,
+                    linked_code_attempt_id=body.linked_code_attempt_id,
+                )
+            except ValueError as exc:
+                raise _submission_conflict() from exc
+            if retry_identity != existing.client_request_identity():
+                raise _submission_conflict()
+            await _publish_submission_best_effort(existing, request)
+            return existing.model_dump(mode="json")
+
     question, owned_resource_id, course = await _owned_question(
         request,
         user_id=user_id,
@@ -353,6 +391,7 @@ async def submit_exercise_response(
     linked_attempt_id: str | None = None
     answer_json = body.answer_json
     session_id = body.session_id
+    grading_status = ExerciseGradingStatus.AUTO_GRADED
     if question_type == ExerciseQuestionType.CODE:
         if not body.linked_code_attempt_id:
             raise HTTPException(
@@ -373,7 +412,6 @@ async def submit_exercise_response(
             raise _not_found()
         linked_attempt_id = attempt.attempt_id
         answer_json = None
-        session_id = body.session_id or attempt.session_id
         correct = attempt.status == AttemptStatus.PASSED
         score = (
             attempt.passed_tests / attempt.total_tests
@@ -383,16 +421,40 @@ async def submit_exercise_response(
     else:
         if body.linked_code_attempt_id is not None:
             raise _malformed_answer()
-        canonical = question.get("answer")
-        if canonical is None:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "ANSWER_UNAVAILABLE",
-                    "message": "This exercise cannot be scored",
-                },
+        if question_type == ExerciseQuestionType.SHORT_ANSWER:
+            _normalized_text(body.answer_json)
+            accepted = question.get("accepted_answers")
+            accepted_answers = (
+                accepted
+                if isinstance(accepted, list)
+                and accepted
+                and all(
+                    isinstance(item, str) and _normalized_text(item)
+                    for item in accepted
+                )
+                else None
             )
-        correct, score = _score_answer(question_type, body.answer_json, canonical)
+            if accepted_answers is None:
+                grading_status = ExerciseGradingStatus.MANUAL_REVIEW
+                correct = None
+                score = None
+            else:
+                correct, score = _score_answer(
+                    question_type, body.answer_json, accepted_answers
+                )
+        else:
+            canonical = question.get("answer")
+            if canonical is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "ANSWER_UNAVAILABLE",
+                        "message": "This exercise cannot be scored",
+                    },
+                )
+            correct, score = _score_answer(
+                question_type, body.answer_json, canonical
+            )
 
     submission = ExerciseSubmission(
         client_submission_id=body.client_submission_id,
@@ -403,6 +465,7 @@ async def submit_exercise_response(
         question_id=question_id,
         question_type=question_type,
         answer_json=answer_json,
+        grading_status=grading_status,
         correct=correct,
         score=score,
         concept_id=str(question.get("knowledge_point") or question_id),
@@ -410,15 +473,9 @@ async def submit_exercise_response(
         linked_code_attempt_id=linked_attempt_id,
     )
     try:
-        durable = await _response_store(request).save_submission(submission)
+        durable = await response_store.save_submission(submission)
     except ExerciseResponseConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": exc.code,
-                "message": "The client submission id is already used",
-            },
-        ) from exc
+        raise _submission_conflict() from exc
     except Exception as exc:
         logger.error(
             "EXERCISE_RESPONSE_STORE_UNAVAILABLE exception_type={}",

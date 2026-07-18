@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from tutor.services.exercise_responses.schema import (
     ExerciseDraft,
+    ExerciseGradingStatus,
     ExerciseSubmission,
 )
 from tutor.services.exercise_responses.store import (
@@ -158,9 +160,14 @@ async def test_submission_history_and_crash_repair_cursor_are_stable(tmp_path) -
 
         state = await store.get_state(USER, PACKAGE, RESOURCE, QUESTION)
         assert [item.submission_id for item in state.submissions] == ["new", "old"]
-        first_page = await store.list_unpublished_page(after_row_id=0, limit=1)
+        watermark = await store.get_repair_high_watermark()
+        first_page = await store.list_unpublished_page(
+            after_row_id=0, through_row_id=watermark, limit=1
+        )
         second_page = await store.list_unpublished_page(
-            after_row_id=first_page[-1].row_id, limit=1
+            after_row_id=first_page[-1].row_id,
+            through_row_id=watermark,
+            limit=1,
         )
         assert first_page[0].submission.submission_id == old.submission_id
         assert second_page[0].submission.submission_id == new.submission_id
@@ -169,7 +176,9 @@ async def test_submission_history_and_crash_repair_cursor_are_stable(tmp_path) -
         assert await store.mark_event_published("old", "other-user") is False
         persisted = await store.get_submission_for_user("new", USER)
         assert persisted is not None and persisted.event_published is True
-        remaining = await store.list_unpublished_page(after_row_id=0)
+        remaining = await store.list_unpublished_page(
+            after_row_id=0, through_row_id=watermark
+        )
         assert [record.submission.submission_id for record in remaining] == ["old"]
     finally:
         await store.close()
@@ -202,4 +211,86 @@ async def test_init_migrates_an_existing_empty_database(tmp_path) -> None:
         }
     assert {"exercise_drafts", "exercise_submissions"} <= tables
     assert {"user_id", "package_id", "resource_id", "question_id", "answer_json"} <= draft_columns
-    assert {"event_published", "linked_code_attempt_id", "answer_json"} <= submission_columns
+    assert {
+        "event_published",
+        "grading_status",
+        "linked_code_attempt_id",
+        "answer_json",
+    } <= submission_columns
+
+
+@pytest.mark.asyncio
+async def test_init_adds_grading_status_to_pre_review_submission_table(tmp_path) -> None:
+    db_path = tmp_path / "responses.db"
+    original = ExerciseResponseStore(db_path)
+    await original.init()
+    await original.save_submission(_submission("legacy-row"))
+    await original.close()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "ALTER TABLE exercise_submissions DROP COLUMN grading_status"
+        )
+
+    migrated = ExerciseResponseStore(db_path)
+    await migrated.init()
+    try:
+        persisted = await migrated.get_submission_for_user("legacy-row", USER)
+        assert persisted is not None
+        assert persisted.grading_status == ExerciseGradingStatus.AUTO_GRADED
+        assert persisted.correct is True
+        assert persisted.score == 1.0
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_submission_round_trips_nullable_grading(tmp_path) -> None:
+    store = ExerciseResponseStore(tmp_path / "responses.db")
+    await store.init()
+    try:
+        manual = ExerciseSubmission(
+            submission_id="manual",
+            client_submission_id="manual-client",
+            user_id=USER,
+            session_id="sess-general",
+            package_id=PACKAGE,
+            resource_id=RESOURCE,
+            question_id="q-short",
+            question_type="short_answer",
+            answer_json="A learner-authored explanation",
+            grading_status=ExerciseGradingStatus.MANUAL_REVIEW,
+            correct=None,
+            score=None,
+            concept_id="writing",
+            course="python",
+        )
+        saved = await store.save_submission(manual)
+        persisted = await store.get_submission_for_user(saved.submission_id, USER)
+        assert persisted is not None
+        assert persisted.grading_status == ExerciseGradingStatus.MANUAL_REVIEW
+        assert persisted.correct is None
+        assert persisted.score is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_two_store_instances_race_one_owner_client_key_to_one_row(tmp_path) -> None:
+    db_path = tmp_path / "responses.db"
+    first_store = ExerciseResponseStore(db_path)
+    second_store = ExerciseResponseStore(db_path)
+    await first_store.init()
+    await second_store.init()
+    try:
+        first, second = await asyncio.gather(
+            first_store.save_submission(_submission("racer-one")),
+            second_store.save_submission(_submission("racer-two")),
+        )
+        assert first.submission_id == second.submission_id
+        state = await first_store.get_state(USER, PACKAGE, RESOURCE, QUESTION)
+        assert [item.submission_id for item in state.submissions] == [
+            first.submission_id
+        ]
+    finally:
+        await first_store.close()
+        await second_store.close()

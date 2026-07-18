@@ -302,6 +302,41 @@ def test_public_video_projection_resanitizes_structured_failure() -> None:
     assert failure["log_artifact_key"] == "manim_logs/job/error.log"
 
 
+def test_public_exercise_projection_hides_every_canonical_answer() -> None:
+    questions = [
+        {"id": "single", "type": "single_choice", "question": "single", "answer": "SECRET-S"},
+        {"id": "multiple", "type": "multiple_choice", "question": "multiple", "answer": ["SECRET-M1", "SECRET-M2"]},
+        {"id": "boolean", "type": "true_false", "question": "boolean", "answer": True},
+        {"id": "fill", "type": "fill_blank", "question": "fill", "answer": "SECRET-F"},
+        {
+            "id": "short",
+            "type": "short_answer",
+            "question": "short",
+            "answer": "(开放式回答)",
+            "accepted_answers": ["SECRET-SA"],
+        },
+    ]
+    resource = Resource(
+        type=ResourceType.EXERCISE,
+        title="ordinary exercises",
+        format_specific={"questions": questions},
+    )
+
+    public = public_resource_dump(resource)
+    projected = public["format_specific"]["questions"]
+
+    assert [question["id"] for question in projected] == [
+        "single",
+        "multiple",
+        "boolean",
+        "fill",
+        "short",
+    ]
+    assert all("answer" not in question for question in projected)
+    assert all("accepted_answers" not in question for question in projected)
+    assert "SECRET-" not in str(public)
+
+
 # ---------------------------------------------------------------------------
 # CodeResource
 # ---------------------------------------------------------------------------

@@ -6,7 +6,10 @@ from loguru import logger
 
 from tutor.services.exercise_attempts.publisher import publish_attempt_event
 from tutor.services.exercise_attempts.store import ExerciseAttemptStore
-from tutor.services.exercise_responses.schema import ExerciseSubmission
+from tutor.services.exercise_responses.schema import (
+    ExerciseGradingStatus,
+    ExerciseSubmission,
+)
 from tutor.services.exercise_responses.store import ExerciseResponseStore
 from tutor.services.learning_events.schema import EventType, LearningEvent
 from tutor.services.learning_events.workflow import LearningWorkflow
@@ -24,6 +27,10 @@ async def publish_submission_event(
     reconcile: bool = True,
 ) -> bool:
     """Publish scored evidence, or reuse the linked code-attempt evidence."""
+    if submission.grading_status == ExerciseGradingStatus.MANUAL_REVIEW:
+        return await response_store.mark_event_published(
+            submission.submission_id, submission.user_id
+        )
     if submission.linked_code_attempt_id:
         if attempt_store is None:
             return False
@@ -93,9 +100,14 @@ async def repair_unpublished_submission_events(
     """Best-effort stable-cursor startup repair of publication gaps."""
     repaired = 0
     cursor = 0
+    watermark = await response_store.get_repair_high_watermark()
+    if watermark <= 0:
+        return 0
     while True:
         page = await response_store.list_unpublished_page(
-            after_row_id=cursor, limit=_REPAIR_PAGE_SIZE
+            after_row_id=cursor,
+            through_row_id=watermark,
+            limit=_REPAIR_PAGE_SIZE,
         )
         if not page:
             break
