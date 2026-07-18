@@ -766,10 +766,15 @@ git add frontend/e2e/reliability.spec.ts backend/tests/integration/test_local_va
 git commit -m "test: cover local validation follow-up flows"
 ```
 
-## Execution Waves
+## Subagent-Driven Execution Order
 
-1. **Wave 1 (parallel):** Tasks 1, 3, 4, and 6. These tasks have disjoint write ownership: public job projection, frontend workflow state, diagram/media generation, and exercise backend respectively.
-2. **Wave 2 (parallel):** Task 2 after Tasks 1/3, Task 5 after Task 4, and Task 8 after Task 6. This avoids concurrent edits to `event-handler.ts`, `ExerciseViewer.tsx`, and `resource_package/schema.py`.
-3. **Wave 3 (parallel):** Task 7 after Tasks 2/6 and Task 9 after Tasks 4/5. Their frontend and backend ownership is disjoint.
-4. **Wave 4:** Task 10 after Tasks 7/9, followed by Task 11 and broad verification.
-5. Every subagent task receives this plan, the approved design spec, and an explicit file ownership boundary. The primary agent performs spec review and code-quality review before accepting each task.
+Subagent-Driven implementation uses one fresh implementer at a time and accepts
+the task only after spec-compliance and code-quality review. The independent
+boundaries below still minimise context and test time, but no two implementers
+write to the shared worktree concurrently.
+
+1. Tasks 1, 3, 4, and 6 establish the four independent backend/frontend foundations.
+2. Task 2 follows Tasks 1/3; Task 5 follows Task 4; Task 8 follows Task 6.
+3. Task 7 follows Tasks 2/6; Task 9 follows Tasks 4/5.
+4. Task 10 follows Tasks 7/9, then Task 11 performs broad verification.
+5. Every subagent receives its extracted task brief, the approved design constraints, and an explicit file ownership boundary. The primary agent performs spec review and code-quality review before accepting each task.
