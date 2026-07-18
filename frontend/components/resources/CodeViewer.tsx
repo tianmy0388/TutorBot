@@ -52,9 +52,12 @@ function artifactKind(artifact: CodeArtifact) {
     .toLowerCase()
     .replace(/^image\//, "")
     .replace(/^\./, "");
-  if (explicit) return explicit;
+  const normalized = explicit === "svg+xml" ? "svg" : explicit;
+  if (IMAGE_KINDS.has(normalized)) return normalized;
   const extension = artifact.name.split(".").pop();
-  return extension && extension !== artifact.name ? extension.toLowerCase() : "";
+  const fallback =
+    extension && extension !== artifact.name ? extension.toLowerCase() : "";
+  return IMAGE_KINDS.has(fallback) ? fallback : normalized || fallback;
 }
 
 export function CodeViewer({ resource }: { resource: Resource }) {
@@ -293,7 +296,7 @@ export function CodeViewer({ resource }: { resource: Resource }) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {artifacts.map((art) => (
               <ArtifactPreview
-                key={art.name}
+                key={`${resource.resource_id}:${artifactUrl(art.name)}`}
                 artifact={art}
                 url={artifactUrl(art.name)}
                 onOpen={() => {
@@ -347,7 +350,8 @@ function ArtifactPreview({
   onOpen(): void;
 }) {
   const kind = artifactKind(artifact);
-  const [errored, setErrored] = useState(false);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const errored = failedUrl === url;
 
   if (errored) {
     return (
@@ -371,7 +375,7 @@ function ArtifactPreview({
           src={url}
           alt={artifact.name}
           loading="lazy"
-          onError={() => setErrored(true)}
+          onError={() => setFailedUrl(url)}
           className="image-artifact-preview w-full h-auto object-contain"
         />
         <div className="px-3 py-1.5 text-[10px] text-fg-muted font-mono border-t border-fg/5">

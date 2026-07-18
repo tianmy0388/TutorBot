@@ -119,4 +119,41 @@ describe("CodeViewer image artifacts", () => {
       "/api/v1/resources/local-user/resources/resource%2Fcode%201/artifacts/fallback.JPEG",
     );
   });
+
+  it.each(["image/svg+xml", "svg+xml", "application/octet-stream"])(
+    "normalizes %s or falls back to the recognized filename extension",
+    (kind) => {
+      const resource = codeResource();
+      resource.format_specific = {
+        ...resource.format_specific,
+        artifacts: [{ name: "normalized.svg", kind, path: "ignored.svg" }],
+      };
+
+      render(<CodeViewer resource={resource} />);
+      expect(
+        screen.getByRole("button", { name: "查看 normalized.svg" }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("does not retain an image error when a same-named artifact gets a new canonical URL", () => {
+    const firstResource = codeResource();
+    const view = render(<CodeViewer resource={firstResource} />);
+    fireEvent.error(screen.getByRole("img", { name: "figure 1.png" }));
+    expect(screen.getByText("加载失败（文件可能已被清理）")).toBeInTheDocument();
+
+    const nextResource = codeResource();
+    nextResource.resource_id = "resource/code 2";
+    nextResource.metadata = { package_id: "package/code 2" };
+    view.rerender(<CodeViewer resource={nextResource} />);
+
+    const refreshed = screen.getByRole("img", { name: "figure 1.png" });
+    expect(refreshed).toHaveAttribute(
+      "src",
+      "/api/v1/resources/packages/local-user/package%2Fcode%202/resources/resource%2Fcode%202/artifacts/figure%201.png",
+    );
+    const opener = screen.getByRole("button", { name: "查看 figure 1.png" });
+    fireEvent.click(opener);
+    expect(screen.getByRole("dialog", { name: "图片查看器" })).toBeVisible();
+  });
 });

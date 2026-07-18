@@ -308,6 +308,44 @@ describe("ImageLightbox navigation and transforms", () => {
     expect(HTMLElement.prototype.releasePointerCapture).toHaveBeenCalledWith(7);
   });
 
+  it("ends a drag on ordinary pointer up and releases capture", () => {
+    render(
+      <ImageLightbox images={images} initialIndex={0} open onOpenChange={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "放大" }));
+    const image = screen.getByRole("img", { name: "one.png" });
+
+    fireEvent.pointerDown(image, {
+      pointerId: 8,
+      pointerType: "mouse",
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(image, {
+      pointerId: 8,
+      pointerType: "mouse",
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(image, {
+      pointerId: 8,
+      pointerType: "mouse",
+      clientX: 30,
+      clientY: 40,
+    });
+    const settled = image.style.transform;
+    fireEvent.pointerMove(image, {
+      pointerId: 8,
+      pointerType: "mouse",
+      clientX: 80,
+      clientY: 90,
+    });
+
+    expect(image.style.transform).toBe(settled);
+    expect(HTMLElement.prototype.releasePointerCapture).toHaveBeenCalledWith(8);
+  });
+
   it("zooms around the wheel cursor and prevents page scrolling", () => {
     render(
       <ImageLightbox images={images} initialIndex={0} open onOpenChange={vi.fn()} />,
@@ -338,6 +376,49 @@ describe("ImageLightbox navigation and transforms", () => {
     expect(screen.getByRole("img", { name: "one.png" }).style.transform).toBe(
       "translate(-25px, -12.5px) scale(1.25)",
     );
+  });
+
+  it("removes and reinstalls exactly one native wheel listener across close and reopen", async () => {
+    const addListener = vi.spyOn(EventTarget.prototype, "addEventListener");
+    const removeListener = vi.spyOn(EventTarget.prototype, "removeEventListener");
+    render(<OpenableLightbox />);
+    const opener = screen.getByRole("button", { name: "打开图片" });
+    opener.focus();
+    fireEvent.click(opener);
+
+    const wheelAdds = () =>
+      addListener.mock.calls.filter(
+        ([type, , options]) =>
+          type === "wheel" &&
+          typeof options === "object" &&
+          options !== null &&
+          "passive" in options &&
+          options.passive === false,
+      );
+    expect(wheelAdds()).toHaveLength(1);
+    const firstHandler = wheelAdds()[0][1];
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(opener).toHaveFocus());
+    expect(
+      removeListener.mock.calls.some(
+        ([type, handler]) => type === "wheel" && handler === firstHandler,
+      ),
+    ).toBe(true);
+
+    fireEvent.click(opener);
+    expect(wheelAdds()).toHaveLength(2);
+    expect(wheelAdds()[1][1]).not.toBe(firstHandler);
+    const reopenedStage = screen.getByTestId("image-lightbox-stage");
+    fireEvent(
+      reopenedStage,
+      new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        deltaY: -100,
+      }),
+    );
+    expect(screen.getByText("125%")).toBeInTheDocument();
   });
 
   it("supports a two-pointer pinch and cleans both pointers", () => {
