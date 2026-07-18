@@ -227,6 +227,25 @@ def test_public_resource_projection_redacts_embedded_host_paths_without_redactin
     assert projected["metadata"]["prose"] == "The learner completed the gradient exercise."
 
 
+def test_public_resource_projection_redacts_embedded_unix_paths_without_root_allowlist() -> None:
+    event = exercise_resource_event(options=[{"label": "A", "text": "梯度"}])
+    metadata = event["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["usr"] = "interpreter: /usr/local/bin/python"
+    metadata["bin"] = "shell failed at /bin/sh"
+    metadata["lib"] = "loader: /lib/x86_64-linux-gnu/libc.so.6"
+    metadata["url"] = "https://example.com/usr/local/bin/python"
+    metadata["prose"] = "The / symbol separates path-like notation in prose."
+
+    projected = project_public_event(event)
+
+    assert projected["metadata"]["usr"] == REDACTED
+    assert projected["metadata"]["bin"] == REDACTED
+    assert projected["metadata"]["lib"] == REDACTED
+    assert projected["metadata"]["url"] == "https://example.com/usr/local/bin/python"
+    assert projected["metadata"]["prose"] == "The / symbol separates path-like notation in prose."
+
+
 def test_public_event_handles_deep_acyclic_unknown_containers_without_recursion_error() -> None:
     nested: dict[str, object] = {}
     current = nested

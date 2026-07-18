@@ -31,7 +31,7 @@ _HOST_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"[A-Za-z]:[\\/]"
     r"|\\\\[^\\/\s]+[\\/]"
-    r"|/(?:workspace|workspaces|data|proc|sys|dev|run|home|Users|var|tmp|private|etc|opt|root|mnt|srv)(?:[\\/]|$)"
+    r"|(?<![A-Za-z0-9_.:/-])/(?:[^/\s]+/)+[^/\s]+"
     r")"
 )
 
