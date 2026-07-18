@@ -371,8 +371,15 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         await apiDeleteJob(userId, jobId);
         setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
         setTotal((t) => Math.max(0, t - 1));
+        useTutorStore.getState().removeJob(jobId);
         return true;
       } catch (e) {
+        if ((e as { status?: number }).status === 404) {
+          setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
+          setTotal((t) => Math.max(0, t - 1));
+          useTutorStore.getState().removeJob(jobId);
+          return true;
+        }
         console.warn(`[useJobQueue] remove(${jobId}) failed`, e);
         return false;
       }

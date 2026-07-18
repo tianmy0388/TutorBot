@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils";
 import { StageIndicator, StageRow } from "./StageIndicator";
 import { isJobTerminal } from "@/lib/job-reducer";
 import { formatStructuredError } from "@/lib/errors";
-import type { StructuredError } from "@/lib/types";
+import type { StructuredError, WorkflowSnapshot } from "@/lib/types";
 import {
   Bot,
   User,
@@ -226,8 +226,11 @@ function MessageBubble({
     content: string;
     agent?: string;
     timestamp: number;
+    metadata?: Record<string, unknown>;
   };
 }) {
+  const workflow = workflowFromMetadata(message.metadata);
+  if (workflow) return <WorkflowTimelineCard workflow={workflow} />;
   const isUser = message.role === "user";
   const isError = message.role === "system" && message.content.startsWith("错误");
   const Icon = isUser ? User : isError ? AlertTriangle : Bot;
@@ -633,6 +636,40 @@ function MarkdownContent({
       >
         {content}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+function workflowFromMetadata(metadata: Record<string, unknown> | undefined): WorkflowSnapshot | null {
+  if (metadata?.kind !== "workflow_timeline") return null;
+  const workflow = metadata.workflow;
+  if (!workflow || typeof workflow !== "object") return null;
+  const candidate = workflow as Partial<WorkflowSnapshot>;
+  if (!Array.isArray(candidate.stages) || typeof candidate.status !== "string") return null;
+  return candidate as WorkflowSnapshot;
+}
+
+function WorkflowTimelineCard({ workflow }: { workflow: WorkflowSnapshot }) {
+  const label: Record<WorkflowSnapshot["status"], string> = {
+    succeeded: "已完成",
+    partial: "部分完成",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+  return (
+    <div className="max-w-3xl mr-auto animate-fade-in">
+      <div className="card bg-bg-panel/80 border-fg/10 space-y-2">
+        <div className="text-sm font-medium">工作流程 · {label[workflow.status]}</div>
+        <div className="flex flex-wrap gap-2">
+          {workflow.stages.map((stage) => (
+            <StageRow
+              key={stage.name}
+              stage={stage.name}
+              state={stage.status === "completed" ? "done" : "pending"}
+            />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

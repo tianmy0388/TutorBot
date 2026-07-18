@@ -46,6 +46,7 @@ const baseJobs: JobsState = {
 function mockStoreState(opts: {
   activeTurn?: Partial<ActiveTurn>;
   jobs?: { jobsById?: Record<string, ClientJob>; jobOrder?: string[] };
+  messages?: Array<{ id: string; role: string; content: string; timestamp: number; metadata?: Record<string, unknown> }>;
   recoveryWarnings?: Array<{ code: string; message: string }>;
   dismissRecoveryWarning?: (index: number) => void;
 } = {}) {
@@ -57,7 +58,7 @@ function mockStoreState(opts: {
   const jobOrder = opts.jobs?.jobOrder ?? Object.keys(jobsById);
   useTutorStoreMock.mockImplementation((selector: (s: unknown) => unknown) =>
     selector({
-      messages: [],
+      messages: opts.messages ?? [],
       activeTurn,
       jobsById,
       jobOrder,
@@ -147,6 +148,28 @@ describe("ChatMessages — terminal state", () => {
     render(<ChatMessages />);
     // The "正在调用 Agent" badge must NOT render after a terminal job.
     expect(screen.queryByText(/调用 Agent/i)).not.toBeInTheDocument();
+  });
+
+  it("renders a terminal workflow card with completed stages", () => {
+    mockStoreState({
+      messages: [{
+        id: "workflow:job-1",
+        role: "assistant",
+        content: "",
+        timestamp: 1,
+        metadata: {
+          kind: "workflow_timeline",
+          job_id: "job-1",
+          workflow: { status: "succeeded", stages: [{ name: "intent_understanding", status: "completed" }] },
+        },
+      }],
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText(/已完成/)).toBeInTheDocument();
+    expect(screen.getByText("意图理解")).toBeInTheDocument();
+    expect(screen.queryByText("正在调用 Agent…")).not.toBeInTheDocument();
   });
 
   it("trusts a canonical terminal event when the replayed status is stale", () => {

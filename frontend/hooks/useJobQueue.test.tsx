@@ -113,6 +113,7 @@ beforeEach(() => {
     jobOrder: [],
     messages: [],
     sessionId: "current-page",
+    latestPackage: null,
   });
 });
 
@@ -237,23 +238,34 @@ describe("useJobQueue durable child refresh", () => {
       });
       apiMocks.listJobs
         .mockResolvedValueOnce({ items: [job("pending")], total: 1 })
-        .mockResolvedValueOnce({ items: [job(terminalStatus)], total: 1 });
+        .mockResolvedValue({ items: [job(terminalStatus)], total: 1 });
 
-      renderHook(() => useJobQueue("local-user"));
-      render(<VideoViewer resource={resource} />);
+      const { result } = renderHook(() => useJobQueue("local-user"));
+      render(<VideoViewer resource={{ ...resource, format_specific: {} }} />);
       await act(flushPromises);
       expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5000);
         await flushPromises();
+        await flushPromises();
+      });
+      await act(async () => {
+        await result.current.refresh();
+      });
+      await act(async () => {
+        useTutorStore.getState().rehydrateJobFromDetail({
+          ...job(terminalStatus),
+          events: [],
+          result: null,
+        });
       });
 
-      expect(screen.getByText(terminalText)).toBeInTheDocument();
-      expect(screen.queryByText("视频渲染中…")).not.toBeInTheDocument();
       expect(
         useTutorStore.getState().jobsById["parent-live"].children?.[0].status,
       ).toBe(terminalStatus);
+      expect(screen.getByText(terminalText)).toBeInTheDocument();
+      expect(screen.queryByText("视频渲染中…")).not.toBeInTheDocument();
       expect(useTutorStore.getState().jobsById["parent-live"].last_seq).toBe(7);
       expect(useTutorStore.getState().jobsById["parent-live"].events).toHaveLength(1);
     },
@@ -269,6 +281,22 @@ describe("useJobQueue durable child refresh", () => {
     const hydrated = useTutorStore.getState().jobsById["parent-live"];
     expect(hydrated.children?.[0].status).toBe("failed");
     expect(hydrated.background_status).toBe("failed");
+  });
+
+  it("removes a missing deleted job from both queue and Zustand", async () => {
+    apiMocks.listJobs.mockResolvedValue({ items: [job("succeeded")], total: 1 });
+    apiMocks.deleteJob.mockRejectedValue({ status: 404 });
+    useTutorStore.getState().rehydrateJobFromDetail({ ...job("succeeded"), events: [], result: null });
+
+    const { result } = renderHook(() => useJobQueue("local-user"));
+    await act(flushPromises);
+
+    await act(async () => {
+      expect(await result.current.remove("parent-live")).toBe(true);
+    });
+
+    expect(result.current.jobs.find((item) => item.job_id === "parent-live")).toBeUndefined();
+    expect(useTutorStore.getState().jobsById["parent-live"]).toBeUndefined();
   });
 
   it("hydrates only the current session when another session has the same resource id", async () => {

@@ -407,6 +407,13 @@ export type JobStatus =
 
 export type JobTerminalStatus = "succeeded" | "partial" | "failed" | "cancelled";
 
+export interface WorkflowSnapshot {
+  status: JobTerminalStatus;
+  stages: Array<{ name: string; status: "completed" | "incomplete" }>;
+}
+
+export type SessionOrigin = "none" | "draft" | "restored" | "server";
+
 export interface JobProgress {
   stage: string;
   percent: number;

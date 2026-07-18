@@ -69,9 +69,11 @@ describe("job-reducer", () => {
       terminalEvent("job-1", "已生成 3 项资源"),
     );
     expect(next.jobsById["job-1"].status).toBe("succeeded");
-    expect(next.messages.at(-1)?.content).toBe("已生成 3 项资源");
-    expect(next.messages.at(-1)?.metadata?.terminal).toBe(true);
-    expect(next.messages.at(-1)?.metadata?.job_id).toBe("job-1");
+    const terminal = next.messages.find((message) => message.metadata?.terminal === true);
+    expect(terminal?.content).toBe("已生成 3 项资源");
+    expect(terminal?.metadata?.job_id).toBe("job-1");
+    expect(next.messages.find((message) => message.id === "workflow:job-1")?.metadata?.workflow)
+      .toMatchObject({ stages: [] });
   });
 
   it("does not treat an older assistant message as output for a new job", () => {
@@ -88,7 +90,8 @@ describe("job-reducer", () => {
       ],
     );
     const next = reduceJobEvent(state, terminalEvent("job-2", "新回答"));
-    expect(next.messages.map((m) => m.content)).toEqual(["旧回答", "新回答"]);
+    expect(next.messages.filter((m) => m.metadata?.terminal === true).map((m) => m.content))
+      .toEqual(["新回答"]);
   });
 
   it("does not duplicate the assistant message on replay of the same terminal", () => {
@@ -99,6 +102,7 @@ describe("job-reducer", () => {
       (m) => m.metadata?.job_id === "job-3" && m.metadata?.terminal === true,
     ).length;
     expect(assistantCount).toBe(1);
+    expect(twice.messages.filter((message) => message.id === "workflow:job-3")).toHaveLength(1);
   });
 
   it("dedupes the same canonical terminal across snapshot and live replay", () => {
@@ -180,7 +184,8 @@ describe("job-reducer", () => {
     const next = reduceJobEvent(state, ev);
     expect(next.jobsById["job-6"].status).toBe("partial");
     expect(next.jobsById["job-6"].result?.artifacts?.length).toBe(3);
-    expect(next.messages.at(-1)?.content).toContain("失败");
+    expect(next.messages.find((message) => message.metadata?.terminal === true)?.content)
+      .toContain("失败");
   });
 
   it("rejects events for unknown jobs without crashing", () => {
@@ -309,7 +314,8 @@ describe("job-reducer", () => {
       },
     });
     expect(next.jobsById["job-10"]?.status).toBe("succeeded");
-    expect(next.messages.at(-1)?.content).toBe("从快照恢复的消息");
+    expect(next.messages.find((message) => message.metadata?.terminal === true)?.content)
+      .toBe("从快照恢复的消息");
   });
 
   it.each(["succeeded", "partial", "failed", "cancelled"] as const)(
@@ -371,7 +377,8 @@ describe("job-reducer", () => {
     });
 
     expect(next.jobsById["job-replay"].status).toBe("succeeded");
-    expect(next.messages.at(-1)?.content).toBe("replayed");
+    expect(next.messages.find((message) => message.metadata?.terminal === true)?.content)
+      .toBe("replayed");
   });
 
   it.each([

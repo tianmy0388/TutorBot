@@ -68,6 +68,7 @@ export default function HomePage() {
 
   const hydrateSessionId = useTutorStore((s) => s.hydrateSessionId);
   const sessionIdRestored = useTutorStore((s) => s.sessionId);
+  const sessionOrigin = useTutorStore((s) => s.sessionOrigin);
   const userIdRestored = useTutorStore((s) => s.userId);
   const loadConversationAggregate = useTutorStore(
     (s) => s.loadConversationAggregate,
@@ -81,7 +82,7 @@ export default function HomePage() {
   useEffect(() => {
     if (sessionRestoreRef.current) return;
     if (!sessionIdRestored || sessionIdRestored.length === 0) return;
-    if (messagesLength > 0) return;
+    if (sessionOrigin !== "restored" || messagesLength > 0) return;
     if (!userIdRestored) return;
     sessionRestoreRef.current = true;
     void loadConversationAggregate(userIdRestored, sessionIdRestored).catch(
@@ -95,6 +96,7 @@ export default function HomePage() {
     );
   }, [
     sessionIdRestored,
+    sessionOrigin,
     userIdRestored,
     messagesLength,
     loadConversationAggregate,

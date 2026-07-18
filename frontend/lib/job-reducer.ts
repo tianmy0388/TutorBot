@@ -21,11 +21,13 @@ import type {
   ChatMessage,
   JobResultContract,
   JobChildSummary,
+  JobTerminalStatus,
   JobStatus,
   StructuredError,
   StreamEvent,
 } from "./types";
 import { normalizeStructuredError } from "./errors";
+import { workflowMessage } from "./workflow-snapshot";
 
 function toMillis(value: string | number | null | undefined): number | null {
   if (value == null) return null;
@@ -471,7 +473,7 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       jobOrder: state.jobOrder.includes(ev.job_id)
         ? state.jobOrder
         : [ev.job_id, ...state.jobOrder],
-      messages,
+      messages: upsertWorkflowMessage(messages, workflowMessage(fresh, ev.result.status)),
     };
   }
 
@@ -497,6 +499,7 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       ? nextEvents.slice(nextEvents.length - MAX_EVENTS_PER_JOB)
       : nextEvents;
 
+  const timeline = workflowMessage(job, ev.result.status);
   const next: ClientJob = {
     ...job,
     status,
@@ -519,7 +522,7 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
   return {
     ...state,
     jobsById: { ...state.jobsById, [ev.job_id]: next },
-    messages,
+    messages: upsertWorkflowMessage(messages, timeline),
   };
 }
 
@@ -632,6 +635,10 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
         },
       ];
     }
+    messages = upsertWorkflowMessage(
+      messages,
+      workflowMessage(next, next.status as JobTerminalStatus),
+    );
   }
 
   return {
@@ -680,6 +687,12 @@ function terminalStatusFromEvents(events: StreamEvent[]): JobStatus | null {
     }
   }
   return null;
+}
+
+function upsertWorkflowMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
+  const index = messages.findIndex((existing) => existing.id === message.id);
+  if (index < 0) return [...messages, message];
+  return messages.map((existing) => existing.id === message.id ? message : existing);
 }
 
 /** Durable job state is the sole loading/terminal authority for the UI. */

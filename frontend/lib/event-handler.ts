@@ -158,6 +158,10 @@ export function dispatchStreamEvent(
     return;
   }
 
+  const hadWorkflowTimeline =
+    streamEv.type === "job_terminal" &&
+    stateAtDispatch.messages.some((message) => message.id === `workflow:${jobId}`);
+
   // 1. Always reduce into per-job state.
   useTutorStore.getState().applyStreamEvent(streamEv);
 
@@ -245,82 +249,38 @@ export function dispatchStreamEvent(
       const state = useTutorStore.getState();
       const persistenceUserId = context.userId || state.userId;
       const persistenceSessionId = authoritativeSessionId || state.sessionId;
-      if (assistantText && persistenceUserId && persistenceSessionId) {
+      if (persistenceUserId && persistenceSessionId) {
         const cap =
           typeof contract?.capability === "string"
             ? (contract.capability as string)
             : null;
-        persistConversationMessage(
-          context.appendConversationMessage,
-          persistenceUserId,
-          persistenceSessionId,
-          {
-            role: "assistant",
-            content: assistantText,
-            job_id: jobId,
-            capability: cap,
-            metadata: { job_id: jobId, capability: cap },
-          },
-          "assistant",
-        );
-
-        // **2026-07-09 fix:** persist a structured workflow timeline
-        // derived from the in-memory ``ClientJob.events[]``. The user
-        // expects "对话要保存反馈的工作流程" — previously only the
-        // one-line terminal summary was saved, so opening a past
-        // conversation showed nothing for turns that did real work.
-        // We synthesise ONE rich markdown message per job and
-        // append it as a second assistant message. Resources emitted
-        // via ``contract.partial_artifacts`` are also enumerated so
-        // partial jobs (timeout, crash) still leave a visible trail.
-        //
-        // The job is keyed by ``jobsById[jobId]``; the entry may
-        // not exist when (a) we rehydrated from a previous
-        // conversation and the reducer has no live buffer for this
-        // job, or (b) tests dispatch ``job_terminal`` without first
-        // ``submit``-ing. Build a minimal shell in that case so we
-        // still produce a useful timeline (the partial_artifacts
-        // list is the main payload anyway).
-        const clientJob = (state.jobsById ?? {})[jobId];
-        const syntheticJob: import("./job-reducer").ClientJob = clientJob ?? {
-          job_id: jobId,
-          capability: cap ?? "",
-          status: (contractStatus || "partial") as import("./job-reducer").ClientJob["status"],
-          message_preview: "",
-          submitted_at: Date.now(),
-          started_at: null,
-          finished_at: Date.now(),
-          last_seq: 0,
-          events: [],
-          result: null,
-          error: null,
-          event_count: 0,
-          seen_event_ids: new Set<string>(),
-          text_buffer: "",
-          thinking_buffer: "",
-          stage: "",
-          open_stages: [],
-        };
-        const partialResources = partial.filter(isRecord);
-        const timeline = buildWorkflowTimeline(
-          syntheticJob,
-          partialResources,
-        );
-        if (timeline) {
+        if (assistantText) {
           persistConversationMessage(
             context.appendConversationMessage,
             persistenceUserId,
             persistenceSessionId,
             {
               role: "assistant",
-              content: timeline,
+              content: assistantText,
               job_id: jobId,
               capability: cap,
-              metadata: {
-                job_id: jobId,
-                capability: cap,
-                kind: "workflow_timeline",
-              },
+              metadata: { job_id: jobId, capability: cap },
+            },
+            "assistant",
+          );
+        }
+        const workflow = state.messages.find((message) => message.id === `workflow:${jobId}`);
+        if (!hadWorkflowTimeline && workflow) {
+          persistConversationMessage(
+            context.appendConversationMessage,
+            persistenceUserId,
+            persistenceSessionId,
+            {
+              role: workflow.role as ConversationMessageInput["role"],
+              content: workflow.content,
+              job_id: jobId,
+              capability: cap,
+              metadata: workflow.metadata,
             },
             "workflow_timeline",
           );

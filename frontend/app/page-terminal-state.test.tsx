@@ -66,6 +66,7 @@ function terminalJob(): ClientJob {
 function mockState() {
   const state = {
     sessionId: "session-1",
+    sessionOrigin: "server" as "none" | "draft" | "restored" | "server",
     userId: "local-user",
     messages: [{ id: "m1" }],
     activeTurn: staleTurn,
@@ -97,6 +98,16 @@ describe("HomePage durable terminal state", () => {
     mockState();
     render(<HomePage />);
     expect(screen.queryByText("处理中")).not.toBeInTheDocument();
+  });
+
+  it("does not request an aggregate for a newly minted draft session", () => {
+    const state = mockState();
+    state.messages = [];
+    state.sessionOrigin = "draft";
+
+    render(<HomePage />);
+
+    expect(state.loadConversationAggregate).not.toHaveBeenCalled();
   });
 
   it("shows the header spinner for a durable running job despite terminal-looking activeTurn", () => {

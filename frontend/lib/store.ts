@@ -27,6 +27,7 @@ import type {
   StructuredError,
   TutoringAnswer,
   EnrichmentSuggestion,
+  SessionOrigin,
   VideoRetryResponse,
 } from "./types";
 import type { RecoveryWarning } from "./api";
@@ -94,6 +95,7 @@ export interface TutorState {
   // Session
   userId: string;
   sessionId: string;
+  sessionOrigin: SessionOrigin;
   language: "zh" | "en";
   messages: ChatMessage[];
   activeTurn: ActiveTurn;
@@ -191,11 +193,13 @@ export interface TutorState {
 
   // Chat actions
   addMessage: (msg: Omit<ChatMessage, "id" | "timestamp">) => void;
+  upsertMessage: (message: ChatMessage) => void;
   startActiveTurn: (turnId: string, capability: string) => void;
   applyStreamEvent: (ev: IncomingStreamEvent) => void;
   completeActiveTurn: (result: Record<string, unknown> | null, error: string | null) => void;
   /** Internal: route a typed reducer event through the pure job reducer. */
   applyReducerEvent: (event: import("./job-reducer").ReducerEvent) => void;
+  removeJob: (jobId: string) => void;
   resetSession: () => void;
 
   // Conversation (2026-06-21 plan, stage 4)
@@ -310,6 +314,7 @@ export const useTutorStore = create<TutorState>()(
     // page.tsx useEffect post-mount). The sidebar renders "connecting…"
     // until the id is assigned.
     sessionId: "",
+    sessionOrigin: "none",
     language: "zh",
     messages: [],
     activeTurn: newActiveTurn(),
@@ -684,6 +689,23 @@ export const useTutorStore = create<TutorState>()(
         conversationMaterialized: false,
         };
       }),
+
+    upsertMessage: (message) =>
+      set((state) => ({
+        messages: state.messages.some((existing) => existing.id === message.id)
+          ? state.messages.map((existing) => existing.id === message.id ? message : existing)
+          : [...state.messages, message],
+      })),
+
+    removeJob: (jobId) =>
+      set((state) => {
+        if (!state.jobsById[jobId]) return {};
+        const { [jobId]: _removed, ...jobsById } = state.jobsById;
+        return {
+          jobsById,
+          jobOrder: state.jobOrder.filter((id) => id !== jobId),
+        };
+      }),
     /**
      * Hydrate the active session id on first mount. Order:
      *   1. If the in-memory ``state.sessionId`` is non-empty, keep it.
@@ -707,7 +729,7 @@ export const useTutorStore = create<TutorState>()(
           if (typeof window !== "undefined") {
             const last = window.localStorage.getItem("tutor:lastSessionId");
             if (last && last.length >= 8) {
-              return { sessionId: last };
+              return { sessionId: last, sessionOrigin: "restored" };
             }
           }
         } catch {
@@ -715,10 +737,10 @@ export const useTutorStore = create<TutorState>()(
         }
         try {
           if (typeof window !== "undefined" && window.crypto) {
-            return { sessionId: window.crypto.randomUUID() };
+            return { sessionId: window.crypto.randomUUID(), sessionOrigin: "draft" };
           }
         } catch { /* blocked env */ }
-        return { sessionId: `s_${Date.now().toString(36)}` };
+        return { sessionId: `s_${Date.now().toString(36)}`, sessionOrigin: "draft" };
       }),
 
     setSessionId: (sessionId) => {
@@ -735,7 +757,7 @@ export const useTutorStore = create<TutorState>()(
         }
       }
       invalidateConversationHydration(sessionId);
-      set({ sessionId });
+      set({ sessionId, sessionOrigin: "none" });
     },
 
     loadConversationIntoStore: async (userId, sessionId) => {
@@ -757,6 +779,7 @@ export const useTutorStore = create<TutorState>()(
       }
       set({
         sessionId,
+        sessionOrigin: "server",
         webSearchEnabled: webSearchView.enabled,
         webSearchMutationPending: webSearchView.pending,
         webSearchError: null,
@@ -792,7 +815,16 @@ export const useTutorStore = create<TutorState>()(
     loadConversationAggregate: async (userId, sessionId) => {
       const hydrationGeneration = beginConversationHydration(sessionId);
       const { getConversationAggregate } = await import("./api");
-      const agg = await getConversationAggregate(userId, sessionId);
+      let agg;
+      try {
+        agg = await getConversationAggregate(userId, sessionId);
+      } catch (error) {
+        if ((error as { status?: number }).status === 404 && isCurrentConversationHydration(hydrationGeneration, sessionId)) {
+          set({ sessionOrigin: "draft", conversationMaterialized: false });
+          return;
+        }
+        throw error;
+      }
       if (!isCurrentConversationHydration(hydrationGeneration, sessionId)) {
         return;
       }
@@ -872,6 +904,7 @@ export const useTutorStore = create<TutorState>()(
       }
       set({
         sessionId,
+        sessionOrigin: "server",
         webSearchEnabled: webSearchView.enabled,
         webSearchMutationPending: webSearchView.pending,
         webSearchError: null,
