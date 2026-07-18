@@ -565,6 +565,42 @@ export interface ExerciseAttemptListResponse {
   offset: number;
 }
 
+// Durable learner responses for ordinary and code exercise questions.
+// These deliberately retain JSON-native answer shapes used by the API.
+export type ExerciseResponseAnswer = string | string[] | boolean | null;
+
+export interface ExerciseDraft {
+  user_id: string;
+  package_id: string;
+  resource_id: string;
+  question_id: string;
+  question_type: string;
+  answer_json: ExerciseResponseAnswer;
+  updated_at?: string;
+}
+
+export interface ExerciseSubmission {
+  submission_id: string;
+  client_submission_id?: string | null;
+  user_id?: string;
+  session_id?: string;
+  package_id?: string;
+  resource_id?: string;
+  question_id: string;
+  question_type?: string;
+  answer_json: ExerciseResponseAnswer;
+  grading_status: "auto_graded" | "manual_review";
+  correct: boolean | null;
+  score: number | null;
+  linked_code_attempt_id?: string | null;
+  created_at?: string;
+}
+
+export interface ExerciseResponseState {
+  draft: ExerciseDraft | null;
+  submissions: ExerciseSubmission[];
+}
+
 export interface JobChildSummary {
   job_id: string;
   capability: string;

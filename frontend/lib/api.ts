@@ -16,6 +16,9 @@ import type {
   EmbeddingSectionPatch,
   ExerciseAttempt,
   ExerciseAttemptListResponse,
+  ExerciseResponseAnswer,
+  ExerciseResponseState,
+  ExerciseSubmission,
   HealthResponse,
   JobDetail,
   JobListResponse,
@@ -292,6 +295,53 @@ export const submitExerciseAttempt = (
 ) =>
   request<ExerciseAttempt>(
     `/exercises/${encodeURIComponent(packageId)}/${encodeURIComponent(questionId)}/attempts`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
+
+export const getExerciseResponseState = (
+  packageId: string,
+  resourceId: string,
+  questionId: string,
+  userId: string,
+  signal?: AbortSignal,
+) => {
+  const params = new URLSearchParams({ question_id: questionId, user_id: userId });
+  return request<ExerciseResponseState>(
+    `/exercises/${encodeURIComponent(packageId)}/resources/${encodeURIComponent(resourceId)}`
+      + `/responses?${params.toString()}`,
+    { signal },
+  );
+};
+
+export const putExerciseDraft = (
+  packageId: string,
+  resourceId: string,
+  questionId: string,
+  payload: { user_id: string; answer_json: ExerciseResponseAnswer },
+  signal?: AbortSignal,
+) =>
+  request<unknown>(
+    `/exercises/${encodeURIComponent(packageId)}/resources/${encodeURIComponent(resourceId)}`
+      + `/questions/${encodeURIComponent(questionId)}/draft`,
+    { method: "PUT", body: JSON.stringify(payload), signal },
+  );
+
+export const submitExerciseResponse = (
+  packageId: string,
+  resourceId: string,
+  questionId: string,
+  payload: {
+    user_id: string;
+    session_id: string;
+    answer_json: ExerciseResponseAnswer;
+    client_submission_id?: string;
+    linked_code_attempt_id?: string;
+  },
+  signal?: AbortSignal,
+) =>
+  request<ExerciseSubmission>(
+    `/exercises/${encodeURIComponent(packageId)}/resources/${encodeURIComponent(resourceId)}`
+      + `/questions/${encodeURIComponent(questionId)}/submit`,
     { method: "POST", body: JSON.stringify(payload), signal },
   );
 

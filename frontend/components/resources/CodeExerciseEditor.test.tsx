@@ -7,6 +7,9 @@ import { CodeExerciseEditor } from "./CodeExerciseEditor";
 const api = vi.hoisted(() => ({
   listExerciseAttempts: vi.fn(),
   submitExerciseAttempt: vi.fn(),
+  getExerciseResponseState: vi.fn(),
+  putExerciseDraft: vi.fn(),
+  submitExerciseResponse: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => api);
@@ -57,6 +60,7 @@ function renderEditor(overrides: Record<string, unknown> = {}) {
     <CodeExerciseEditor
       question={question}
       packageId="pkg-code"
+      resourceId="resource-code"
       userId="local-user"
       sessionId="sess-code"
       {...overrides}
@@ -69,11 +73,30 @@ beforeEach(() => {
     items: [], total: 0, limit: 20, offset: 0,
   });
   api.submitExerciseAttempt.mockReset().mockResolvedValue(attempt());
+  api.getExerciseResponseState.mockReset().mockResolvedValue({ draft: null, submissions: [] });
+  api.putExerciseDraft.mockReset().mockResolvedValue({});
+  api.submitExerciseResponse.mockReset().mockResolvedValue({
+    submission_id: "response-code", question_id: "q-code", answer_json: null,
+    grading_status: "auto_graded", correct: true, score: 1,
+  });
 });
 
 afterEach(() => cleanup());
 
 describe("CodeExerciseEditor", () => {
+  it("restores a persisted source draft without replacing execution history", async () => {
+    api.getExerciseResponseState.mockResolvedValue({
+      draft: { question_id: "q-code", answer_json: "def add(a, b): return a + b" },
+      submissions: [],
+    });
+    api.listExerciseAttempts.mockResolvedValue({
+      items: [attempt({ attempt_id: "older" })], total: 1, limit: 20, offset: 0,
+    });
+    renderEditor();
+    expect(await screen.findByRole("textbox", { name: "Python 代码" })).toHaveValue("def add(a, b): return a + b");
+    expect(await screen.findByText("older")).toBeVisible();
+  });
+
   it("renders starter code, restores history, submits and remains editable", async () => {
     api.listExerciseAttempts.mockResolvedValue({
       items: [attempt({ attempt_id: "old", status: "failed", passed_tests: 1 })],
@@ -186,6 +209,7 @@ describe("CodeExerciseEditor", () => {
       <CodeExerciseEditor
         question={nextQuestion}
         packageId="pkg-new"
+        resourceId="resource-new"
         userId="new-user"
         sessionId="sess-new"
       />,

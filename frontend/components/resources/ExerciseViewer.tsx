@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTutorStore } from "@/lib/store";
+import { useExerciseResponses } from "@/hooks/useExerciseResponses";
 import type { CodeExerciseQuestion, PublicCodeSpec, Resource } from "@/lib/types";
 import { CodeExerciseEditor } from "./CodeExerciseEditor";
 
@@ -104,9 +105,14 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
   const sessionId = useTutorStore((state) => state.sessionId);
   const latestPackage = useTutorStore((state) => state.latestPackage);
   const packageId = resolveDurablePackageId(resource, latestPackage);
-  const [answers, setAnswers] = useState<Record<string, any>>({});
-  const [submitted, setSubmitted] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState<string>("all");
+  const questionIds = useMemo(() => localQuestions.map((question) => question.id), [localQuestions]);
+  const responses = useExerciseResponses({
+    userId,
+    packageId,
+    resourceId: resource.resource_id,
+    sessionId,
+  }, questionIds);
 
   const filteredQuestions = useMemo(() => {
     if (filter === "all") return questions;
@@ -118,13 +124,14 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
     let correct = 0;
     let answered = 0;
     localQuestions.forEach((q) => {
-      if (submitted[q.id]) {
+      const submission = responses.submissions[q.id];
+      if (submission) {
         answered += 1;
-        if (isCorrect(q, answers[q.id])) correct += 1;
+        if (submission.correct === true) correct += 1;
       }
     });
     return { correct, answered, total: localQuestions.length };
-  }, [localQuestions, answers, submitted]);
+  }, [localQuestions, responses.submissions]);
 
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = { all: questions.length };
@@ -142,38 +149,16 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
     );
   }
 
-  const setAnswer = (qid: string, value: any) => {
-    setAnswers((s) => ({ ...s, [qid]: value }));
-  };
-
-  const submit = (qid: string) => {
-    setSubmitted((s) => ({ ...s, [qid]: true }));
-  };
-
-  const reset = (qid: string) => {
-    setAnswers((s) => {
-      const c = { ...s };
-      delete c[qid];
-      return c;
-    });
-    setSubmitted((sub) => {
-      const c = { ...sub };
-      delete c[qid];
-      return c;
-    });
-  };
-
   const submitAll = () => {
-    const next: Record<string, boolean> = {};
     localQuestions.forEach((q) => {
-      if (answers[q.id] !== undefined) next[q.id] = true;
+      if (responses.drafts[q.id] !== undefined && !responses.submissions[q.id]) {
+        void responses.submit(q.id);
+      }
     });
-    setSubmitted(next);
   };
 
   const resetAll = () => {
-    setAnswers({});
-    setSubmitted({});
+    localQuestions.forEach((q) => responses.resetDraft(q.id));
   };
 
   const allSubmitted = stats.answered === stats.total && stats.total > 0;
@@ -288,13 +273,15 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
                 index={questions.indexOf(q) + 1}
                 question={q}
                 packageId={packageId}
+                resourceId={resource.resource_id}
                 userId={userId}
                 sessionId={sessionId}
               />
             );
           }
-          const isSub = !!submitted[q.id];
-          const correct = isSub && isCorrect(q, answers[q.id]);
+          const submission = responses.submissions[q.id];
+          const isSub = !!submission;
+          const correct = submission?.correct === true;
           return (
             <QuestionCard
               key={q.id}
@@ -302,10 +289,10 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
               question={q}
               isSub={isSub}
               correct={correct}
-              answer={answers[q.id]}
-              setAnswer={(v) => setAnswer(q.id, v)}
-              submit={() => submit(q.id)}
-              reset={() => reset(q.id)}
+              answer={responses.drafts[q.id]}
+              setAnswer={(v) => responses.setDraft(q.id, v)}
+              submit={() => { void responses.submit(q.id); }}
+              reset={() => responses.resetDraft(q.id)}
             />
           );
         })}
@@ -708,12 +695,14 @@ function CodeQuestionCard({
   index,
   question,
   packageId,
+  resourceId,
   userId,
   sessionId,
 }: {
   index: number;
   question: ParsedQuestion;
   packageId: string | null;
+  resourceId: string;
   userId: string;
   sessionId: string;
 }) {
@@ -738,6 +727,7 @@ function CodeQuestionCard({
       <CodeExerciseEditor
         question={codeQuestion}
         packageId={packageId}
+        resourceId={resourceId}
         userId={userId}
         sessionId={sessionId}
       />

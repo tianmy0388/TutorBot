@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, FileCode2, Play } from "lucide-react";
 
 import { listExerciseAttempts, submitExerciseAttempt } from "@/lib/api";
+import { useExerciseResponses } from "@/hooks/useExerciseResponses";
 import type {
   CodeExerciseQuestion,
   ExerciseAttempt,
@@ -16,6 +17,7 @@ const MAX_SOURCE_BYTES = 128 * 1024;
 export interface CodeExerciseEditorProps {
   question: CodeExerciseQuestion;
   packageId: string | null;
+  resourceId: string;
   userId: string;
   sessionId: string;
 }
@@ -23,26 +25,33 @@ export interface CodeExerciseEditorProps {
 export function CodeExerciseEditor({
   question,
   packageId,
+  resourceId,
   userId,
   sessionId,
 }: CodeExerciseEditorProps) {
   const spec = question.code_spec;
-  const identity = `${userId}\u0000${sessionId}\u0000${packageId ?? ""}\u0000${question.id}`;
+  const identity = `${userId}\u0000${sessionId}\u0000${packageId ?? ""}\u0000${resourceId}\u0000${question.id}`;
   const identityRef = useRef(identity);
   identityRef.current = identity;
   const mountedRef = useRef(true);
   const runningRef = useRef(false);
-  const [source, setSource] = useState(spec?.starter_code ?? "");
   const [history, setHistory] = useState<ExerciseAttempt[]>([]);
   const [result, setResult] = useState<ExerciseAttempt | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [uploadError, setUploadError] = useState("");
+  const responses = useExerciseResponses({
+    userId,
+    packageId,
+    resourceId,
+    sessionId,
+  }, [question.id]);
+  const draft = responses.drafts[question.id];
+  const source = typeof draft === "string" ? draft : (spec?.starter_code ?? "");
 
   useEffect(() => {
     mountedRef.current = true;
     runningRef.current = false;
-    setSource(spec?.starter_code ?? "");
     setHistory([]);
     setResult(null);
     setRunning(false);
@@ -105,6 +114,11 @@ export function CodeExerciseEditor({
       if (mountedRef.current && identityRef.current === requestIdentity) {
         setResult(terminal);
         setHistory((items) => [terminal, ...items.filter((item) => item.attempt_id !== terminal.attempt_id)]);
+        void responses.submit(question.id, {
+          answer: source,
+          linkedCodeAttemptId: terminal.attempt_id,
+          keepDraft: true,
+        });
       }
     } catch (reason) {
       if (
@@ -141,7 +155,7 @@ export function CodeExerciseEditor({
         return;
       }
       if (mountedRef.current && identityRef.current === requestIdentity) {
-        setSource(text);
+        responses.setDraft(question.id, text);
       }
     } catch {
       if (mountedRef.current && identityRef.current === requestIdentity) {
@@ -159,7 +173,7 @@ export function CodeExerciseEditor({
         id={`code-${question.id}`}
         aria-label="Python 代码"
         value={source}
-        onChange={(event) => setSource(event.target.value)}
+        onChange={(event) => responses.setDraft(question.id, event.target.value)}
         spellCheck={false}
         className="min-h-52 w-full resize-y rounded-md border border-fg/10 bg-black/50 p-3 font-mono text-xs leading-5 text-fg focus:border-brand-500 focus:outline-none"
       />

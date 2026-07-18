@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import type { Resource } from "@/lib/types";
 import { ExerciseViewer } from "./ExerciseViewer";
@@ -12,6 +12,14 @@ const storeState = vi.hoisted(() => ({
     resources: Resource[];
   } | null,
 }));
+
+const api = vi.hoisted(() => ({
+  getExerciseResponseState: vi.fn(),
+  putExerciseDraft: vi.fn(),
+  submitExerciseResponse: vi.fn(),
+}));
+
+vi.mock("@/lib/api", () => api);
 
 vi.mock("./CodeExerciseEditor", () => ({
   CodeExerciseEditor: ({ packageId }: { packageId: string | null }) => (
@@ -72,10 +80,24 @@ function exerciseResource(
   };
 }
 
-afterEach(() => {
-  cleanup();
+beforeEach(() => {
   storeState.latestPackage = null;
+  api.getExerciseResponseState.mockReset().mockResolvedValue({ draft: null, submissions: [] });
+  api.putExerciseDraft.mockReset().mockResolvedValue({});
+  api.submitExerciseResponse.mockReset().mockImplementation(
+    (_packageId: string, _resourceId: string, questionId: string, payload: { answer_json: unknown }) =>
+      Promise.resolve({
+        submission_id: `submission-${questionId}`,
+        question_id: questionId,
+        answer_json: payload.answer_json,
+        grading_status: "auto_graded",
+        correct: payload.answer_json === true,
+        score: payload.answer_json === true ? 1 : 0,
+      }),
+  );
 });
+
+afterEach(() => cleanup());
 
 function selectCurrentPackage(resource: Resource) {
   storeState.latestPackage = {
@@ -85,6 +107,40 @@ function selectCurrentPackage(resource: Resource) {
 }
 
 describe("ExerciseViewer code integration", () => {
+  it("restores an unsubmitted choice draft after remount", async () => {
+    const resource = exerciseResource();
+    resource.format_specific.questions = [{
+      id: "q1", type: "single_choice", question: "选择", answer: "B",
+      options: [{ label: "A", text: "甲" }, { label: "B", text: "乙" }], explanation: "",
+    }];
+    api.getExerciseResponseState.mockResolvedValue({
+      draft: { question_id: "q1", answer_json: "B" }, submissions: [],
+    });
+    const first = render(<ExerciseViewer resource={resource} />);
+    expect(await screen.findByDisplayValue("B")).toBeChecked();
+    first.unmount();
+    render(<ExerciseViewer resource={resource} />);
+    expect(await screen.findByDisplayValue("B")).toBeChecked();
+  });
+
+  it("submits only after an explicit action and restores server feedback", async () => {
+    const resource = exerciseResource();
+    resource.format_specific.questions = [{
+      id: "q1", type: "true_false", question: "Python 是语言", answer: true,
+      options: [], explanation: "yes",
+    }];
+    api.getExerciseResponseState.mockResolvedValue({
+      draft: null,
+      submissions: [{
+        submission_id: "old", question_id: "q1", answer_json: true,
+        grading_status: "auto_graded", correct: true, score: 1,
+      }],
+    });
+    render(<ExerciseViewer resource={resource} />);
+    expect(await screen.findByText("解析：")).toBeVisible();
+    expect(api.submitExerciseResponse).not.toHaveBeenCalled();
+  });
+
   it("renders duplicate and empty legacy options without duplicate-key warnings", () => {
     const resource = exerciseResource();
     resource.format_specific.questions = [
@@ -113,7 +169,7 @@ describe("ExerciseViewer code integration", () => {
     errorSpy.mockRestore();
   });
 
-  it("keeps non-code scoring unchanged and excludes code from bulk local scoring", () => {
+  it("uses server submission feedback while excluding code from the ordinary score", async () => {
     const resource = exerciseResource();
     selectCurrentPackage(resource);
     render(<ExerciseViewer resource={resource} />);
@@ -122,8 +178,8 @@ describe("ExerciseViewer code integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "✓ 正确" }));
     fireEvent.click(screen.getByRole("button", { name: /^提交$/ }));
-    expect(screen.getByText("1").parentElement).toHaveTextContent("1 / 1");
-    expect(screen.getByText("🎉 全对！太棒了！")).toBeVisible();
+    await waitFor(() => expect(screen.getByText("1").parentElement).toHaveTextContent("1 / 1"));
+    expect(await screen.findByText("🎉 全对！太棒了！")).toBeVisible();
     expect(screen.getByTestId("code-editor")).toBeVisible();
   });
 
