@@ -31,7 +31,11 @@ def replace_unowned_markdown_images(markdown: str, artifact_names: set[str]) -> 
             continue
         end, alt, source = image
         original = markdown[start:end]
-        if source is not None and _is_allowed_image_source(source, artifact_names):
+        if source is None:
+            label = alt.strip() or "图片"
+            result.append(f"[{label}：图片未提供]")
+            break
+        if _is_allowed_image_source(source, artifact_names):
             result.append(original)
         else:
             label = alt.strip() or "图片"

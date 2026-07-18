@@ -62,12 +62,13 @@ def test_oversized_image_candidate_fails_closed_without_retaining_file_source():
         replace_unowned_markdown_images,
     )
 
-    source = "file:///host/private/" + ("x" * 8_200) + ".png"
+    source = "file:///host/private/" + ("x" * 8_200) + ".pngSECRET_TAIL"
     replaced = replace_unowned_markdown_images(f"![danger]({source})", {"owned.png"})
 
     assert "图片未提供" in replaced
     assert source not in replaced
     assert "file:///host/private/" not in replaced
+    assert "SECRET_TAIL" not in replaced
 
 
 def test_owned_relative_image_preserves_query_and_fragment_after_basename_check():
