@@ -194,6 +194,21 @@ describe("CodeViewer execution diagnostics", () => {
     );
   });
 
+  it("maps timeout to an explicit red Chinese status badge", () => {
+    const resource = codeResource();
+    resource.format_specific = {
+      language: "python",
+      code: "while True: pass",
+      execution_status: "timeout",
+      stderr: "timed out",
+      artifacts: [],
+    };
+
+    render(<CodeViewer resource={resource} />);
+
+    expect(screen.getByText("⏱ 运行超时")).toHaveClass("text-red-300");
+  });
+
   it("explains a missing expected figure as an image-generation failure", () => {
     const resource = codeResource();
     resource.format_specific = {

@@ -63,7 +63,9 @@ def test_repeated_runs_share_the_exact_persistent_matplotlib_cache(
     expected = str((tmp_path / "cache" / "matplotlib").resolve())
 
     assert first[0] == second[0] == "success"
-    assert first[1].strip() == second[1].strip() == expected
+    assert first[1].strip() == second[1].strip() == "<sandbox>"
+    assert expected not in first[1]
+    assert expected.replace("\\", "/") not in first[1]
     assert "Matplotlib is building the font cache" not in second[2]
     assert Path(expected).is_dir()
 
@@ -144,14 +146,37 @@ def test_only_exact_runner_owned_matplotlib_diagnostics_are_filtered() -> None:
     stderr = (
         "Matplotlib is building the font cache; this may take a moment.\n"
         "UserWarning: FigureCanvasAgg is non-interactive, and thus cannot be shown\n"
+        "  Matplotlib is building the font cache; this may take a moment. \r\n"
         "<sandbox>:1: UserWarning: educational\n"
     )
 
     filtered = _filter_runner_owned_stderr(stderr)
 
-    assert "building the font cache" not in filtered
-    assert "FigureCanvasAgg is non-interactive" not in filtered
+    assert "Matplotlib is building the font cache; this may take a moment.\n" not in filtered
+    assert "UserWarning: FigureCanvasAgg is non-interactive, and thus cannot be shown\n" not in filtered
+    assert "  Matplotlib is building the font cache; this may take a moment. \r\n" in filtered
     assert "UserWarning: educational" in filtered
+
+
+def test_matplotlib_cache_path_is_redacted_from_user_stdout_and_stderr(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(env="test", data_dir=tmp_path, execution_python=sys.executable)
+    expected = str((tmp_path / "cache" / "matplotlib").resolve())
+
+    result = _run(
+        "import os, sys\n"
+        "import matplotlib\n"
+        "print(os.environ['MPLCONFIGDIR'])\n"
+        "sys.stderr.write(os.environ['MPLCONFIGDIR'])\n",
+        settings,
+    )
+
+    assert result[0] == "success"
+    assert result[1] == "<sandbox>\n"
+    assert result[2] == "<sandbox>"
+    assert expected not in result[1] + result[2]
+    assert expected.replace("\\", "/") not in result[1] + result[2]
 
 
 def test_artifact_keys_are_portable_and_never_expose_scratch_paths(

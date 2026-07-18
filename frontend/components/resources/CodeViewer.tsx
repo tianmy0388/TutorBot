@@ -428,6 +428,11 @@ function ExecutionStatusBadge({ status }: { status: string }) {
       className: "bg-red-950/40 text-red-300 border-red-800/40",
       icon: AlertTriangle,
     },
+    timeout: {
+      label: "⏱ 运行超时",
+      className: "bg-red-950/40 text-red-300 border-red-800/40",
+      icon: AlertTriangle,
+    },
     pending: {
       label: "⏳ 待运行",
       className: "bg-bg-panel text-fg-muted border-fg/10",

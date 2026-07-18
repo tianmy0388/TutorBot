@@ -93,9 +93,30 @@ async def test_code_sandbox_drains_matplotlib_figures_to_artifacts():
 def test_ast_detects_matplotlib_imports_without_executing_code() -> None:
     assert _code_uses_matplotlib("import matplotlib as mpl")
     assert _code_uses_matplotlib("from matplotlib import pyplot as plt")
+    assert _code_uses_matplotlib("import importlib\nimportlib.import_module('matplotlib.pyplot')")
+    assert _code_uses_matplotlib("from importlib import import_module as load\nload('matplotlib.pyplot')")
+    assert _code_uses_matplotlib("__import__('matplotlib.pyplot')")
     assert not _code_uses_matplotlib("import numpy as np\nprint(np.arange(2))")
+    assert not _code_uses_matplotlib("import importlib\nimportlib.import_module('numpy')")
     # Invalid generated code remains a subprocess SyntaxError, not an AST crash.
     assert not _code_uses_matplotlib("def incomplete(")
+
+
+def test_dynamic_matplotlib_import_captures_figure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = Settings(env="test", data_dir=tmp_path, execution_python=sys.executable)
+    result = _run_plot(
+        "from importlib import import_module as load\n"
+        "plt = load('matplotlib.pyplot')\n"
+        "plt.plot([1, 2])\n",
+        settings=settings,
+        monkeypatch=monkeypatch,
+    )
+
+    assert result[0] == "success"
+    assert [artifact["name"] for artifact in result[5]] == ["figure_1.png"]
 
 
 @pytest.mark.asyncio

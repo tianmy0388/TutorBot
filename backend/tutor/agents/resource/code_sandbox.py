@@ -412,6 +412,7 @@ def _safe_run_python(
     started = time.monotonic()
     deps: dict[str, str] = {}
     capture_matplotlib = _code_uses_matplotlib(code)
+    matplotlib_cache: Path | None = None
     try:
         code_runs_dir = settings.data_dir / getattr(
             settings, "code_run_subdir", "code_runs"
@@ -529,9 +530,12 @@ def _safe_run_python(
         # affect the run result.
         pass
 
-    stdout_text = _redact_scratch_path(proc.stdout or "", scratch)
+    runner_owned_paths = (matplotlib_cache,) if matplotlib_cache is not None else ()
+    stdout_text = _redact_scratch_path(
+        proc.stdout or "", scratch, *runner_owned_paths
+    )
     stderr_text = _filter_runner_owned_stderr(
-        _redact_scratch_path(proc.stderr or "", scratch)
+        _redact_scratch_path(proc.stderr or "", scratch, *runner_owned_paths)
     )
     if proc.returncode == 0:
         return ("success", stdout_text, stderr_text, None, deps, artifacts, duration)
@@ -548,10 +552,15 @@ def _safe_run_python(
     return ("failed", stdout_text, stderr_text, error_code, deps, artifacts, duration)
 
 
-def _redact_scratch_path(text: str, scratch: Path) -> str:
-    """Keep run-private absolute paths out of resource/API text fields."""
+def _redact_scratch_path(
+    text: str, scratch: Path, *runner_owned_paths: Path
+) -> str:
+    """Keep scratch and runner-owned absolute paths out of public text fields."""
     redacted = text
-    variants = {str(scratch), scratch.as_posix()}
+    variants: set[str] = set()
+    for path in (scratch, *runner_owned_paths):
+        value = str(path)
+        variants.update({value, path.as_posix(), value.replace("\\", "/"), value.replace("/", "\\")})
     for value in sorted(variants, key=len, reverse=True):
         redacted = redacted.replace(value, "<sandbox>")
     return redacted
@@ -568,7 +577,7 @@ def _filter_runner_owned_stderr(stderr: str) -> str:
     return "".join(
         line
         for line in stderr.splitlines(keepends=True)
-        if line.strip() not in _RUNNER_OWNED_STDERR_LINES
+        if line.rstrip("\r\n") not in _RUNNER_OWNED_STDERR_LINES
     )
 
 
@@ -957,21 +966,66 @@ __all__ = ["CodeSandboxAgent", "CODE_OUTPUT_SCHEMA", "run_code_submission"]
 
 
 def _code_uses_matplotlib(code: str) -> bool:
-    """Return whether an AST import references Matplotlib without executing code."""
+    """Return whether static imports or literal dynamic imports use Matplotlib.
+
+    Dynamic expressions are deliberately unsupported: only literal module names
+    passed to ``importlib.import_module`` or ``__import__`` enable capture.
+    """
     try:
         tree = ast.parse(code)
     except SyntaxError:
         # Let the child preserve the existing SyntaxError classification.
         return False
 
+    importlib_aliases: set[str] = set()
+    import_module_aliases: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            if any(alias.name == "matplotlib" or alias.name.startswith("matplotlib.") for alias in node.names):
+            if any(
+                alias.name == "matplotlib" or alias.name.startswith("matplotlib.")
+                for alias in node.names
+            ):
                 return True
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_aliases.add(alias.asname or "importlib")
         elif isinstance(node, ast.ImportFrom):
-            if node.module == "matplotlib" or (node.module or "").startswith("matplotlib."):
+            if node.module == "matplotlib" or (node.module or "").startswith(
+                "matplotlib."
+            ):
+                return True
+            if node.module == "importlib":
+                import_module_aliases.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "import_module"
+                )
+        elif isinstance(node, ast.Call) and _literal_matplotlib_module(node):
+            function = node.func
+            if isinstance(function, ast.Name) and (
+                function.id == "__import__" or function.id in import_module_aliases
+            ):
+                return True
+            if (
+                isinstance(function, ast.Attribute)
+                and function.attr == "import_module"
+                and isinstance(function.value, ast.Name)
+                and function.value.id in importlib_aliases
+            ):
                 return True
     return False
+
+
+def _literal_matplotlib_module(node: ast.Call) -> bool:
+    """Whether a dynamic import call has a literal Matplotlib module name."""
+    if not node.args:
+        return False
+    module = node.args[0]
+    return (
+        isinstance(module, ast.Constant)
+        and isinstance(module.value, str)
+        and (module.value == "matplotlib" or module.value.startswith("matplotlib."))
+    )
 
 
 def _wrap_user_code(
