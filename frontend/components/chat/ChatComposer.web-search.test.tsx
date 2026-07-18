@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const apiMocks = vi.hoisted(() => ({
   getConversation: vi.fn(),
   createConversation: vi.fn(),
+  deleteConversation: vi.fn(),
   setConversationWebSearch: vi.fn(),
   appendConversationMessage: vi.fn(),
   listAppCourses: vi.fn(),
@@ -37,6 +38,10 @@ beforeEach(() => {
   apiMocks.setConversationWebSearch.mockResolvedValue({
     session_id: "draft-session",
     web_search_enabled: true,
+  });
+  apiMocks.deleteConversation.mockResolvedValue({
+    deleted: true,
+    session_id: "draft-session",
   });
   apiMocks.appendConversationMessage.mockResolvedValue({});
   queueMocks.submit.mockResolvedValue({
@@ -87,8 +92,13 @@ describe("ChatComposer draft web search", () => {
     );
   });
 
-  it("does not submit when first-send setting persistence fails", async () => {
-    apiMocks.setConversationWebSearch.mockRejectedValueOnce(new Error("offline"));
+  it("keeps a failed draft retryable and patches before the retry job", async () => {
+    apiMocks.setConversationWebSearch
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({
+        session_id: "draft-session",
+        web_search_enabled: true,
+      });
     render(<ChatComposer />);
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "current question" },
@@ -99,5 +109,35 @@ describe("ChatComposer draft web search", () => {
       expect(screen.getByRole("status")).toHaveTextContent("设置保存失败"),
     );
     expect(queueMocks.submit).not.toHaveBeenCalled();
+    expect(apiMocks.appendConversationMessage).not.toHaveBeenCalled();
+    expect(apiMocks.deleteConversation).toHaveBeenCalledWith(
+      "local-user",
+      "draft-session",
+    );
+    expect(useTutorStore.getState().conversationMaterialized).toBe(false);
+    expect(useTutorStore.getState().webSearchEnabled).toBe(true);
+    expect(
+      useTutorStore.getState().messages.filter((message) => message.role === "user"),
+    ).toHaveLength(0);
+    expect(screen.getByRole("textbox")).toHaveValue("current question");
+
+    fireEvent.click(screen.getByRole("button", { name: /发送/ }));
+
+    await waitFor(() => expect(queueMocks.submit).toHaveBeenCalledTimes(1));
+    expect(apiMocks.setConversationWebSearch).toHaveBeenCalledTimes(2);
+    expect(apiMocks.setConversationWebSearch.mock.invocationCallOrder[1]).toBeLessThan(
+      queueMocks.submit.mock.invocationCallOrder[0],
+    );
+    expect(apiMocks.appendConversationMessage).toHaveBeenCalledTimes(1);
+    expect(apiMocks.appendConversationMessage).toHaveBeenCalledWith(
+      "local-user",
+      "draft-session",
+      expect.objectContaining({
+        metadata: expect.objectContaining({ web_search_requested: true }),
+      }),
+    );
+    expect(
+      useTutorStore.getState().messages.filter((message) => message.role === "user"),
+    ).toHaveLength(1);
   });
 });

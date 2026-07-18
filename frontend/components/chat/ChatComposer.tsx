@@ -29,6 +29,7 @@ import { WebSearchToggle } from "./WebSearchToggle";
 import {
   appendConversationMessage,
   createConversation,
+  deleteConversation,
   getConversation,
   listAppCourses,
   listKnowledgeBases,
@@ -63,6 +64,9 @@ export function ChatComposer() {
   );
   const setDraftWebSearchEnabled = useTutorStore(
     (s) => s.setDraftWebSearchEnabled,
+  );
+  const restoreDraftWebSearch = useTutorStore(
+    (s) => s.restoreDraftWebSearch,
   );
   const setConversationMaterialized = useTutorStore(
     (s) => s.setConversationMaterialized,
@@ -106,15 +110,17 @@ export function ChatComposer() {
     const msg = text.trim();
     const requestedWebSearch = webSearchEnabled;
     const wasDraft = !conversationMaterialized;
+    const deferUserMessage = wasDraft && requestedWebSearch;
     setText("");
     setSubmitting(true);
 
-    // Add user message to chat immediately
-    addMessage({
-      role: "user",
-      content: msg,
-      metadata: { web_search_requested: requestedWebSearch },
-    });
+    if (!deferUserMessage) {
+      addMessage({
+        role: "user",
+        content: msg,
+        metadata: { web_search_requested: requestedWebSearch },
+      });
+    }
 
     // 2026-06-21 plan: the first message in a brand-new (draft) session
     // must materialise the server-side conversation before we try to
@@ -157,17 +163,27 @@ export function ChatComposer() {
     // job boundary. A failed opt-in must never silently submit as server-off.
     if (userId && activeSessionId && wasDraft && requestedWebSearch) {
       const persisted = materialized
-        ? await persistWebSearch(userId, activeSessionId, true)
+        ? await persistWebSearch(userId, activeSessionId, true, {
+            rollbackValue: false,
+          })
         : false;
       if (!persisted) {
-        addMessage({
-          role: "system",
-          content: "联网搜索设置保存失败，本条消息尚未提交，请重试。",
-          metadata: { source: "chat_composer", web_search_requested: true },
+        await deleteConversation(userId, activeSessionId).catch((e) => {
+          console.warn("deleteConversation draft rollback failed", e);
         });
+        restoreDraftWebSearch(requestedWebSearch);
+        setText(msg);
         setSubmitting(false);
         return;
       }
+    }
+
+    if (deferUserMessage) {
+      addMessage({
+        role: "user",
+        content: msg,
+        metadata: { web_search_requested: requestedWebSearch },
+      });
     }
 
     // Persist the user message into the active conversation so the

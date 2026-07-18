@@ -173,4 +173,75 @@ describe("per-conversation web search state", () => {
     expect(useTutorStore.getState().webSearchMutationPending).toBe(false);
     expect(useTutorStore.getState().webSearchError).toContain("恢复");
   });
+
+  it("can roll a draft PATCH back to the known server value", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    useTutorStore.setState({
+      webSearchEnabled: true,
+      conversationMaterialized: true,
+    });
+
+    const persisted = await useTutorStore
+      .getState()
+      .setConversationWebSearch("local-user", "draft-session", true, {
+        rollbackValue: false,
+      });
+
+    expect(persisted).toBe(false);
+    expect(useTutorStore.getState().webSearchEnabled).toBe(false);
+    expect(useTutorStore.getState().webSearchMutationPending).toBe(false);
+    expect(useTutorStore.getState().webSearchError).toContain("恢复");
+  });
+
+  it("rolls two failed rapid mutations back to the confirmed server value", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("offline"));
+    vi.stubGlobal("fetch", fetchMock);
+    useTutorStore.setState({
+      webSearchEnabled: false,
+      conversationMaterialized: true,
+    });
+
+    const first = useTutorStore
+      .getState()
+      .setConversationWebSearch("local-user", "double-failure", true);
+    const second = useTutorStore
+      .getState()
+      .setConversationWebSearch("local-user", "double-failure", false);
+
+    await expect(Promise.all([first, second])).resolves.toEqual([false, false]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(useTutorStore.getState().webSearchEnabled).toBe(false);
+    expect(useTutorStore.getState().webSearchMutationPending).toBe(false);
+    expect(useTutorStore.getState().webSearchError).toContain("恢复");
+  });
+
+  it("rolls a failed second mutation back to the first confirmed success", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ web_search_enabled: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockRejectedValueOnce(new Error("offline"));
+    vi.stubGlobal("fetch", fetchMock);
+    useTutorStore.setState({
+      webSearchEnabled: false,
+      conversationMaterialized: true,
+    });
+
+    const first = useTutorStore
+      .getState()
+      .setConversationWebSearch("local-user", "success-then-failure", true);
+    const second = useTutorStore
+      .getState()
+      .setConversationWebSearch("local-user", "success-then-failure", false);
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, false]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(useTutorStore.getState().webSearchEnabled).toBe(true);
+    expect(useTutorStore.getState().webSearchMutationPending).toBe(false);
+    expect(useTutorStore.getState().webSearchError).toContain("恢复");
+  });
 });

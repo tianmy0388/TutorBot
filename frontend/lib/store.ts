@@ -182,11 +182,13 @@ export interface TutorState {
       | null,
   ) => void;
   setDraftWebSearchEnabled: (enabled: boolean) => void;
+  restoreDraftWebSearch: (enabled: boolean) => void;
   setConversationMaterialized: (materialized: boolean) => void;
   setConversationWebSearch: (
     userId: string,
     sessionId: string,
     enabled: boolean,
+    options?: { rollbackValue?: boolean },
   ) => Promise<boolean>;
   setLatestAssessment: (a: AssessmentReport | null) => void;
   setLatestStrategy: (s: StrategyDecision | null) => void;
@@ -257,6 +259,7 @@ const nextMessageId = () =>
 
 let webSearchMutationRevision = 0;
 let webSearchMutationChain: Promise<unknown> = Promise.resolve();
+const webSearchConfirmedBySession = new Map<string, boolean>();
 
 export const useTutorStore = create<TutorState>()(
   subscribeWithSelector((set, get) => ({
@@ -395,10 +398,23 @@ export const useTutorStore = create<TutorState>()(
         webSearchError: null,
       });
     },
+    restoreDraftWebSearch: (enabled) => {
+      webSearchMutationRevision += 1;
+      set({
+        webSearchEnabled: enabled,
+        webSearchMutationPending: false,
+        conversationMaterialized: false,
+      });
+    },
     setConversationMaterialized: (conversationMaterialized) =>
       set({ conversationMaterialized }),
-    setConversationWebSearch: (userId, sessionId, enabled) => {
-      const previous = get().webSearchEnabled;
+    setConversationWebSearch: (userId, sessionId, enabled, options) => {
+      const explicitRollback = options?.rollbackValue;
+      if (explicitRollback !== undefined) {
+        webSearchConfirmedBySession.set(sessionId, explicitRollback);
+      } else if (!webSearchConfirmedBySession.has(sessionId)) {
+        webSearchConfirmedBySession.set(sessionId, get().webSearchEnabled);
+      }
       const revision = ++webSearchMutationRevision;
       set({
         webSearchEnabled: enabled,
@@ -414,9 +430,11 @@ export const useTutorStore = create<TutorState>()(
             sessionId,
             enabled,
           );
+          const confirmedValue = Boolean(persisted.web_search_enabled);
+          webSearchConfirmedBySession.set(sessionId, confirmedValue);
           if (revision === webSearchMutationRevision) {
             set({
-              webSearchEnabled: Boolean(persisted.web_search_enabled),
+              webSearchEnabled: confirmedValue,
               webSearchError: null,
             });
           }
@@ -424,7 +442,8 @@ export const useTutorStore = create<TutorState>()(
         } catch {
           if (revision === webSearchMutationRevision) {
             set({
-              webSearchEnabled: previous,
+              webSearchEnabled:
+                webSearchConfirmedBySession.get(sessionId) ?? false,
               webSearchError: "设置保存失败，已恢复先前状态",
             });
           }
@@ -652,6 +671,10 @@ export const useTutorStore = create<TutorState>()(
         metadata: m.metadata ?? {},
       }));
       webSearchMutationRevision += 1;
+      webSearchConfirmedBySession.set(
+        sessionId,
+        detail.web_search_enabled ?? false,
+      );
       set({
         sessionId,
         webSearchEnabled: detail.web_search_enabled ?? false,
@@ -758,6 +781,10 @@ export const useTutorStore = create<TutorState>()(
         : null;
 
       webSearchMutationRevision += 1;
+      webSearchConfirmedBySession.set(
+        sessionId,
+        conv.web_search_enabled ?? false,
+      );
       set({
         sessionId,
         webSearchEnabled: conv.web_search_enabled ?? false,
