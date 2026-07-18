@@ -320,3 +320,5 @@ The final implementation keeps the current retry revision visible while synchron
 - A changed-path ESLint invocation cannot run because this repository has ESLint 9 dependencies but no flat `eslint.config.*`; this is a repository tooling limitation, not a reported Task 12 source diagnostic.
 
 Remaining concerns: repository-wide TypeScript checking is still blocked by the pre-existing unrelated errors described above, and scoped ESLint remains unavailable until the repository adds an ESLint 9 flat configuration.
+
+Fix-wave-2 implementation commit: `eb4abc7` (`fix: recover video retry synchronization`).
