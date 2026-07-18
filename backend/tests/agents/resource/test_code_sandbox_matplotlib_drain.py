@@ -96,8 +96,12 @@ def test_ast_detects_matplotlib_imports_without_executing_code() -> None:
     assert _code_uses_matplotlib("import importlib\nimportlib.import_module('matplotlib.pyplot')")
     assert _code_uses_matplotlib("from importlib import import_module as load\nload('matplotlib.pyplot')")
     assert _code_uses_matplotlib("__import__('matplotlib.pyplot')")
+    assert _code_uses_matplotlib("import importlib\nimportlib.import_module(name='matplotlib.pyplot')")
+    assert _code_uses_matplotlib("from importlib import import_module as load\nload(name='matplotlib.pyplot')")
+    assert _code_uses_matplotlib("__import__(name='matplotlib.pyplot')")
     assert not _code_uses_matplotlib("import numpy as np\nprint(np.arange(2))")
     assert not _code_uses_matplotlib("import importlib\nimportlib.import_module('numpy')")
+    assert not _code_uses_matplotlib("import importlib\nname = 'matplotlib.pyplot'\nimportlib.import_module(name=name)")
     # Invalid generated code remains a subprocess SyntaxError, not an AST crash.
     assert not _code_uses_matplotlib("def incomplete(")
 
@@ -108,8 +112,8 @@ def test_dynamic_matplotlib_import_captures_figure(
 ) -> None:
     settings = Settings(env="test", data_dir=tmp_path, execution_python=sys.executable)
     result = _run_plot(
-        "from importlib import import_module as load\n"
-        "plt = load('matplotlib.pyplot')\n"
+        "import importlib\n"
+        "plt = importlib.import_module(name='matplotlib.pyplot')\n"
         "plt.plot([1, 2])\n",
         settings=settings,
         monkeypatch=monkeypatch,

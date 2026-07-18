@@ -1018,9 +1018,14 @@ def _code_uses_matplotlib(code: str) -> bool:
 
 def _literal_matplotlib_module(node: ast.Call) -> bool:
     """Whether a dynamic import call has a literal Matplotlib module name."""
-    if not node.args:
+    module: ast.expr | None = node.args[0] if node.args else None
+    if module is None:
+        module = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "name"),
+            None,
+        )
+    if module is None:
         return False
-    module = node.args[0]
     return (
         isinstance(module, ast.Constant)
         and isinstance(module.value, str)
