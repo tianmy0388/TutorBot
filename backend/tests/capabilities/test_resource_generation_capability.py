@@ -494,6 +494,109 @@ class _FakeSearchExecutor:
         return self.outcome
 
 
+class _CapturingResourceAgent:
+    def __init__(self, delegate) -> None:
+        self.delegate = delegate
+        self.source_contents: list[str] = []
+
+    async def process(self, *args, **kwargs):
+        self.source_contents.append(str(kwargs.get("source_content") or ""))
+        return await self.delegate.process(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_web_evidence_grounds_non_document_resource_branches(capability) -> None:
+    from tutor.services.jobs.contracts import (
+        ResourceIntentNodeOutput,
+        ResourcePedagogyNodeOutput,
+        ResourceProfileNodeOutput,
+        ResourceSourceNodeOutput,
+    )
+    exercise_agent = _CapturingResourceAgent(capability.exercise_generator)
+    capability.exercise_generator = exercise_agent
+    context = UnifiedContext(
+        user_id="alice",
+        user_message="生成 LSTM 练习",
+        web_search_enabled=True,
+        metadata={
+            "search_used": True,
+            "web_search_context": (
+                "[Web: Current exercise evidence]"
+                "(https://example.com/current-exercise)\n"
+                "Fresh non-document grounding evidence"
+            ),
+        },
+    )
+    pedagogy = ResourcePedagogyNodeOutput(
+        source=ResourceSourceNodeOutput(
+            profile=ResourceProfileNodeOutput(
+                intent=ResourceIntentNodeOutput(
+                    topic="LSTM",
+                    scope="deep_dive",
+                    resource_types=("exercise",),
+                    raw_message="生成 LSTM 练习",
+                ),
+                profile_snapshot={},
+            ),
+            planned_types=("exercise",),
+        ),
+    )
+
+    result = await capability._run_resource_branch(
+        "exercise",
+        pedagogy,
+        context,
+        StreamBus(),
+    )
+
+    assert len(exercise_agent.source_contents) == 1
+    assert "Fresh non-document grounding evidence" in exercise_agent.source_contents[0]
+    assert len(result.resources) == 1
+
+
+@pytest.mark.asyncio
+async def test_unavailable_search_injects_no_fake_non_document_evidence(
+    capability,
+) -> None:
+    from tutor.services.jobs.contracts import (
+        ResourceIntentNodeOutput,
+        ResourcePedagogyNodeOutput,
+        ResourceProfileNodeOutput,
+        ResourceSourceNodeOutput,
+    )
+
+    exercise_agent = _CapturingResourceAgent(capability.exercise_generator)
+    capability.exercise_generator = exercise_agent
+    pedagogy = ResourcePedagogyNodeOutput(
+        source=ResourceSourceNodeOutput(
+            profile=ResourceProfileNodeOutput(
+                intent=ResourceIntentNodeOutput(
+                    topic="LSTM",
+                    scope="deep_dive",
+                    resource_types=("exercise",),
+                    raw_message="生成 LSTM 练习",
+                ),
+                profile_snapshot={},
+            ),
+            planned_types=("exercise",),
+        ),
+    )
+
+    await capability._run_resource_branch(
+        "exercise",
+        pedagogy,
+        UnifiedContext(
+            user_id="alice",
+            user_message="生成 LSTM 练习",
+            web_search_enabled=True,
+            metadata={"search_used": False, "web_search_context": ""},
+        ),
+        StreamBus(),
+    )
+
+    assert exercise_agent.source_contents == [""]
+
+
 @pytest.mark.asyncio
 async def test_web_sources_flow_into_resource_context_package_and_persistence(
     capability, tmp_path

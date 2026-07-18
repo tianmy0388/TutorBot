@@ -612,7 +612,13 @@ class ResourceGenerationCapability(BaseCapability):
         intent = self._intent_from_contract(pedagogy_output.source.profile.intent)
         profile_snapshot = dict(pedagogy_output.source.profile.profile_snapshot)
         base_resource = pedagogy_output.pedagogy_resource or pedagogy_output.source.source_resource
-        source_content = base_resource.content if base_resource is not None else ""
+        base_content = base_resource.content if base_resource is not None else ""
+        web_content = str(context.metadata.get("web_search_context") or "").strip()
+        source_content = base_content
+        if web_content and web_content not in base_content:
+            source_content = "\n\n".join(
+                part for part in (base_content, web_content) if part
+            )
         resources: list[Resource] = []
 
         if branch_name == "mindmap":
