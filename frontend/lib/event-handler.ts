@@ -25,6 +25,11 @@ import {
   type QuestionUnderstanding,
 } from "./types";
 
+export interface StreamDispatchContext {
+  sessionId?: string;
+  userId?: string;
+}
+
 /**
  * Compatibility adapter: capabilities that were designed for the
  * single-activeTurn model still emit ``result`` / ``error`` / ``done``
@@ -34,6 +39,7 @@ import {
  */
 export function dispatchStreamEvent(
   ev: StreamEvent | WSServerMessage,
+  context: StreamDispatchContext = {},
 ): void {
   // Protocol / ack messages (job_submitted, ack, pong) are handled by the
   // WsClient itself; we shouldn't see them here. Defensive no-op.
@@ -57,9 +63,42 @@ export function dispatchStreamEvent(
     timestamp: ev.timestamp ?? Date.now() / 1000,
     event_id: ev.event_id ?? "",
   };
+  const metadataSessionId =
+    typeof streamEv.metadata?.session_id === "string"
+      ? streamEv.metadata.session_id
+      : "";
+  const authoritativeSessionId =
+    context.sessionId || streamEv.session_id || metadataSessionId;
+  // A stream event without any authoritative conversation identity cannot
+  // safely be projected or persisted. Failing closed prevents a malformed
+  // replay/subscription event from being attached to whichever session is
+  // currently visible.
+  if (!authoritativeSessionId) {
+    return;
+  }
+  const stateAtDispatch = useTutorStore.getState();
+  if (
+    authoritativeSessionId &&
+    stateAtDispatch.sessionId !== authoritativeSessionId
+  ) {
+    const inactiveJobId = getJobIdFromEvent(streamEv);
+    if (streamEv.type === "job_terminal" && inactiveJobId) {
+      const contract = (
+        streamEv.metadata as Record<string, unknown> | undefined
+      )?.contract as Record<string, unknown> | undefined;
+      persistTerminalAssistant(
+        contract,
+        inactiveJobId,
+        context.userId || stateAtDispatch.userId,
+        authoritativeSessionId,
+      );
+    }
+    return;
+  }
+
   const jobId = getJobIdFromEvent(streamEv);
   if (!jobId) {
-    useTutorStore.getState().addMessage({
+    stateAtDispatch.addMessage({
       role: "system",
       content: `协议错误：${streamEv.type} 事件缺少 job_id`,
       metadata: { protocol_error: true, event_type: streamEv.type },
@@ -142,14 +181,16 @@ export function dispatchStreamEvent(
               : ""
           : "";
       const state = useTutorStore.getState();
-      if (assistantText && state.userId && state.sessionId) {
+      const persistenceUserId = context.userId || state.userId;
+      const persistenceSessionId = authoritativeSessionId || state.sessionId;
+      if (assistantText && persistenceUserId && persistenceSessionId) {
         const cap =
           typeof contract?.capability === "string"
             ? (contract.capability as string)
             : null;
         void import("./api")
           .then(({ appendConversationMessage }) =>
-            appendConversationMessage(state.userId, state.sessionId, {
+            appendConversationMessage(persistenceUserId, persistenceSessionId, {
               role: "assistant",
               content: assistantText,
               job_id: jobId,
@@ -207,10 +248,10 @@ export function dispatchStreamEvent(
           syntheticJob,
           partialResources,
         );
-        if (timeline && state.userId && state.sessionId) {
+        if (timeline) {
           void import("./api")
             .then(({ appendConversationMessage }) =>
-              appendConversationMessage(state.userId, state.sessionId, {
+              appendConversationMessage(persistenceUserId, persistenceSessionId, {
                 role: "assistant",
                 content: timeline,
                 job_id: jobId,
@@ -252,6 +293,37 @@ export function dispatchStreamEvent(
     default:
       break;
   }
+}
+
+function persistTerminalAssistant(
+  contract: Record<string, unknown> | undefined,
+  jobId: string,
+  userId: string | null | undefined,
+  sessionId: string,
+): void {
+  if (!contract || !userId || !sessionId) return;
+  const content =
+    typeof contract.assistant_message === "string"
+      ? contract.assistant_message
+      : typeof contract.message === "string"
+        ? contract.message
+        : "";
+  if (!content) return;
+  const capability =
+    typeof contract.capability === "string" ? contract.capability : null;
+  void import("./api")
+    .then(({ appendConversationMessage }) =>
+      appendConversationMessage(userId, sessionId, {
+        role: "assistant",
+        content,
+        job_id: jobId,
+        capability,
+        metadata: { job_id: jobId, capability },
+      }),
+    )
+    .catch((error) => {
+      console.warn("appendConversationMessage(assistant) failed", error);
+    });
 }
 
 function routeResult(

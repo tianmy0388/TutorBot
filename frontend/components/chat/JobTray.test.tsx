@@ -37,7 +37,7 @@ function summary(status: JobSummary["status"]): JobSummary {
 }
 
 function mockQueue(job: JobSummary) {
-  useJobQueueMock.mockReturnValue({
+  const queue = {
     jobs: [job],
     total: 1,
     loading: false,
@@ -48,7 +48,9 @@ function mockQueue(job: JobSummary) {
     subscribe: vi.fn(),
     cancel: vi.fn(),
     remove: vi.fn(),
-  });
+  };
+  useJobQueueMock.mockReturnValue(queue);
+  return queue;
 }
 
 describe("JobTray durable terminal state", () => {
@@ -144,5 +146,20 @@ describe("JobTray durable terminal state", () => {
     fireEvent.click(screen.getByTitle("任务队列"));
 
     expect(screen.getAllByText("hello")).toHaveLength(1);
+  });
+
+  it("resubscribes with the job's authoritative session", () => {
+    const queue = mockQueue(summary("running"));
+    useTutorStoreMock.mockImplementation((selector: (value: unknown) => unknown) =>
+      selector({ userId: "local-user", jobsById: {} }),
+    );
+
+    render(<JobTray />);
+    fireEvent.click(screen.getByTitle("任务队列"));
+    fireEvent.click(screen.getByRole("button", { name: "查看" }));
+
+    expect(queue.subscribe).toHaveBeenCalledWith("job-queue", "tutoring", {
+      sessionId: "session-1",
+    });
   });
 });

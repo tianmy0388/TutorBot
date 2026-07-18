@@ -142,6 +142,7 @@ class ConversationStore:
         session_id: str,
         user_id: str,
         title: str | None = None,
+        web_search_enabled: bool = False,
     ) -> Conversation:
         await self.init()
         async with self._session() as session:
@@ -159,7 +160,7 @@ class ConversationStore:
                 title=title or "",
                 message_count=0,
                 last_message_preview="",
-                web_search_enabled=False,
+                web_search_enabled=bool(web_search_enabled),
                 created_at=now,
                 updated_at=now,
             )

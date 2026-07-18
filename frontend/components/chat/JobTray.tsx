@@ -227,7 +227,11 @@ export function JobTray() {
                 <JobRow
                   key={job.job_id}
                   job={job}
-                  onSubscribe={() => queue.subscribe(job.job_id, job.capability)}
+                  onSubscribe={() =>
+                    queue.subscribe(job.job_id, job.capability, {
+                      sessionId: job.session_id,
+                    })
+                  }
                   onCancel={() => queue.cancel(job.job_id)}
                   onRemove={() => queue.remove(job.job_id)}
                 />

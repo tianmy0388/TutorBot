@@ -16,6 +16,7 @@ or progress notifications, extend :meth:`StdioMCPClient._dispatch`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -40,7 +41,7 @@ class MCPTool:
     input_schema: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "MCPTool":
+    def from_dict(cls, raw: dict[str, Any]) -> MCPTool:
         schema = raw.get("inputSchema") or raw.get("input_schema") or {}
         return cls(
             name=raw.get("name", ""),
@@ -79,6 +80,7 @@ class StdioMCPClient:
     PROTOCOL_VERSION = "2024-11-05"
     CLIENT_NAME = "tutor"
     CLIENT_VERSION = "0.1.0"
+    _STDIN_CLOSE_TIMEOUT = 1.0
 
     def __init__(self, spec: MCPServerSpec, *, request_timeout: float = 60.0) -> None:
         self._spec = spec
@@ -89,6 +91,7 @@ class StdioMCPClient:
         self._read_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._started = False
+        self._stopping = False
         self._server_info: dict[str, Any] = {}
         self._server_capabilities: dict[str, Any] = {}
         self._tools: list[MCPTool] = []
@@ -121,6 +124,7 @@ class StdioMCPClient:
         """Spawn the subprocess, handshake, and cache the tool list."""
         if self._started:
             return
+        self._stopping = False
 
         command_path = self._resolve_command(self._spec.command)
         if not command_path:
@@ -213,35 +217,61 @@ class StdioMCPClient:
 
     async def _kill(self) -> None:
         proc = self._proc
-        self._proc = None
-        for task in (self._read_task, self._stderr_task):
-            if task and not task.done():
-                task.cancel()
-        for task in (self._read_task, self._stderr_task):
-            if task:
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        self._read_task = None
-        self._stderr_task = None
+        self._stopping = True
+        self._started = False
         # Fail any in-flight requests so callers don't hang.
         for fut in self._pending.values():
             if not fut.done():
                 fut.set_exception(MCPError(f"MCP server {self.name!r} is shutting down"))
         self._pending.clear()
+
+        # Close the writer before terminating the process. On Windows the
+        # Proactor loop owns a transport for each pipe; cancelling readers
+        # first leaves those transports alive until after the loop closes.
+        if proc and proc.stdin:
+            try:
+                proc.stdin.close()
+                await asyncio.wait_for(
+                    proc.stdin.wait_closed(),
+                    timeout=self._STDIN_CLOSE_TIMEOUT,
+                )
+            except (BrokenPipeError, ConnectionResetError, OSError, TimeoutError):
+                pass
+
         if proc and proc.returncode is None:
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=3)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
-                try:
+                with contextlib.suppress(Exception):
                     await proc.wait()
-                except Exception:
-                    pass
             except ProcessLookupError:
                 pass
+
+        # Normal termination closes stdout/stderr and lets both reader tasks
+        # observe EOF. Keep cancellation as a bounded fallback for a broken
+        # server that leaves a pipe open after its process has exited.
+        tasks = [
+            task
+            for task in (self._read_task, self._stderr_task)
+            if task is not None
+        ]
+        if tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=1,
+                )
+            except TimeoutError:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        self._read_task = None
+        self._stderr_task = None
+        self._proc = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -305,7 +335,7 @@ class StdioMCPClient:
 
         try:
             return await asyncio.wait_for(fut, timeout=self._request_timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             self._pending.pop(req_id, None)
             raise MCPError(
                 f"MCP server {self.name!r}: timeout waiting for {method!r}"
@@ -332,6 +362,8 @@ class StdioMCPClient:
                 raw = await self._proc.stdout.readline()
                 if not raw:
                     # EOF — server closed its stdout.
+                    if self._stopping:
+                        return
                     logger.warning(f"MCP[{self.name}]: server closed stdout (EOF)")
                     self._fail_all_pending(
                         MCPError(f"MCP server {self.name!r} closed stdout unexpectedly")
@@ -388,10 +420,11 @@ class StdioMCPClient:
                 return
             if "error" in msg and msg["error"] is not None:
                 err = msg["error"]
-                if isinstance(err, dict):
-                    msg_text = err.get("message") or json.dumps(err)
-                else:
-                    msg_text = str(err)
+                msg_text = (
+                    err.get("message") or json.dumps(err)
+                    if isinstance(err, dict)
+                    else str(err)
+                )
                 fut.set_exception(MCPError(f"MCP[{self.name}] {msg_text}"))
             else:
                 fut.set_result(msg["result"] or {})

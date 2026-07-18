@@ -257,9 +257,53 @@ let messageCounter = 0;
 const nextMessageId = () =>
   `msg_${Date.now()}_${(messageCounter += 1).toString(36)}`;
 
-let webSearchMutationRevision = 0;
-let webSearchMutationChain: Promise<unknown> = Promise.resolve();
+const webSearchMutationRevisionBySession = new Map<string, number>();
+const webSearchMutationChainBySession = new Map<string, Promise<unknown>>();
 const webSearchConfirmedBySession = new Map<string, boolean>();
+const webSearchDesiredBySession = new Map<string, boolean>();
+const webSearchPendingSessions = new Set<string>();
+let conversationHydrationGeneration = 0;
+let conversationHydrationTargetSessionId: string | null = null;
+
+const beginConversationHydration = (sessionId: string): number => {
+  conversationHydrationTargetSessionId = sessionId;
+  conversationHydrationGeneration += 1;
+  return conversationHydrationGeneration;
+};
+
+const invalidateConversationHydration = (sessionId: string): void => {
+  conversationHydrationTargetSessionId = sessionId;
+  conversationHydrationGeneration += 1;
+};
+
+const isCurrentConversationHydration = (
+  generation: number,
+  sessionId: string,
+): boolean =>
+  generation === conversationHydrationGeneration &&
+  sessionId === conversationHydrationTargetSessionId;
+
+const nextWebSearchRevision = (sessionId: string): number => {
+  const revision = (webSearchMutationRevisionBySession.get(sessionId) ?? 0) + 1;
+  webSearchMutationRevisionBySession.set(sessionId, revision);
+  return revision;
+};
+
+const currentWebSearchRevision = (sessionId: string): number =>
+  webSearchMutationRevisionBySession.get(sessionId) ?? 0;
+
+const webSearchViewForSession = (
+  sessionId: string,
+  serverValue: boolean,
+): { enabled: boolean; pending: boolean } => {
+  const pending = webSearchPendingSessions.has(sessionId);
+  return {
+    enabled: pending
+      ? (webSearchDesiredBySession.get(sessionId) ?? serverValue)
+      : serverValue,
+    pending,
+  };
+};
 
 export const useTutorStore = create<TutorState>()(
   subscribeWithSelector((set, get) => ({
@@ -391,7 +435,13 @@ export const useTutorStore = create<TutorState>()(
     setRagEnabled: (enabled) => set({ ragEnabled: enabled }),
     setRetrievalScope: (scope) => set({ retrievalScope: scope }),
     setDraftWebSearchEnabled: (enabled) => {
-      webSearchMutationRevision += 1;
+      const sessionId = get().sessionId;
+      if (sessionId) {
+        nextWebSearchRevision(sessionId);
+        webSearchPendingSessions.delete(sessionId);
+        webSearchDesiredBySession.set(sessionId, enabled);
+        webSearchConfirmedBySession.delete(sessionId);
+      }
       set({
         webSearchEnabled: enabled,
         webSearchMutationPending: false,
@@ -399,7 +449,13 @@ export const useTutorStore = create<TutorState>()(
       });
     },
     restoreDraftWebSearch: (enabled) => {
-      webSearchMutationRevision += 1;
+      const sessionId = get().sessionId;
+      if (sessionId) {
+        nextWebSearchRevision(sessionId);
+        webSearchPendingSessions.delete(sessionId);
+        webSearchDesiredBySession.set(sessionId, enabled);
+        webSearchConfirmedBySession.delete(sessionId);
+      }
       set({
         webSearchEnabled: enabled,
         webSearchMutationPending: false,
@@ -415,14 +471,20 @@ export const useTutorStore = create<TutorState>()(
       } else if (!webSearchConfirmedBySession.has(sessionId)) {
         webSearchConfirmedBySession.set(sessionId, get().webSearchEnabled);
       }
-      const revision = ++webSearchMutationRevision;
-      set({
-        webSearchEnabled: enabled,
-        webSearchMutationPending: true,
-        webSearchError: null,
-      });
+      const revision = nextWebSearchRevision(sessionId);
+      webSearchDesiredBySession.set(sessionId, enabled);
+      webSearchPendingSessions.add(sessionId);
+      if (get().sessionId === sessionId) {
+        set({
+          webSearchEnabled: enabled,
+          webSearchMutationPending: true,
+          webSearchError: null,
+        });
+      }
 
-      const operation = webSearchMutationChain.then(async () => {
+      const previousChain =
+        webSearchMutationChainBySession.get(sessionId) ?? Promise.resolve();
+      const operation = previousChain.then(async () => {
         try {
           const { setConversationWebSearch } = await import("./api");
           const persisted = await setConversationWebSearch(
@@ -432,7 +494,10 @@ export const useTutorStore = create<TutorState>()(
           );
           const confirmedValue = Boolean(persisted.web_search_enabled);
           webSearchConfirmedBySession.set(sessionId, confirmedValue);
-          if (revision === webSearchMutationRevision) {
+          if (
+            revision === currentWebSearchRevision(sessionId) &&
+            get().sessionId === sessionId
+          ) {
             set({
               webSearchEnabled: confirmedValue,
               webSearchError: null,
@@ -440,21 +505,37 @@ export const useTutorStore = create<TutorState>()(
           }
           return true;
         } catch {
-          if (revision === webSearchMutationRevision) {
+          const confirmedValue =
+            webSearchConfirmedBySession.get(sessionId) ?? false;
+          if (revision === currentWebSearchRevision(sessionId)) {
+            webSearchDesiredBySession.set(sessionId, confirmedValue);
+          }
+          if (
+            revision === currentWebSearchRevision(sessionId) &&
+            get().sessionId === sessionId
+          ) {
             set({
-              webSearchEnabled:
-                webSearchConfirmedBySession.get(sessionId) ?? false,
+              webSearchEnabled: confirmedValue,
               webSearchError: "设置保存失败，已恢复先前状态",
             });
           }
           return false;
         } finally {
-          if (revision === webSearchMutationRevision) {
-            set({ webSearchMutationPending: false });
+          if (revision === currentWebSearchRevision(sessionId)) {
+            webSearchPendingSessions.delete(sessionId);
+            if (get().sessionId === sessionId) {
+              set({ webSearchMutationPending: false });
+            }
           }
         }
       });
-      webSearchMutationChain = operation.then(() => undefined);
+      const settled = operation.then(() => undefined);
+      webSearchMutationChainBySession.set(sessionId, settled);
+      void settled.finally(() => {
+        if (webSearchMutationChainBySession.get(sessionId) === settled) {
+          webSearchMutationChainBySession.delete(sessionId);
+        }
+      });
       return operation;
     },
     setLatestAssessment: (a) => set({ latestAssessment: a }),
@@ -575,7 +656,13 @@ export const useTutorStore = create<TutorState>()(
 
     resetSession: () =>
       set(() => {
-        webSearchMutationRevision += 1;
+        const sessionId = get().sessionId;
+        if (sessionId) {
+          nextWebSearchRevision(sessionId);
+          webSearchPendingSessions.delete(sessionId);
+          webSearchDesiredBySession.delete(sessionId);
+          webSearchConfirmedBySession.delete(sessionId);
+        }
         return {
         // 2026-06-21 plan: resetSession clears the visible UI state
         // (messages, jobs, right-pane panels) but DOES NOT touch
@@ -656,6 +743,7 @@ export const useTutorStore = create<TutorState>()(
           // ignore (private mode / blocked storage)
         }
       }
+      invalidateConversationHydration(sessionId);
       set({ sessionId });
     },
 
@@ -670,15 +758,16 @@ export const useTutorStore = create<TutorState>()(
         timestamp: new Date(m.created_at).getTime(),
         metadata: m.metadata ?? {},
       }));
-      webSearchMutationRevision += 1;
-      webSearchConfirmedBySession.set(
-        sessionId,
-        detail.web_search_enabled ?? false,
-      );
+      const serverWebSearch = detail.web_search_enabled ?? false;
+      const webSearchView = webSearchViewForSession(sessionId, serverWebSearch);
+      if (!webSearchView.pending) {
+        webSearchConfirmedBySession.set(sessionId, serverWebSearch);
+        webSearchDesiredBySession.set(sessionId, serverWebSearch);
+      }
       set({
         sessionId,
-        webSearchEnabled: detail.web_search_enabled ?? false,
-        webSearchMutationPending: false,
+        webSearchEnabled: webSearchView.enabled,
+        webSearchMutationPending: webSearchView.pending,
         webSearchError: null,
         conversationMaterialized: true,
         messages,
@@ -710,8 +799,12 @@ export const useTutorStore = create<TutorState>()(
      * switch back.
      */
     loadConversationAggregate: async (userId, sessionId) => {
+      const hydrationGeneration = beginConversationHydration(sessionId);
       const { getConversationAggregate } = await import("./api");
       const agg = await getConversationAggregate(userId, sessionId);
+      if (!isCurrentConversationHydration(hydrationGeneration, sessionId)) {
+        return;
+      }
       const conv = agg.conversation;
       const messages = (conv.messages || []).map((m) => ({
         id: m.id,
@@ -780,15 +873,16 @@ export const useTutorStore = create<TutorState>()(
         ? agg.packages[agg.packages.length - 1]
         : null;
 
-      webSearchMutationRevision += 1;
-      webSearchConfirmedBySession.set(
-        sessionId,
-        conv.web_search_enabled ?? false,
-      );
+      const serverWebSearch = conv.web_search_enabled ?? false;
+      const webSearchView = webSearchViewForSession(sessionId, serverWebSearch);
+      if (!webSearchView.pending) {
+        webSearchConfirmedBySession.set(sessionId, serverWebSearch);
+        webSearchDesiredBySession.set(sessionId, serverWebSearch);
+      }
       set({
         sessionId,
-        webSearchEnabled: conv.web_search_enabled ?? false,
-        webSearchMutationPending: false,
+        webSearchEnabled: webSearchView.enabled,
+        webSearchMutationPending: webSearchView.pending,
         webSearchError: null,
         conversationMaterialized: true,
         messages,

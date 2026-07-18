@@ -115,6 +115,7 @@ describe("per-conversation web search state", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     useTutorStore.setState({
+      sessionId: "session-1",
       webSearchEnabled: false,
       conversationMaterialized: true,
     });
@@ -160,6 +161,7 @@ describe("per-conversation web search state", () => {
   it("rolls back the exact prior value and exposes a visible error", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
     useTutorStore.setState({
+      sessionId: "session-1",
       webSearchEnabled: false,
       conversationMaterialized: true,
     });
@@ -177,6 +179,7 @@ describe("per-conversation web search state", () => {
   it("can roll a draft PATCH back to the known server value", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
     useTutorStore.setState({
+      sessionId: "draft-session",
       webSearchEnabled: true,
       conversationMaterialized: true,
     });
@@ -197,6 +200,7 @@ describe("per-conversation web search state", () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("offline"));
     vi.stubGlobal("fetch", fetchMock);
     useTutorStore.setState({
+      sessionId: "double-failure",
       webSearchEnabled: false,
       conversationMaterialized: true,
     });
@@ -227,6 +231,7 @@ describe("per-conversation web search state", () => {
       .mockRejectedValueOnce(new Error("offline"));
     vi.stubGlobal("fetch", fetchMock);
     useTutorStore.setState({
+      sessionId: "success-then-failure",
       webSearchEnabled: false,
       conversationMaterialized: true,
     });
@@ -243,5 +248,159 @@ describe("per-conversation web search state", () => {
     expect(useTutorStore.getState().webSearchEnabled).toBe(true);
     expect(useTutorStore.getState().webSearchMutationPending).toBe(false);
     expect(useTutorStore.getState().webSearchError).toContain("恢复");
+  });
+
+  it("reconciles a pending session after switching away and hydrating it again", async () => {
+    let resolvePatch!: (response: Response) => void;
+    const aggregate = (sessionId: string, enabled: boolean) => ({
+      conversation: {
+        session_id: sessionId,
+        user_id: "local-user",
+        title: sessionId,
+        message_count: 0,
+        last_message_preview: "",
+        web_search_enabled: enabled,
+        created_at: "2026-07-18T00:00:00Z",
+        updated_at: "2026-07-18T00:00:00Z",
+        messages: [],
+      },
+      jobs: [],
+      packages: [],
+      profile_summary: {},
+      path_summary: {},
+      recovery_warnings: [],
+    });
+    const fetchMock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (init?.method === "PATCH") {
+          return new Promise((resolve) => {
+            resolvePatch = resolve;
+          });
+        }
+        const sessionId = url.includes("session-b") ? "session-b" : "session-a";
+        return Promise.resolve(
+          new Response(JSON.stringify(aggregate(sessionId, false)), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    useTutorStore.setState({
+      sessionId: "session-a",
+      webSearchEnabled: false,
+      conversationMaterialized: true,
+    });
+
+    const pending = useTutorStore
+      .getState()
+      .setConversationWebSearch("local-user", "session-a", true);
+    await vi.waitFor(() => expect(resolvePatch).toBeTypeOf("function"));
+    await useTutorStore
+      .getState()
+      .loadConversationAggregate("local-user", "session-b");
+    await useTutorStore
+      .getState()
+      .loadConversationAggregate("local-user", "session-a");
+
+    expect(useTutorStore.getState().webSearchEnabled).toBe(true);
+    expect(useTutorStore.getState().webSearchMutationPending).toBe(true);
+
+    resolvePatch(
+      new Response(JSON.stringify({ web_search_enabled: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await expect(pending).resolves.toBe(true);
+
+    expect(useTutorStore.getState().sessionId).toBe("session-a");
+    expect(useTutorStore.getState().webSearchEnabled).toBe(true);
+    expect(useTutorStore.getState().webSearchMutationPending).toBe(false);
+    expect(useTutorStore.getState().webSearchError).toBeNull();
+  });
+
+  it("ignores an older aggregate that resolves after the latest target session", async () => {
+    const resolvers = new Map<string, (response: Response) => void>();
+    const aggregate = (sessionId: string, enabled: boolean) => ({
+      conversation: {
+        session_id: sessionId,
+        user_id: "local-user",
+        title: sessionId,
+        message_count: 1,
+        last_message_preview: `message from ${sessionId}`,
+        web_search_enabled: enabled,
+        created_at: "2026-07-18T00:00:00Z",
+        updated_at: "2026-07-18T00:00:00Z",
+        messages: [
+          {
+            id: `message-${sessionId}`,
+            role: "assistant",
+            content: `message from ${sessionId}`,
+            capability: null,
+            metadata: {},
+            created_at: "2026-07-18T00:00:00Z",
+          },
+        ],
+      },
+      jobs: [],
+      packages: [],
+      profile_summary: { session: sessionId },
+      path_summary: {},
+      recovery_warnings: [],
+    });
+    const fetchMock = vi.fn(
+      (input: RequestInfo | URL): Promise<Response> => {
+        const sessionId = String(input).includes("session-b")
+          ? "session-b"
+          : "session-a";
+        return new Promise((resolve) => {
+          resolvers.set(sessionId, resolve);
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    useTutorStore.getState().setSessionId("session-a");
+    const loadA = useTutorStore
+      .getState()
+      .loadConversationAggregate("local-user", "session-a");
+    useTutorStore.getState().setSessionId("session-b");
+    const loadB = useTutorStore
+      .getState()
+      .loadConversationAggregate("local-user", "session-b");
+    await vi.waitFor(() => expect(resolvers.size).toBe(2));
+
+    resolvers.get("session-b")!(
+      new Response(JSON.stringify(aggregate("session-b", true)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await loadB;
+    expect(useTutorStore.getState().sessionId).toBe("session-b");
+    expect(useTutorStore.getState().messages[0]?.content).toBe(
+      "message from session-b",
+    );
+    expect(useTutorStore.getState().webSearchEnabled).toBe(true);
+
+    resolvers.get("session-a")!(
+      new Response(JSON.stringify(aggregate("session-a", false)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await loadA;
+
+    expect(useTutorStore.getState().sessionId).toBe("session-b");
+    expect(useTutorStore.getState().messages[0]?.content).toBe(
+      "message from session-b",
+    );
+    expect(useTutorStore.getState().webSearchEnabled).toBe(true);
+    expect(useTutorStore.getState().profileSummary).toEqual({
+      session: "session-b",
+    });
   });
 });

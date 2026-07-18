@@ -29,7 +29,6 @@ import { WebSearchToggle } from "./WebSearchToggle";
 import {
   appendConversationMessage,
   createConversation,
-  deleteConversation,
   getConversation,
   listAppCourses,
   listKnowledgeBases,
@@ -47,6 +46,7 @@ const CAPABILITY_OPTIONS = [
 export function ChatComposer() {
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [preSubmitError, setPreSubmitError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const userId = useTutorStore((s) => s.userId);
   const sessionId = useTutorStore((s) => s.sessionId);
@@ -64,9 +64,6 @@ export function ChatComposer() {
   );
   const setDraftWebSearchEnabled = useTutorStore(
     (s) => s.setDraftWebSearchEnabled,
-  );
-  const restoreDraftWebSearch = useTutorStore(
-    (s) => s.restoreDraftWebSearch,
   );
   const setConversationMaterialized = useTutorStore(
     (s) => s.setConversationMaterialized,
@@ -110,116 +107,108 @@ export function ChatComposer() {
     const msg = text.trim();
     const requestedWebSearch = webSearchEnabled;
     const wasDraft = !conversationMaterialized;
-    const deferUserMessage = wasDraft && requestedWebSearch;
+    const submittedSessionId = sessionId;
+    const submittedUserId = userId;
+    const isSubmittedSessionActive = () =>
+      useTutorStore.getState().sessionId === submittedSessionId;
     setText("");
     setSubmitting(true);
-
-    if (!deferUserMessage) {
-      addMessage({
-        role: "user",
-        content: msg,
-        metadata: { web_search_requested: requestedWebSearch },
-      });
-    }
-
-    // 2026-06-21 plan: the first message in a brand-new (draft) session
-    // must materialise the server-side conversation before we try to
-    // append the message. The store starts with a draft id (see
-    // ``useTutorStore`` initial state) and only the user's first send
-    // causes a row in the conversation history — that is the spec
-    // behaviour for "no empty sessions in history".
-    let activeSessionId = sessionId;
-    let materialized = conversationMaterialized;
-    if (userId && activeSessionId) {
-      try {
-        await getConversation(userId, activeSessionId);
-        materialized = true;
-        setConversationMaterialized(true);
-      } catch (e: any) {
-        if (e?.status === 404) {
-          // The sessionId is a draft — promote it to a real
-          // conversation now, with the first 60 chars of the
-          // question as the title.
-          const title = msg.length > 60 ? msg.slice(0, 60) + "…" : msg;
-          const conv = await createConversation(userId, {
-            session_id: activeSessionId,
-            title,
-          });
-          activeSessionId = conv.session_id;
-          useTutorStore.getState().setSessionId(conv.session_id);
-          materialized = true;
-          setConversationMaterialized(true);
-        } else {
-          // Network / 5xx — fall through; the append below is also
-          // best-effort so a transient backend hiccup does not block
-          // submission.
-          console.warn("getConversation pre-flight failed", e);
-        }
-      }
-    }
-
-    // A draft's opt-in exists only in the active UI until the first send.
-    // Materialize the row above, then persist the choice before the durable
-    // job boundary. A failed opt-in must never silently submit as server-off.
-    if (userId && activeSessionId && wasDraft && requestedWebSearch) {
-      const persisted = materialized
-        ? await persistWebSearch(userId, activeSessionId, true, {
-            rollbackValue: false,
-          })
-        : false;
-      if (!persisted) {
-        await deleteConversation(userId, activeSessionId).catch((e) => {
-          console.warn("deleteConversation draft rollback failed", e);
-        });
-        restoreDraftWebSearch(requestedWebSearch);
-        setText(msg);
-        setSubmitting(false);
-        return;
-      }
-    }
-
-    if (deferUserMessage) {
-      addMessage({
-        role: "user",
-        content: msg,
-        metadata: { web_search_requested: requestedWebSearch },
-      });
-    }
-
-    // Persist the user message into the active conversation so the
-    // sidebar's message_count updates in real time (DeepSeek-style).
-    // Fire-and-forget — a failure to persist must NOT block the user
-    // from submitting.
-    if (userId && activeSessionId) {
-      void appendConversationMessage(userId, activeSessionId, {
-        role: "user",
-        content: msg,
-        metadata: {
-          source: "chat_composer",
-          web_search_requested: requestedWebSearch,
-        },
-      }).catch((e) => {
-        // Swallow — UI already has the message; the persist is a
-        // best-effort background write.
-        console.warn("appendConversationMessage(user) failed", e);
-      });
-    }
+    setPreSubmitError(null);
+    let userMessageAdded = false;
 
     try {
-      const result = await queue.submit(msg, currentCapability || undefined);
+      // A draft's setting and row are created atomically. If the same
+      // session already exists (for example after a failed aggregate load),
+      // use the narrow PATCH and never compensate with an unsafe DELETE.
+      if (wasDraft && submittedUserId && submittedSessionId) {
+        try {
+          const existing = await getConversation(
+            submittedUserId,
+            submittedSessionId,
+          );
+          if (isSubmittedSessionActive()) {
+            setConversationMaterialized(true);
+          }
+          if (existing.web_search_enabled !== requestedWebSearch) {
+            const persisted = await persistWebSearch(
+              submittedUserId,
+              submittedSessionId,
+              requestedWebSearch,
+              { rollbackValue: existing.web_search_enabled },
+            );
+            if (!persisted) {
+              throw new Error("WEB_SEARCH_SETTING_NOT_PERSISTED");
+            }
+          }
+        } catch (error: unknown) {
+          const status =
+            typeof error === "object" && error !== null && "status" in error
+              ? (error as { status?: number }).status
+              : undefined;
+          if (status !== 404) throw error;
+          const title = msg.length > 60 ? msg.slice(0, 60) + "…" : msg;
+          await createConversation(submittedUserId, {
+            session_id: submittedSessionId,
+            title,
+            web_search_enabled: requestedWebSearch,
+          });
+          if (isSubmittedSessionActive()) {
+            setConversationMaterialized(true);
+          }
+        }
+      }
+
+      // Navigation is allowed while I/O is pending. The captured A turn still
+      // has to cross the durable append/job boundaries, but its optimistic UI
+      // must not be rendered into a newly active B conversation.
+      if (isSubmittedSessionActive()) {
+        addMessage({
+          role: "user",
+          content: msg,
+          metadata: { web_search_requested: requestedWebSearch },
+        });
+        userMessageAdded = true;
+      }
+
+      if (submittedUserId && submittedSessionId) {
+        void appendConversationMessage(submittedUserId, submittedSessionId, {
+          role: "user",
+          content: msg,
+          metadata: {
+            source: "chat_composer",
+            web_search_requested: requestedWebSearch,
+          },
+        }).catch((e) => {
+          console.warn("appendConversationMessage(user) failed", e);
+        });
+      }
+
+      const result = await queue.submit(msg, currentCapability || undefined, {
+        sessionId: submittedSessionId,
+        webSearchRequested: requestedWebSearch,
+      });
       if (result) {
         // Subscribe to the job's live event stream. This drives the
         // chat-message pipeline via dispatchStreamEvent so the existing
         // event-handler does the rest.
-        queue.subscribe(result.job_id, result.capability);
+        queue.subscribe(result.job_id, result.capability, {
+          sessionId: submittedSessionId,
+        });
       }
     } catch (e: any) {
-      console.error("submit failed", e);
-      addMessage({
-        role: "system",
-        content: `提交失败: ${e?.message || e}`,
-        metadata: { source: "chat_composer" },
-      });
+      if (isSubmittedSessionActive()) {
+        if (userMessageAdded) {
+          console.error("submit failed", e);
+          addMessage({
+            role: "system",
+            content: `提交失败: ${e?.message || e}`,
+            metadata: { source: "chat_composer" },
+          });
+        } else {
+          setText(msg);
+          setPreSubmitError("设置保存失败，请检查网络后重试");
+        }
+      }
     } finally {
       setSubmitting(false);
     }
@@ -388,7 +377,7 @@ export function ChatComposer() {
           <WebSearchToggle
             checked={webSearchEnabled}
             disabled={submitting || webSearchMutationPending}
-            error={webSearchError}
+            error={preSubmitError ?? webSearchError}
             onChange={(enabled) => {
               if (conversationMaterialized && userId && sessionId) {
                 void persistWebSearch(userId, sessionId, enabled);

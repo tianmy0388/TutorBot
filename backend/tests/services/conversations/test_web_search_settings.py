@@ -105,6 +105,52 @@ async def test_settings_patch_persists_across_all_projections_and_restart(
 
 
 @pytest.mark.asyncio
+async def test_create_atomically_persists_initial_web_search_setting(
+    tmp_path, monkeypatch
+) -> None:
+    async with _client(tmp_path, monkeypatch) as client:
+        defaulted = await client.post(
+            "/api/v1/conversations",
+            json={"session_id": "default-off", "user_id": "owner"},
+        )
+        opted_in = await client.post(
+            "/api/v1/conversations",
+            json={
+                "session_id": "atomic-opt-in",
+                "user_id": "owner",
+                "web_search_enabled": True,
+            },
+        )
+
+        assert defaulted.status_code == 201, defaulted.text
+        assert defaulted.json()["web_search_enabled"] is False
+        assert opted_in.status_code == 201, opted_in.text
+        assert opted_in.json()["web_search_enabled"] is True
+
+        # POST remains idempotent: a stale client cannot overwrite an
+        # already materialized conversation through the create contract.
+        existing = await client.post(
+            "/api/v1/conversations",
+            json={
+                "session_id": "default-off",
+                "user_id": "owner",
+                "web_search_enabled": True,
+            },
+        )
+        assert existing.status_code == 201
+        assert existing.json()["web_search_enabled"] is False
+
+    store = get_conversation_store()
+    await store.close()
+    reset_conversation_store()
+    reopened = get_conversation_store()
+    restored = await reopened.get("atomic-opt-in")
+    assert restored is not None
+    assert restored.web_search_enabled is True
+    await reopened.close()
+
+
+@pytest.mark.asyncio
 async def test_legacy_sqlite_conversation_table_is_migrated_in_place(tmp_path) -> None:
     db_path = tmp_path / "legacy-conversations.db"
     now = datetime.now(UTC).isoformat()

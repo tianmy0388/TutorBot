@@ -51,6 +51,7 @@ vi.mock("./api", () => ({
 }));
 
 import { dispatchStreamEvent } from "./event-handler";
+import { appendConversationMessage } from "./api";
 import type { StreamEvent } from "./types";
 
 const RESOURCE_BASE = {
@@ -145,6 +146,8 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     mockStoreState.applyStreamEvent.mockClear();
     mockStoreState.addMessage.mockClear();
     mockStoreState.completeActiveTurn.mockClear();
+    vi.mocked(appendConversationMessage).mockClear();
+    mockStoreState.sessionId = "s-test";
   });
 
   it("preserves 4 real non-video resources after job_terminal timeout", () => {
@@ -285,5 +288,87 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     const ids = finalPkg.resources.map((r) => r.resource_id);
     const videoCount = ids.filter((id) => id === "r-video").length;
     expect(videoCount).toBe(1);
+  });
+
+  it("does not route session A resource events into the active session B view", () => {
+    mockStoreState.sessionId = "session-b";
+    const event = resourceEvent("r-session-a", "document", "A 的资源");
+    event.session_id = "";
+
+    dispatchStreamEvent(event, {
+      sessionId: "session-a",
+      userId: "u-test",
+    });
+
+    expect(mockStoreState.applyStreamEvent).not.toHaveBeenCalled();
+    expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+    expect(mockStoreState.addMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not report a malformed session A event inside active session B", () => {
+    mockStoreState.sessionId = "session-b";
+    const event = {
+      ...resourceEvent("r-session-a", "document", "A 的资源"),
+      type: "progress",
+      metadata: {},
+      session_id: "",
+    } as StreamEvent;
+
+    dispatchStreamEvent(event, {
+      sessionId: "session-a",
+      userId: "u-test",
+    });
+
+    expect(mockStoreState.applyStreamEvent).not.toHaveBeenCalled();
+    expect(mockStoreState.addMessage).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a terminal event has no authoritative session", async () => {
+    mockStoreState.sessionId = "session-b";
+    const event = jobTerminalEvent([]);
+    event.session_id = "";
+    event.metadata = {
+      ...event.metadata,
+      session_id: undefined,
+    };
+
+    dispatchStreamEvent(event);
+    await Promise.resolve();
+
+    expect(mockStoreState.applyStreamEvent).not.toHaveBeenCalled();
+    expect(mockStoreState.completeActiveTurn).not.toHaveBeenCalled();
+    expect(appendConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it("persists session A terminal assistant to A without mutating active session B", async () => {
+    mockStoreState.sessionId = "session-b";
+    const event = jobTerminalEvent([]);
+    event.session_id = "";
+    event.metadata = {
+      ...event.metadata,
+      session_id: undefined,
+    };
+
+    dispatchStreamEvent(event, {
+      sessionId: "session-a",
+      userId: "u-test",
+    });
+    await vi.waitFor(() =>
+      expect(appendConversationMessage).toHaveBeenCalledTimes(1),
+    );
+
+    expect(appendConversationMessage).toHaveBeenCalledWith(
+      "u-test",
+      "session-a",
+      expect.objectContaining({
+        role: "assistant",
+        content: "任务失败：Job timed out after 600s",
+        job_id: "job-bbf6ddbf",
+      }),
+    );
+    expect(mockStoreState.applyStreamEvent).not.toHaveBeenCalled();
+    expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+    expect(mockStoreState.addMessage).not.toHaveBeenCalled();
+    expect(mockStoreState.completeActiveTurn).not.toHaveBeenCalled();
   });
 });

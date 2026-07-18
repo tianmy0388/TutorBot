@@ -45,7 +45,12 @@ async def create_or_get_conversation(
     user_id = identity_policy_for(request).resolve(req.user_id)
     store = get_conversation_store()
     session_id = req.session_id or f"sess_{uuid.uuid4().hex[:12]}"
-    conv = await store.get_or_create(session_id=session_id, user_id=user_id, title=req.title)
+    conv = await store.get_or_create(
+        session_id=session_id,
+        user_id=user_id,
+        title=req.title,
+        web_search_enabled=req.web_search_enabled,
+    )
     return conv.model_dump(mode="json")
 
 

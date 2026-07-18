@@ -120,6 +120,9 @@ class CreateConversationRequest(BaseModel):
     session_id: str | None = None
     user_id: str
     title: str | None = None
+    # Applied only when the row is first created. Repeating POST for an
+    # existing session remains idempotent and never acts as a settings PATCH.
+    web_search_enabled: bool = False
 
 
 class AppendMessageRequest(BaseModel):

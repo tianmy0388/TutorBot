@@ -595,7 +595,11 @@ export const getConversationAggregate = (
 
 export const createConversation = (
   userId: string,
-  opts: { session_id?: string; title?: string } = {},
+  opts: {
+    session_id?: string;
+    title?: string;
+    web_search_enabled?: boolean;
+  } = {},
 ) =>
   request<ConversationSummary>("/conversations", {
     method: "POST",

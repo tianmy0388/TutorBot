@@ -11,8 +11,12 @@ DONE_WITH_CONCERNS
 - The existing non-MCP `WebSearchTool` is an explicit empty placeholder and therefore cannot be accepted as evidence.
 - Tutoring and resource generation had no capability-local search gate. Merely registering `web_search` globally would grant no safe per-conversation control.
 - Zustand aggregate hydration is the active conversation boundary; draft creation and first-send are coordinated in `ChatComposer`.
-- Reviewer follow-up found that a failed draft PATCH left `conversationMaterialized=true`, so a retry skipped settings persistence and silently submitted under the server's false snapshot.
-- Reviewer follow-up also found that rapid `true -> false` mutations used the second call's optimistic UI value as rollback state; if both PATCHes failed, the UI ended true while the server remained false.
+- Reviewer follow-up found that compensating a failed draft PATCH with an unconditional DELETE could destroy an already-existing conversation and that an exception outside the submission `finally` could lose text or leave the composer spinning.
+- Reviewer follow-up also found that the global mutation revision/chain allowed delayed settings completions from conversation A to alter conversation B and that stale aggregate hydration could overwrite A while its PATCH was still pending.
+- A final race audit found that `useJobQueue` read the active session only after the WebSocket opened. Navigation during the handshake could therefore submit conversation A's text under conversation B's session and search choice.
+- A live MiniMax MCP probe exposed Windows Proactor pipe transports surviving event-loop shutdown because reader tasks were cancelled before stdin/process teardown completed.
+- Independent re-review found that capturing the submit envelope alone was insufficient: delayed ACK/stream events could still enter B, terminal persistence still read the current session, successful pre-submit navigation returned after clearing A's text, and concurrent aggregate loads could commit out of order.
+- The same re-review found that awaiting `stdin.wait_closed()` before process termination required its own timeout; a child that stopped consuming stdin could otherwise block cleanup indefinitely.
 - Non-document resource branches derived `source_content` only from a document/pedagogy resource. With no document planned, they advertised persisted web sources without receiving that evidence as grounding input.
 
 ## RED evidence
@@ -64,7 +68,20 @@ DONE_WITH_CONCERNS
     Observed: `1 failed, 9 passed`; the double-failure case ended true. The success-then-failure and existing success sequence already matched the intended matrix.
 16. Command: `$env:PYTHONPATH='backend'; & 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/capabilities/test_resource_generation_capability.py::test_web_evidence_grounds_non_document_resource_branches -q`
     Expected: a non-document exercise branch must receive normalized web evidence in its actual agent `source_content`.
-    Observed: `1 failed`; the capturing real-agent wrapper was invoked once with `source_content == ''`. An earlier full-pipeline version reached an unrelated package failure before this assertion, so the test was narrowed to the validated branch boundary before production changed.
+   Observed: `1 failed`; the capturing real-agent wrapper was invoked once with `source_content == ''`. An earlier full-pipeline version reached an unrelated package failure before this assertion, so the test was narrowed to the validated branch boundary before production changed.
+17. Command: `npm --prefix frontend test -- --run components/chat/ChatComposer.web-search.test.tsx lib/store.test.ts --maxWorkers=1`
+    Expected: atomic first-send retry, cross-session mutation fencing, and stale-hydration protection were not implemented.
+    Observed: draft creation failure produced an unhandled rejection; the existing-conversation failure path attempted DELETE; and stale aggregate hydration changed A from its pending desired `true` back to `false`.
+18. Command: `npm --prefix frontend test -- --run hooks/useJobQueue.test.tsx components/chat/ChatComposer.web-search.test.tsx --maxWorkers=1`
+    Expected: a submission snapshot must remain bound to conversation A even if navigation switches to B before WebSocket `onOpen`.
+    Observed: `2 failed, 8 passed`; the envelope contained `session-b` and the composer did not pass the explicit `{sessionId, webSearchRequested}` context.
+19. Command: `$env:PYTHONPATH='backend'; & 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/services/mcp/test_stdio_client.py -q`
+    Expected: graceful MCP shutdown closes stdin, waits for the process, and lets stdout/stderr readers observe EOF without cancellation.
+    Observed before the lifecycle fix: the fake process order started with terminate/wait instead of stdin close/wait, matching the ignored Proactor destructor errors from the live MiniMax probe.
+20. Commands: focused deferred race tests in `ChatComposer.web-search.test.tsx`, `useJobQueue.test.tsx`, `event-handler.test.ts`, and `store.test.ts`.
+    Observed before the final review fixes: four session-event tests failed (A not submitted after navigation, ACK inserted into B, A resource routed into B, assistant not persisted to A), and the deferred aggregate test showed slow A replacing completed B. A root follow-up malformed-event test also failed because an A event without `job_id` inserted a protocol error into B.
+21. Command: MCP test with a fake writer whose `wait_closed()` never completes.
+    Observed before the bound: the test's outer 0.2-second timeout fired while `_kill()` was still awaiting stdin, before `terminate()` appeared in the lifecycle order.
 
 ## Implementation summary
 
@@ -72,7 +89,8 @@ DONE_WITH_CONCERNS
 - Job boundary: first-class immutable row/model/context boolean, idempotent job migration, authoritative metadata overwrite, normal submission lookup, false no-session plan behavior, trusted REST retry inheritance, and durable child inheritance.
 - Search boundary: shared two-factor `SearchPolicy` and lazy `SearchExecutor`; registry resolution occurs only after both gates. Results are bounded, sanitized, URL-validated, provider/timestamp normalized, and failures collapse to a stable typed outcome.
 - Capability boundary: only tutoring and resource generation declare/run a `web_search` stage. Tutoring merges evidence into answer context and returns sources; resource generation supplies evidence to document generation and now also merges it into every non-document branch's `source_content`, while unavailable/empty search injects nothing. Sources persist through package/resource metadata.
-- Frontend boundary: a standalone accessible switch composes separately from RAG controls. Zustand owns per-conversation setting, pending/error/materialization state, serialized optimistic mutations, revision fencing, a per-session last-confirmed server value, exact existing-conversation rollback, hydration, and draft reset. Failed draft opt-in deletes the empty row best-effort, restores draft intent/text, defers the local user message, and must PATCH again before retry submit. Sidebar new actions create local drafts only. Job/message metadata exposes the requested choice without authorizing it.
+- Frontend boundary: a standalone accessible switch composes separately from RAG controls. Zustand owns per-conversation setting, pending/error/materialization state, per-session serialized optimistic mutations, revision fencing, confirmed/desired values, pending hydration, and exact rollback. Draft first-send creates the conversation and initial setting atomically; existing rows use PATCH and are never deleted as compensation. All pre-submit I/O is inside one retry-safe `try/finally`. Navigation does not cancel the captured A turn: durable append/submit/subscribe continue with A while optimistic UI effects are allowed only when A remains active. `useJobQueue` freezes session/search/RAG/language metadata before the WebSocket handshake; ACK and stream dispatch carry that session. Event dispatch drops inactive-session UI effects and persists canonical terminal assistant text to the authoritative session. Aggregate hydration has a generation/target fence before any map or Zustand write. Sidebar new actions create local drafts only. Client metadata remains observable and never authorizes server search.
+- MCP boundary: the configured provider remains the project's MiniMax MCP server. Graceful stdio shutdown closes stdin and waits at most one second, then terminates/awaits the subprocess and drains reader tasks to EOF with a bounded cancellation fallback, avoiding both deadlock and Windows event-loop transport leaks.
 
 ## GREEN and broad verification
 
@@ -106,6 +124,22 @@ DONE_WITH_CONCERNS
     Observed after reviewer fix: `25 passed, 25 warnings in 78.04s`; warnings remain the existing pytest-asyncio deprecation. Both grounded non-document evidence and empty unavailable-search input are covered.
 15. Commands: `npm --prefix frontend run type-check`, changed-path Ruff, and `git diff --check`.
     Observed after reviewer fixes: TypeScript retains the identical 13 baseline diagnostics listed above with no new Task 13 line; Ruff reports `All checks passed!`; diff-check exits 0.
+16. Command: `npm --prefix frontend test -- --run components/chat/WebSearchToggle.test.tsx components/chat/ChatComposer.web-search.test.tsx lib/api.test.ts lib/store.test.ts hooks/useJobQueue.test.tsx --maxWorkers=1`
+    Observed after the final race fixes: `5 files passed, 30 tests passed`. This includes atomic create retry, no destructive compensation, delayed A failure isolation, stale A hydration while PATCH is pending, and navigation during WebSocket open.
+17. Commands: split backend focused runs for `services/search + services/conversations + services/mcp`, `services/jobs`, and both affected capabilities.
+    Observed: `23 passed`, `99 passed`, and `34 passed` respectively: `156 passed` total. Warnings are only the repository's existing pytest-asyncio `event_loop_policy` deprecation.
+18. Command: live `SearchExecutor` probe with `TUTOR_WEB_SEARCH_ENABLED=true`, `TUTOR_WEB_SEARCH_PROVIDER=mcp`, and the user's existing `.mcp.json`.
+    Observed twice: `search_used=true`, five normalized HTTP(S) sources, `degradation_code=null`, provider `MiniMax`. After the stdio lifecycle fix the second probe exited without Proactor/pipe destructor errors. No secret values were printed or copied into the worktree.
+19. Commands: changed-path Ruff, `git diff --check`, and `npm --prefix frontend run type-check`.
+    Observed: Ruff `All checks passed!`; diff-check exit 0; TypeScript retains the same 13 planned Task 14 diagnostics, including the pre-existing retrieval-scope narrowing error whose line shifted within `useJobQueue.ts`, with no new Task 13 diagnostic.
+20. Command: `npm --prefix frontend test -- --run components/chat/WebSearchToggle.test.tsx components/chat/ChatComposer.web-search.test.tsx lib/api.test.ts lib/store.test.ts hooks/useJobQueue.test.tsx lib/event-handler.test.ts --maxWorkers=1`
+    Observed after independent re-review fixes: `6 files passed, 39 tests passed`. The suite now includes pre-submit navigation continuation, delayed ACK isolation, inactive resource/terminal/malformed-event isolation, authoritative assistant persistence, and out-of-order aggregate hydration.
+21. Command: `$env:PYTHONPATH='backend'; & 'E:\Anaconda3\anaconda\envs\tutor\python.exe' -m pytest backend/tests/services/mcp/test_stdio_client.py -q`
+    Observed: `2 passed`; normal close reaches reader EOF without cancellation, and stalled stdin close is cancelled at its bound before process termination and cleanup continue.
+22. Command: final focused frontend run including `JobTray.test.tsx` after the last fail-closed review fix.
+    Observed: `7 files passed, 45 tests passed`. JobTray supplies the row's authoritative session on resubscribe, and sessionless terminal events make no reducer, active-turn, or persistence mutation.
+23. Command: final single-process Task 13 backend run over search, conversations, jobs, tutoring, resource generation, and MCP lifecycle tests.
+    Observed: `157 passed, 157 warnings in 126.54s`; every warning is the repository's existing pytest-asyncio `event_loop_policy` deprecation.
 
 ## Evidence matrix
 
@@ -116,8 +150,13 @@ DONE_WITH_CONCERNS
 - Normalization/degradation: only `http`/`https` URLs survive; markup/control characters and excess results are stripped/bounded; placeholder, empty, malformed, failed, exception, missing-tool, and timeout outcomes expose only `WEB_SEARCH_UNAVAILABLE` without raw provider details.
 - Capability degradation: tutoring and resource tests each assert exactly one `WEB_SEARCH_UNAVAILABLE` observation and a normal answer/package result after provider unavailability.
 - Source persistence: resource evidence is read after closing and reopening `ResourcePackageStore`; the normalized URL survives in both package metadata and every restored resource's metadata.
-- Optimistic rollback/race: per-session confirmed values are seeded from hydration or an explicit draft server baseline and updated by each serialized success, even when its UI revision is stale. Tests cover all-success, double-failure (`false`), and success-then-failure (`true`) results while preserving pending/revision fencing and exact existing-conversation rollback.
-- Draft first-send: tests assert the default draft is false, draft opt-in PATCH precedes job submission, and user/job metadata records true. On failure there are zero submits/appends, the empty row is deleted best-effort, draft state and text are restored, no user message pollutes local history, and the retry performs a second successful PATCH before its one submit.
+- Optimistic rollback/race: mutation revision, chain, confirmed value, desired value, and pending state are keyed by session. Tests cover all-success, double-failure (`false`), success-then-failure (`true`), A/B navigation, and stale A hydration while A's PATCH is pending. Delayed A completions never alter B.
+- Draft first-send: tests assert default-off state, atomic POST creation with the selected initial setting before submission, no PATCH for a new row, and user/job metadata recording true. A failed create makes zero submits/appends, restores text, shows an error, and retries with exactly one successful create and submit. An existing-row PATCH failure never issues DELETE.
+- Submission handshake: ChatComposer supplies the captured session/search choice explicitly and `useJobQueue` snapshots all turn metadata before connecting; a deferred-open test switches A to B and still observes A/true in both top-level and metadata fields.
+- Cross-session event delivery: after navigation, the ACK does not create an A reducer entry in B; subscription dispatch carries A's session/user; resource and malformed events are ignored by B; terminal canonical assistant content is persisted to A without mutating B. A successful pre-submit request continues A's durable user-message append and job submission rather than returning after clearing text.
+- Resubscription fail-closed: both ChatComposer and JobTray pass an authoritative session to `subscribe`; an event with no context/top-level/metadata session is ignored instead of falling back to the active conversation.
+- Aggregate ordering: each load owns a generation and target session; `setSessionId` invalidates older work, and stale responses return before web-search maps or visible store state change. A deferred B-then-A completion test remains on B.
+- MiniMax transport lifecycle: a fake-process ordering test verifies stdin close/wait precedes process termination and that readers finish via EOF rather than cancellation; two live searches verify the actual configured MiniMax MCP provider and clean Windows shutdown.
 - Non-document grounding: the actual exercise agent receives the normalized web excerpt through branch `source_content`; a matching unavailable-search test receives an empty string, preventing metadata-only/fake grounding claims.
 
 ## Commits and self-review
@@ -127,7 +166,8 @@ DONE_WITH_CONCERNS
 - Reviewer frontend reliability commit: `06a02df` (`fix: preserve web search intent across draft retry`).
 - Reviewer capability grounding commit: `a9714bb` (`fix: ground non-document resources with web evidence`).
 - Reviewer follow-up report commit: created after this update is staged.
+- Final independent re-review: approved after three rounds; no remaining Important/Critical findings. It explicitly confirmed production subscribe entry points, ACK/event/resource/terminal isolation, atomic retry, per-session mutation/hydration fencing, and bounded MCP shutdown.
 - Security/privacy review: conversation settings use canonical identity and owner checks; missing sessions return 404; extra fields are forbidden. JobRunner overwrites client authorization aliases from server state. Disabled policy combinations make zero registry/provider calls. Provider exceptions and raw error data never leave the executor. Sources are bounded, stripped of HTML/control characters, restricted to HTTP(S), and contain only normalized display fields.
 - Durability review: both SQLite migrations are idempotent and default legacy rows off; conversation/job rows survive close/reopen; running jobs use the persisted first-class snapshot; retry and follow-up inheritance are explicit; resource source metadata survives package-store reopen.
-- Frontend review: aggregate hydration and draft reset fence stale mutation revisions; serialized PATCHes preserve server/store order and update per-session confirmed state; rollback applies only to the owning revision against the latest confirmed server value. First-send persists draft opt-in before submission, cleans/restores on failure, and keeps retry ordering strict; sidebar draft creation does not create empty history rows.
+- Frontend review: aggregate hydration preserves a pending desired value; serialized PATCHes and revisions are isolated by session; rollback applies only to the owning latest revision against the latest confirmed server value. First-send atomically creates the row/setting, preserves retry text on failure, never compensates by deleting history, and fences delayed completions to their originating session. The WebSocket submission boundary uses the same captured session context.
 - Concern: repository-wide TypeScript checking remains red only at the 13 unchanged baseline locations listed above. Task 13 focused frontend tests, backend broad tests, changed-path Ruff, and diff hygiene are green.

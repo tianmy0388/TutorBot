@@ -10,6 +10,8 @@ const apiMocks = vi.hoisted(() => ({
 }));
 const wsMocks = vi.hoisted(() => ({
   startJobMessage: vi.fn((input) => ({ type: "submit_job", ...input })),
+  deferOpen: false,
+  openCallbacks: [] as Array<() => void>,
 }));
 
 vi.mock("@/lib/api", () => apiMocks);
@@ -20,7 +22,11 @@ vi.mock("@/lib/ws", () => ({
       this.options = options;
     }
     connect() {
-      this.options.onOpen();
+      if (wsMocks.deferOpen) {
+        wsMocks.openCallbacks.push(() => this.options.onOpen());
+      } else {
+        this.options.onOpen();
+      }
     }
     send(message: any) {
       if (message.type === "submit_job") {
@@ -100,6 +106,8 @@ async function flushPromises() {
 beforeEach(() => {
   vi.useFakeTimers();
   apiMocks.getJobStats.mockResolvedValue(null);
+  wsMocks.deferOpen = false;
+  wsMocks.openCallbacks.length = 0;
   useTutorStore.setState({
     jobsById: {},
     jobOrder: [],
@@ -133,6 +141,40 @@ describe("useJobQueue durable child refresh", () => {
     expect(envelope.sessionId).toBe("current-page");
     expect(envelope.metadata.web_search_requested).toBe(true);
     expect(envelope).not.toHaveProperty("web_search_enabled");
+  });
+
+  it("keeps the submitted session and web-search snapshot if navigation wins the WS open race", async () => {
+    apiMocks.listJobs.mockResolvedValue({ items: [], total: 0 });
+    wsMocks.deferOpen = true;
+    useTutorStore.setState({
+      sessionId: "session-a",
+      webSearchEnabled: true,
+    });
+    const { result } = renderHook(() => useJobQueue("local-user"));
+    await act(flushPromises);
+
+    let submitted!: Promise<unknown>;
+    act(() => {
+      submitted = result.current.submit("question for A", "tutoring", {
+        sessionId: "session-a",
+        webSearchRequested: true,
+      });
+    });
+    useTutorStore.setState({
+      sessionId: "session-b",
+      webSearchEnabled: false,
+    });
+    await act(async () => {
+      wsMocks.openCallbacks.shift()?.();
+      await submitted;
+    });
+
+    const envelope = wsMocks.startJobMessage.mock.calls[0][0];
+    expect(envelope.sessionId).toBe("session-a");
+    expect(envelope.metadata.session_id).toBe("session-a");
+    expect(envelope.metadata.web_search_requested).toBe(true);
+    expect(useTutorStore.getState().jobsById["job-web-search"]).toBeUndefined();
+    expect(useTutorStore.getState().messages).toHaveLength(0);
   });
 
   it.each([
