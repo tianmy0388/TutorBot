@@ -247,6 +247,9 @@ class ResourcePackageStore:
         # Persist user_id in metadata for cross-system queries (read-only
         # round-trip — we don't expose it on the wire).
         package.metadata.setdefault("user_id", uid)
+        for resource in package.resources:
+            resource.metadata["package_id"] = package.package_id
+            resource.metadata["package_persisted"] = True
         summary = package.summary()
 
         async with self._write_lock, self._with_session() as session:
@@ -357,6 +360,8 @@ class ResourcePackageStore:
             row.confidence_score = float(resource.confidence_score)
             row.topic = resource.topic or ""
             row.tags = list(resource.tags or [])
+            resource.metadata["package_id"] = package_id
+            resource.metadata["package_persisted"] = True
             row.resource_metadata = dict(resource.metadata or {})
             row.created_at = resource.created_at
         return resource
@@ -615,6 +620,9 @@ class ResourcePackageStore:
 
     @staticmethod
     def _row_to_resource(row: ResourceRow) -> Resource:
+        metadata = dict(row.resource_metadata or {})
+        metadata["package_id"] = row.package_id
+        metadata["package_persisted"] = True
         return Resource(
             resource_id=row.resource_id,
             type=row.type,  # ResourceType enum is str-typed
@@ -629,7 +637,7 @@ class ResourcePackageStore:
             topic=row.topic or "",
             tags=list(row.tags or []),
             created_at=row.created_at,
-            metadata=dict(row.resource_metadata or {}),
+            metadata=metadata,
         )
 
     @classmethod

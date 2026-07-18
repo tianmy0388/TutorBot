@@ -806,7 +806,6 @@ def _run_submission_policy(source_code: str, *, interpreter: str) -> str:
         " if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in blocked_calls: bad = True\n"
         " if isinstance(node, ast.Attribute) and node.attr.startswith('_'): bad = True\n"
         " if isinstance(node, ast.Name) and node.id.startswith('__'): bad = True\n"
-        " if isinstance(node, ast.Constant) and isinstance(node.value, str) and '__' in node.value: bad = True\n"
         "print(json.dumps({'status':'policy_rejected' if bad else 'ok'}))\n"
     )
     try:

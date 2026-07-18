@@ -61,6 +61,8 @@ def test_code_spec_is_strict_and_bounded() -> None:
         {1: "non-string key"},
         {"nested": (1, 2)},
         {"custom": object()},
+        "\ud800",
+        {"\ud800": "unpaired surrogate key"},
     ],
 )
 def test_code_spec_rejects_non_standard_json_expected_values(

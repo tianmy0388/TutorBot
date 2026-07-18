@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from sqlalchemy import text
 from tutor.api.main import create_app
 from tutor.services.config.settings import Settings
 from tutor.services.exercise_attempts.schema import (
@@ -509,6 +510,19 @@ async def test_unexpected_executor_failure_is_redacted_and_persisted(tmp_path, m
 async def test_resource_detail_public_projection_hides_server_code_spec(tmp_path) -> None:
     app = await _ready_app(tmp_path)
     try:
+        stored_package = await app.state.resource_package_store.get("pkg-code")
+        assert stored_package is not None
+        async with app.state.resource_package_store._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE resources SET resource_metadata = :metadata "
+                    "WHERE resource_id = :resource_id"
+                ),
+                {
+                    "metadata": '{"package_id":"pkg-code"}',
+                    "resource_id": stored_package.resources[0].resource_id,
+                },
+            )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -516,6 +530,7 @@ async def test_resource_detail_public_projection_hides_server_code_spec(tmp_path
                 "/api/v1/resources/packages/local-user/pkg-code"
             )
         assert response.status_code == 200
+        assert response.json()["resources"][0]["metadata"]["package_persisted"] is True
         question = response.json()["resources"][0]["format_specific"]["questions"][0]
         assert "answer" not in question
         assert question["code_spec"]["test_count"] == 2

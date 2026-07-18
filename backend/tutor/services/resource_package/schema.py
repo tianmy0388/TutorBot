@@ -140,6 +140,10 @@ class CodeTestCase(BaseModel):
             sort_keys=True,
             separators=(",", ":"),
         )
+        try:
+            encoded.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("expected_json strings must be valid UTF-8") from exc
         decoded = json.loads(encoded)
         if json.dumps(
             decoded,

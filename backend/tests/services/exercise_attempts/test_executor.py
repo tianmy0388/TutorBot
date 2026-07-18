@@ -146,6 +146,21 @@ def test_submission_keeps_normal_allowlisted_algorithm_imports() -> None:
     assert result.status == "passed"
 
 
+def test_submission_allows_double_underscore_in_ordinary_string_algorithms() -> None:
+    result = run_code_submission(
+        "def split_tokens(): return 'left__right'.split('__')",
+        code_spec=_spec(
+            {
+                "name": "ordinary text",
+                "call": "split_tokens()",
+                "expected_json": ["left", "right"],
+            }
+        ),
+        interpreter=sys.executable,
+    )
+    assert result.status == "passed"
+
+
 def test_large_valid_source_is_not_passed_on_the_command_line() -> None:
     padding = "# padding\n" * 9000
     result = run_code_submission(
