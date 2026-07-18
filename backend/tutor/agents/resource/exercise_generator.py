@@ -86,7 +86,16 @@ EXERCISE_OUTPUT_SCHEMA: dict[str, Any] = {
                                     "properties": {
                                         "name": {"type": "string"},
                                         "call": {"type": "string"},
-                                        "expected_json": {},
+                                        "expected_json": {
+                                            "type": [
+                                                "null",
+                                                "boolean",
+                                                "number",
+                                                "string",
+                                                "array",
+                                                "object",
+                                            ]
+                                        },
                                     },
                                     "required": ["name", "call", "expected_json"],
                                     "additionalProperties": False,

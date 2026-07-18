@@ -16,6 +16,7 @@ from tutor.services.exercise_attempts.schema import (
     AttemptStatus,
     ExerciseAttempt,
     SubmissionExecutionResult,
+    submission_pipeline_budget_seconds,
 )
 from tutor.services.exercise_attempts.store import (
     AttemptConflictError,
@@ -146,7 +147,10 @@ async def _wait_for_claimed_attempt(
     user_id: str,
     timeout_seconds: int,
 ) -> ExerciseAttempt | None:
-    deadline = asyncio.get_running_loop().time() + timeout_seconds + 2
+    deadline = (
+        asyncio.get_running_loop().time()
+        + submission_pipeline_budget_seconds(timeout_seconds)
+    )
     while asyncio.get_running_loop().time() < deadline:
         terminal = await store.get_for_user(attempt_id, user_id)
         if terminal is not None:

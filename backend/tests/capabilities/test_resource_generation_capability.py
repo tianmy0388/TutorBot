@@ -440,6 +440,77 @@ async def test_full_pipeline_emits_all_stages(capability, fresh_builder, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_persisted_marker_is_saved_and_survives_store_restart(
+    capability,
+    tmp_path,
+):
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    db_path = tmp_path / "persisted_marker.db"
+    package_store = ResourcePackageStore(db_path=db_path)
+    await package_store.init()
+    capability.package_store = package_store
+
+    result = await capability.run(
+        UnifiedContext(
+            job_id="job-persisted-marker",
+            session_id="session-persisted-marker",
+            user_id="alice",
+            user_message="系统学习 LSTM",
+            language="zh",
+        ),
+        StreamBus(),
+    )
+    package_payload = result.payload["package"]
+    assert package_payload["resources"]
+    assert all(
+        resource["metadata"].get("package_persisted") is True
+        for resource in package_payload["resources"]
+    )
+
+    package_id = package_payload["package_id"]
+    await package_store.close()
+    restarted_store = ResourcePackageStore(db_path=db_path)
+    await restarted_store.init()
+    restored = await restarted_store.get_for_user(package_id, "alice")
+    assert restored is not None
+    assert restored.resources
+    assert all(
+        resource.metadata.get("package_persisted") is True
+        for resource in restored.resources
+    )
+    await restarted_store.close()
+
+
+@pytest.mark.asyncio
+async def test_save_failure_marks_in_memory_resources_as_not_persisted(
+    capability,
+):
+    class FailingPackageStore:
+        async def save(self, package, user_id=None):  # type: ignore[no-untyped-def]
+            raise OSError("disk unavailable")
+
+    capability.package_store = FailingPackageStore()
+    result = await capability.run(
+        UnifiedContext(
+            job_id="job-failed-persisted-marker",
+            session_id="session-failed-persisted-marker",
+            user_id="alice",
+            user_message="系统学习 LSTM",
+            language="zh",
+        ),
+        StreamBus(),
+    )
+
+    resources = result.payload["package"]["resources"]
+    assert resources
+    assert all(
+        resource["metadata"].get("package_persisted") is False
+        for resource in resources
+    )
+
+
+@pytest.mark.asyncio
 async def test_full_pipeline_emits_result_event(capability, fresh_builder):
     context = UnifiedContext(
         user_id="alice",

@@ -651,15 +651,26 @@ function resolveDurablePackageId(
   resource: Resource,
   latestPackage: { package_id: string; resources: Resource[] } | null,
 ) {
+  if (resource.metadata?.package_persisted === false) return null;
   const metadataId =
     typeof resource.metadata?.package_id === "string"
       ? resource.metadata.package_id
       : "";
-  if (metadataId && !isPendingPackage(metadataId)) return metadataId;
+  if (
+    resource.metadata?.package_persisted === true &&
+    metadataId &&
+    !isPendingPackage(metadataId)
+  ) {
+    return metadataId;
+  }
   if (
     latestPackage &&
     !isPendingPackage(latestPackage.package_id) &&
-    latestPackage.resources.some((item) => item.resource_id === resource.resource_id)
+    latestPackage.resources.some(
+      (item) =>
+        item.resource_id === resource.resource_id &&
+        item.metadata?.package_persisted === true,
+    )
   ) {
     return latestPackage.package_id;
   }

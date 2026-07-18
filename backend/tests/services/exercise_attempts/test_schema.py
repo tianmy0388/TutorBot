@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 from tutor.agents.resource.exercise_generator import EXERCISE_OUTPUT_SCHEMA
@@ -48,6 +51,68 @@ def test_code_spec_is_strict_and_bounded() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "invalid_expected",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        {"not", "json"},
+        {1: "non-string key"},
+        {"nested": (1, 2)},
+        {"custom": object()},
+    ],
+)
+def test_code_spec_rejects_non_standard_json_expected_values(
+    invalid_expected,
+) -> None:
+    with pytest.raises(ValidationError):
+        CodeSpec.model_validate(
+            {
+                "starter_code": "def solve(): pass",
+                "tests": [
+                    {
+                        "name": "strict json",
+                        "call": "solve()",
+                        "expected_json": invalid_expected,
+                    }
+                ],
+            }
+        )
+
+
+def test_code_spec_expected_json_has_deterministic_standard_roundtrip() -> None:
+    expected = {
+        "none": None,
+        "boolean": True,
+        "number": 1.25,
+        "text": "中文",
+        "array": [1, "two", {"three": 3}],
+    }
+    spec = CodeSpec.model_validate(
+        {
+            "starter_code": "def solve(): pass",
+            "tests": [
+                {"name": "json", "call": "solve()", "expected_json": expected}
+            ],
+        }
+    )
+    encoded = json.dumps(
+        spec.tests[0].expected_json,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert json.dumps(
+        json.loads(encoded),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == encoded
+
+
 def test_legacy_code_question_without_spec_remains_viewable() -> None:
     question = ExerciseQuestion(
         id="legacy",
@@ -65,6 +130,22 @@ def test_generator_schema_requires_code_spec_shape() -> None:
     code_spec = item["properties"]["code_spec"]
     assert code_spec["properties"]["language"]["const"] == "python"
     assert set(code_spec["required"]) == {"language", "starter_code", "tests"}
+    expected_schema = code_spec["properties"]["tests"]["items"]["properties"][
+        "expected_json"
+    ]
+    assert set(expected_schema["type"]) == {
+        "null",
+        "boolean",
+        "number",
+        "string",
+        "array",
+        "object",
+    }
+    prompt = Path(
+        "backend/tutor/prompts/resource/zh/exercise_generator.yaml"
+    ).read_text(encoding="utf-8")
+    assert "标准 JSON" in prompt
+    assert "NaN" in prompt
 
 
 def test_public_package_projection_never_exposes_code_answers_or_tests() -> None:

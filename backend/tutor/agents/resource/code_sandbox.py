@@ -59,6 +59,7 @@ from tutor.core.stream_bus import StreamBus
 from tutor.services.artifacts import to_artifact_key
 from tutor.services.config.settings import Settings, get_settings
 from tutor.services.exercise_attempts.schema import (
+    SUBMISSION_POLICY_TIMEOUT_SECONDS,
     AttemptStatus,
     SubmissionExecutionResult,
 )
@@ -642,7 +643,6 @@ def _probe_dependency_versions(
 
 
 _SUBMISSION_OUTPUT_LIMIT_BYTES = 16 * 1024
-_POLICY_TIMEOUT_SECONDS = 3
 _ALLOWED_ALGORITHM_IMPORTS = (
     "bisect",
     "collections",
@@ -791,7 +791,8 @@ def _run_submission_policy(source_code: str, *, interpreter: str) -> str:
         "import ast, json, sys\n"
         f"allowed = {repr(_ALLOWED_ALGORITHM_IMPORTS)}\n"
         "blocked_calls = {'open','exec','eval','compile','input','__import__',"
-        "'globals','locals','vars','breakpoint','help'}\n"
+        "'getattr','setattr','delattr','hasattr','dir','globals','locals','vars',"
+        "'breakpoint','help'}\n"
         "try:\n"
         " tree = ast.parse(sys.stdin.read(), mode='exec')\n"
         "except SyntaxError:\n"
@@ -801,9 +802,11 @@ def _run_submission_policy(source_code: str, *, interpreter: str) -> str:
         " if isinstance(node, (ast.Import, ast.ImportFrom)):\n"
         "  names = [a.name.split('.')[0] for a in node.names] if isinstance(node, ast.Import) else [(node.module or '').split('.')[0]]\n"
         "  if any(name not in allowed for name in names): bad = True\n"
+        "  if any(any(part.startswith('_') for part in a.name.split('.')) for a in node.names): bad = True\n"
         " if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in blocked_calls: bad = True\n"
-        " if isinstance(node, ast.Attribute) and node.attr.startswith('__'): bad = True\n"
+        " if isinstance(node, ast.Attribute) and node.attr.startswith('_'): bad = True\n"
         " if isinstance(node, ast.Name) and node.id.startswith('__'): bad = True\n"
+        " if isinstance(node, ast.Constant) and isinstance(node.value, str) and '__' in node.value: bad = True\n"
         "print(json.dumps({'status':'policy_rejected' if bad else 'ok'}))\n"
     )
     try:
@@ -815,7 +818,7 @@ def _run_submission_policy(source_code: str, *, interpreter: str) -> str:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=_POLICY_TIMEOUT_SECONDS,
+            timeout=SUBMISSION_POLICY_TIMEOUT_SECONDS,
             check=False,
         )
     except FileNotFoundError:
@@ -837,15 +840,22 @@ def _submission_wrapper(source_code: str, code_spec: CodeSpec, *, sentinel: str)
         separators=(",", ":"),
     )
     return (
-        "import contextlib as _ctx, io as _io, json as _json\n"
+        "import builtins as _builtins, contextlib as _ctx, io as _io, json as _json\n"
         f"_CAP={_SUBMISSION_OUTPUT_LIMIT_BYTES}\n"
+        f"_ALLOWED_IMPORTS={_ALLOWED_ALGORITHM_IMPORTS!r}\n"
+        "def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):\n"
+        " if level != 0 or name.split('.')[0] not in _ALLOWED_IMPORTS: raise ImportError('import blocked')\n"
+        " if any(str(item).startswith('_') for item in (fromlist or ())): raise ImportError('import blocked')\n"
+        " return _builtins.__import__(name, globals, locals, fromlist, level)\n"
+        "_SAFE_NAMES=('__build_class__','abs','all','any','bin','bool','bytearray','bytes','callable','chr','classmethod','complex','dict','divmod','enumerate','filter','float','format','frozenset','hash','hex','int','isinstance','issubclass','iter','len','list','map','max','min','next','object','oct','ord','pow','print','property','range','repr','reversed','round','set','slice','sorted','staticmethod','str','sum','super','tuple','type','zip','ArithmeticError','AssertionError','Exception','IndexError','KeyError','LookupError','OverflowError','RuntimeError','StopIteration','TypeError','ValueError','ZeroDivisionError')\n"
+        "_safe_builtins={name:getattr(_builtins,name) for name in _SAFE_NAMES}; _safe_builtins['__import__']=_safe_import\n"
         "class _Bounded(_io.StringIO):\n"
         " def write(self, value):\n"
         "  value=str(value); remaining=max(0,_CAP-len(self.getvalue().encode('utf-8')))\n"
         "  if remaining:\n"
         "   chunk=value.encode('utf-8')[:remaining].decode('utf-8','ignore'); super().write(chunk)\n"
         "  return len(value)\n"
-        "_out=_Bounded(); _err=_Bounded(); _globals={}; _results=[]; _status='failed'; _error=None\n"
+        "_out=_Bounded(); _err=_Bounded(); _globals={'__builtins__':_safe_builtins,'__name__':'__submission__'}; _results=[]; _status='failed'; _error=None\n"
         f"_tests=_json.loads({tests_json!r})\n"
         "with _ctx.redirect_stdout(_out), _ctx.redirect_stderr(_err):\n"
         " try:\n"

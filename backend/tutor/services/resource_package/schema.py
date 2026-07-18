@@ -19,6 +19,7 @@ that produced it.
 
 from __future__ import annotations
 
+import json
 import math
 import uuid
 from datetime import UTC, datetime
@@ -127,6 +128,49 @@ class CodeTestCase(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     call: str = Field(min_length=1, max_length=2000)
     expected_json: Any
+
+    @field_validator("expected_json")
+    @classmethod
+    def _expected_must_be_standard_json(cls, value: Any) -> Any:
+        _validate_standard_json_value(value)
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        decoded = json.loads(encoded)
+        if json.dumps(
+            decoded,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) != encoded:
+            raise ValueError("expected_json must round-trip deterministically")
+        return value
+
+
+def _validate_standard_json_value(value: Any) -> None:
+    """Reject Python-only values before tests reach the subprocess wrapper."""
+    if value is None or type(value) in {bool, int, str}:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("expected_json numbers must be finite")
+        return
+    if type(value) is list:
+        for item in value:
+            _validate_standard_json_value(item)
+        return
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("expected_json object keys must be strings")
+            _validate_standard_json_value(item)
+        return
+    raise ValueError("expected_json must contain only standard JSON values")
 
 
 class CodeSpec(BaseModel):

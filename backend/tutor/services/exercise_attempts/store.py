@@ -34,7 +34,10 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.types import Integer as SqlInteger
 
-from tutor.services.exercise_attempts.schema import ExerciseAttempt
+from tutor.services.exercise_attempts.schema import (
+    DEFAULT_ATTEMPT_CLAIM_LEASE_SECONDS,
+    ExerciseAttempt,
+)
 
 
 class AttemptConflictError(ValueError):
@@ -49,6 +52,14 @@ class AttemptOwnershipError(ValueError):
 class AttemptClaim:
     attempt_id: str
     acquired: bool
+
+
+@dataclass(frozen=True)
+class UnpublishedAttemptRecord:
+    """Internal repair cursor paired with its durable attempt."""
+
+    row_id: int
+    attempt: ExerciseAttempt
 
 
 class _Base(DeclarativeBase):
@@ -110,7 +121,10 @@ class ExerciseAttemptStore:
     """Persist every terminal result and publication watermark."""
 
     def __init__(
-        self, db_path: str | Path, *, claim_lease_seconds: int = 30
+        self,
+        db_path: str | Path,
+        *,
+        claim_lease_seconds: int = DEFAULT_ATTEMPT_CLAIM_LEASE_SECONDS,
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -421,6 +435,34 @@ class ExerciseAttemptStore:
             ).scalars().all()
             return [self._row_to_attempt(row) for row in rows]
 
+    async def list_unpublished_page(
+        self,
+        *,
+        after_row_id: int,
+        limit: int = 1000,
+    ) -> list[UnpublishedAttemptRecord]:
+        """Scan publication gaps once per startup using a stable row cursor."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            rows = (
+                await session.execute(
+                    select(AttemptRow)
+                    .where(
+                        AttemptRow.event_published.is_(False),
+                        AttemptRow.id > max(0, after_row_id),
+                    )
+                    .order_by(AttemptRow.id)
+                    .limit(max(1, limit))
+                )
+            ).scalars().all()
+            return [
+                UnpublishedAttemptRecord(
+                    row_id=int(row.id),
+                    attempt=self._row_to_attempt(row),
+                )
+                for row in rows
+            ]
+
     async def mark_event_published(self, attempt_id: str, user_id: str) -> bool:
         self._ensure_engine()
         assert self._write_lock is not None
@@ -480,4 +522,5 @@ __all__ = [
     "AttemptConflictError",
     "AttemptOwnershipError",
     "ExerciseAttemptStore",
+    "UnpublishedAttemptRecord",
 ]

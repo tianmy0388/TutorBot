@@ -4,6 +4,15 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { Resource } from "@/lib/types";
 import { ExerciseViewer } from "./ExerciseViewer";
 
+const storeState = vi.hoisted(() => ({
+  userId: "local-user",
+  sessionId: "sess-current",
+  latestPackage: null as {
+    package_id: string;
+    resources: Resource[];
+  } | null,
+}));
+
 vi.mock("./CodeExerciseEditor", () => ({
   CodeExerciseEditor: ({ packageId }: { packageId: string | null }) => (
     <div data-testid="code-editor">code editor: {packageId ?? "disabled"}</div>
@@ -12,17 +21,13 @@ vi.mock("./CodeExerciseEditor", () => ({
 
 vi.mock("@/lib/store", () => ({
   useTutorStore: (selector: (state: unknown) => unknown) =>
-    selector({
-      userId: "local-user",
-      sessionId: "sess-current",
-      latestPackage: {
-        package_id: "pkg-unrelated",
-        resources: [{ resource_id: "other-resource" }],
-      },
-    }),
+    selector(storeState),
 }));
 
-function exerciseResource(packageId = "pkg-owned"): Resource {
+function exerciseResource(
+  packageId = "pkg-owned",
+  packagePersisted = true,
+): Resource {
   return {
     resource_id: "exercise-resource",
     type: "exercise",
@@ -60,15 +65,30 @@ function exerciseResource(packageId = "pkg-owned"): Resource {
     topic: "python",
     tags: [],
     created_at: "2026-07-18T00:00:00Z",
-    metadata: { package_id: packageId },
+    metadata: {
+      package_id: packageId,
+      package_persisted: packagePersisted,
+    },
   };
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  storeState.latestPackage = null;
+});
+
+function selectCurrentPackage(resource: Resource) {
+  storeState.latestPackage = {
+    package_id: String(resource.metadata.package_id),
+    resources: [resource],
+  };
+}
 
 describe("ExerciseViewer code integration", () => {
   it("keeps non-code scoring unchanged and excludes code from bulk local scoring", () => {
-    render(<ExerciseViewer resource={exerciseResource()} />);
+    const resource = exerciseResource();
+    selectCurrentPackage(resource);
+    render(<ExerciseViewer resource={resource} />);
     expect(screen.getByText("0").parentElement).toHaveTextContent("0 / 1");
     expect(screen.getByTestId("code-editor")).toHaveTextContent("pkg-owned");
 
@@ -79,8 +99,27 @@ describe("ExerciseViewer code integration", () => {
     expect(screen.getByTestId("code-editor")).toBeVisible();
   });
 
-  it("does not borrow an unrelated latest package for pending resources", () => {
-    render(<ExerciseViewer resource={exerciseResource("pending-job")} />);
+  it("disables code submission when package persistence failed", () => {
+    const resource = exerciseResource("pkg-failed", false);
+    selectCurrentPackage(resource);
+    render(<ExerciseViewer resource={resource} />);
     expect(screen.getByTestId("code-editor")).toHaveTextContent("disabled");
+  });
+
+  it("enables code submission for a persisted package restored as current", () => {
+    const restoredResource = exerciseResource("pkg-restored", true);
+    selectCurrentPackage(restoredResource);
+    render(<ExerciseViewer resource={restoredResource} />);
+    expect(screen.getByTestId("code-editor")).toHaveTextContent("pkg-restored");
+  });
+
+  it("keeps a historical persisted package enabled when another package is current", () => {
+    const resource = exerciseResource("pkg-owned", true);
+    storeState.latestPackage = {
+      package_id: "pkg-unrelated",
+      resources: [{ ...resource, resource_id: "other-resource" }],
+    };
+    render(<ExerciseViewer resource={resource} />);
+    expect(screen.getByTestId("code-editor")).toHaveTextContent("pkg-owned");
   });
 });

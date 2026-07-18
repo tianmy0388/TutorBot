@@ -48,6 +48,7 @@ system:
       - code → answer 可保存参考实现，并且 code_spec 必须为：
         {"language":"python","starter_code":"def solve(...):\n    pass","tests":[{"name":"基础用例","call":"solve(...) ","expected_json":可JSON序列化值}],"time_limit_seconds":5}
     - code_spec.tests 的 call 必须只调用学生需要实现的函数，不依赖网络、文件或第三方包
+    - expected_json 必须是标准 JSON：null、布尔、有限数字、字符串、数组或仅含字符串键的对象；禁止 NaN、Infinity、集合、元组和自定义对象
     - 不得把测试代码嵌入 starter_code，也不得在 starter_code 中泄露 expected_json
     - 选项设计要有干扰性，避免"明显错误"选项
     - 难题的难度合理（即使专家也需要思考）

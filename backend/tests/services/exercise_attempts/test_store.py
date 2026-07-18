@@ -4,6 +4,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from tutor.services.exercise_attempts import schema as attempt_schema
 from tutor.services.exercise_attempts.schema import (
     AttemptStatus,
     ExerciseAttempt,
@@ -47,6 +48,12 @@ def _attempt(
     )
 
 
+def test_default_claim_lease_exceeds_maximum_submission_pipeline(tmp_path) -> None:
+    store = ExerciseAttemptStore(tmp_path / "attempts.db")
+    maximum_pipeline = attempt_schema.submission_pipeline_budget_seconds(10)
+    assert store._claim_lease_seconds > maximum_pipeline
+
+
 @pytest.mark.asyncio
 async def test_store_orders_owner_scoped_attempts_and_marks_publication(tmp_path) -> None:
     store = ExerciseAttemptStore(tmp_path / "attempts.db")
@@ -63,6 +70,13 @@ async def test_store_orders_owner_scoped_attempts_and_marks_publication(tmp_path
         assert [item.attempt_id for item in listed] == ["a-new", "a-old"]
         assert await store.count_attempts("local-user", "pkg-code", "q-code") == 2
         assert await store.count_attempts("someone-else", "pkg-code", "q-code") == 1
+        first_page = await store.list_unpublished_page(after_row_id=0, limit=2)
+        assert [item.attempt.attempt_id for item in first_page] == ["a-old", "a-new"]
+        second_page = await store.list_unpublished_page(
+            after_row_id=first_page[-1].row_id,
+            limit=2,
+        )
+        assert [item.attempt.attempt_id for item in second_page] == ["other"]
         assert [item.attempt_id for item in await store.list_unpublished()] == [
             "a-old",
             "a-new",

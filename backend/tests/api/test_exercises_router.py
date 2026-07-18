@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -21,7 +22,12 @@ from tutor.services.learning_events.schema import EventType
 from tutor.services.resource_package.schema import ResourcePackage, ResourceType, build_resource
 
 
-def _package(*, owner: str = "local-user", legacy: bool = False) -> ResourcePackage:
+def _package(
+    *,
+    owner: str = "local-user",
+    legacy: bool = False,
+    invalid_spec: bool = False,
+) -> ResourcePackage:
     question = {
         "id": "q-code",
         "type": "code",
@@ -32,7 +38,16 @@ def _package(*, owner: str = "local-user", legacy: bool = False) -> ResourcePack
         "explanation": "",
         "estimated_seconds": 60,
     }
-    if not legacy:
+    if invalid_spec:
+        question["code_spec"] = {
+            "language": "python",
+            "starter_code": "def add(a, b): pass",
+            "tests": [
+                {"name": "invalid", "call": "add(1, 2)", "expected_json": float("nan")}
+            ],
+            "time_limit_seconds": 3,
+        }
+    elif not legacy:
         question["code_spec"] = {
             "language": "python",
             "starter_code": "def add(a, b):\n    pass",
@@ -57,7 +72,13 @@ def _package(*, owner: str = "local-user", legacy: bool = False) -> ResourcePack
     )
 
 
-async def _ready_app(tmp_path, *, multi_user: bool = False, legacy: bool = False):
+async def _ready_app(
+    tmp_path,
+    *,
+    multi_user: bool = False,
+    legacy: bool = False,
+    invalid_spec: bool = False,
+):
     app = create_app(
         Settings(
             env="test",
@@ -73,7 +94,7 @@ async def _ready_app(tmp_path, *, multi_user: bool = False, legacy: bool = False
     await app.state.resource_package_store.init()
     await app.state.exercise_attempt_store.init()
     await app.state.resource_package_store.save(
-        _package(legacy=legacy), user_id="local-user"
+        _package(legacy=legacy, invalid_spec=invalid_spec), user_id="local-user"
     )
     return app
 
@@ -238,6 +259,24 @@ async def test_legacy_code_spec_is_typed_unavailable_instead_of_breaking_package
     finally:
         await _close_app(app)
 
+    invalid_app = await _ready_app(tmp_path / "invalid", invalid_spec=True)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=invalid_app), base_url="http://test"
+        ) as client:
+            invalid = await client.post(
+                "/api/v1/exercises/pkg-code/q-code/attempts",
+                json={
+                    "user_id": "local-user",
+                    "session_id": "sess-code",
+                    "source_code": "def add(a, b): return a + b",
+                },
+            )
+        assert invalid.status_code == 422
+        assert invalid.json()["detail"]["code"] == "CODE_SPEC_UNAVAILABLE"
+    finally:
+        await _close_app(invalid_app)
+
 
 @pytest.mark.asyncio
 async def test_failed_event_append_keeps_attempt_and_replay_repairs_gap(tmp_path, monkeypatch) -> None:
@@ -372,6 +411,64 @@ async def test_concurrent_same_client_id_executes_once_and_waiter_reads_terminal
         assert first.json()["attempt_id"] == second.json()["attempt_id"]
         assert calls == 1
     finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_waiter_covers_policy_and_execution_budget(
+    tmp_path, monkeypatch
+) -> None:
+    app = await _ready_app(tmp_path)
+    from tutor.api.routers import exercises as exercises_router
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def pipeline_length_submission(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        assert release.wait(timeout=10)
+        return SubmissionExecutionResult(
+            status=AttemptStatus.PASSED,
+            passed_tests=2,
+            total_tests=2,
+            test_results=[
+                CaseResult(name="positive", passed=True, actual_json=3),
+                CaseResult(name="negative", passed=True, actual_json=0),
+            ],
+            duration_seconds=5.25,
+        )
+
+    monkeypatch.setattr(
+        exercises_router, "run_code_submission", pipeline_length_submission
+    )
+    payload = {
+        "user_id": "local-user",
+        "session_id": "sess-code",
+        "source_code": "def add(a, b): return a + b",
+        "client_attempt_id": "pipeline-budget",
+    }
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            first_task = asyncio.create_task(
+                client.post("/api/v1/exercises/pkg-code/q-code/attempts", json=payload)
+            )
+            assert await asyncio.to_thread(started.wait, 2)
+            second_task = asyncio.create_task(
+                client.post("/api/v1/exercises/pkg-code/q-code/attempts", json=payload)
+            )
+            await asyncio.sleep(5.25)
+            release.set()
+            first, second = await asyncio.gather(first_task, second_task)
+        assert first.status_code == second.status_code == 201
+        assert first.json()["attempt_id"] == second.json()["attempt_id"]
+        assert calls == 1
+    finally:
+        release.set()
         await _close_app(app)
 
 

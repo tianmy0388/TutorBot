@@ -916,6 +916,8 @@ class ResourceGenerationCapability(BaseCapability):
             )
         async with stream.stage("persistence", source="resource_capability"):
             try:
+                for resource in package.resources:
+                    resource.metadata["package_persisted"] = True
                 await self._store.save(package, user_id=context.user_id)
                 await stream.observation(
                     f"资源包已持久化: pkg={package.package_id[:12]}… "
@@ -929,6 +931,8 @@ class ResourceGenerationCapability(BaseCapability):
                     },
                 )
             except Exception:  # noqa: BLE001
+                for resource in package.resources:
+                    resource.metadata["package_persisted"] = False
                 await report_degraded(
                     stream,
                     code="RESOURCE_PERSIST_FAILED",

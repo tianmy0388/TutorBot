@@ -103,6 +103,49 @@ def test_submission_policy_covers_server_test_calls() -> None:
     assert result.error_code == "CODE_POLICY_VIOLATION"
 
 
+def test_submission_policy_rejects_reflection_and_allowlisted_module_privates() -> None:
+    reflected_builtins = run_code_submission(
+        (
+            "def f(): pass\n"
+            "builtins = getattr(f, '__globals__')['__builtins__']\n"
+            "def x(): return bool(builtins['open']) and bool(builtins['__import__'])"
+        ),
+        code_spec=_spec({"name": "x", "call": "x()", "expected_json": True}),
+        interpreter=sys.executable,
+    )
+    assert reflected_builtins.status == "policy_rejected"
+    assert reflected_builtins.error_code == "CODE_POLICY_VIOLATION"
+
+    module_private = run_code_submission(
+        "import random\ndef x(): return random._os.getcwd()",
+        code_spec=_spec({"name": "x", "call": "x()", "expected_json": "hidden"}),
+        interpreter=sys.executable,
+    )
+    assert module_private.status == "policy_rejected"
+
+    dangerous_test_call = run_code_submission(
+        "def x(): return 1",
+        code_spec=_spec(
+            {
+                "name": "reflective persisted test",
+                "call": "getattr(x, '__globals__')",
+                "expected_json": None,
+            }
+        ),
+        interpreter=sys.executable,
+    )
+    assert dangerous_test_call.status == "policy_rejected"
+
+
+def test_submission_keeps_normal_allowlisted_algorithm_imports() -> None:
+    result = run_code_submission(
+        "import random\ndef x(): return random.Random(7).randint(1, 10)",
+        code_spec=_spec({"name": "x", "call": "x()", "expected_json": 6}),
+        interpreter=sys.executable,
+    )
+    assert result.status == "passed"
+
+
 def test_large_valid_source_is_not_passed_on_the_command_line() -> None:
     padding = "# padding\n" * 9000
     result = run_code_submission(

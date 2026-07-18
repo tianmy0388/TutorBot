@@ -9,6 +9,26 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+SUBMISSION_POLICY_TIMEOUT_SECONDS = 3
+SUBMISSION_POLICY_CHECK_COUNT = 2
+SUBMISSION_SCHEDULING_MARGIN_SECONDS = 5
+MAX_CODE_EXECUTION_SECONDS = 10
+
+
+def submission_pipeline_budget_seconds(code_timeout_seconds: int) -> int:
+    """Budget both policy subprocesses, execution and scheduling overhead."""
+    return (
+        SUBMISSION_POLICY_CHECK_COUNT * SUBMISSION_POLICY_TIMEOUT_SECONDS
+        + max(1, code_timeout_seconds)
+        + SUBMISSION_SCHEDULING_MARGIN_SECONDS
+    )
+
+
+MAX_SUBMISSION_PIPELINE_SECONDS = submission_pipeline_budget_seconds(
+    MAX_CODE_EXECUTION_SECONDS
+)
+DEFAULT_ATTEMPT_CLAIM_LEASE_SECONDS = MAX_SUBMISSION_PIPELINE_SECONDS + 5
+
 
 class AttemptStatus(StrEnum):
     PASSED = "passed"
@@ -79,7 +99,11 @@ class ExerciseAttempt(BaseModel):
 
 __all__ = [
     "AttemptStatus",
+    "DEFAULT_ATTEMPT_CLAIM_LEASE_SECONDS",
     "ExerciseAttempt",
+    "MAX_SUBMISSION_PIPELINE_SECONDS",
+    "SUBMISSION_POLICY_TIMEOUT_SECONDS",
     "SubmissionExecutionResult",
     "TestCaseResult",
+    "submission_pipeline_budget_seconds",
 ]

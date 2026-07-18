@@ -9,6 +9,8 @@ from tutor.services.exercise_attempts.store import ExerciseAttemptStore
 from tutor.services.learning_events.schema import EventType, LearningEvent
 from tutor.services.learning_events.workflow import LearningWorkflow
 
+_REPAIR_PAGE_SIZE = 1000
+
 
 async def publish_attempt_event(
     attempt: ExerciseAttempt,
@@ -63,20 +65,29 @@ async def repair_unpublished_attempt_events(
 ) -> int:
     """Best-effort startup repair; gaps remain replayable after failures."""
     repaired = 0
-    for attempt in await attempt_store.list_unpublished():
-        try:
-            if await publish_attempt_event(
-                attempt,
-                attempt_store=attempt_store,
-                workflow=workflow,
-                reconcile=False,
-            ):
-                repaired += 1
-        except Exception as exc:  # noqa: BLE001 - next startup/POST retries
-            logger.warning(
-                "EXERCISE_EVENT_REPAIR_DEFERRED exception_type={}",
-                type(exc).__name__,
-            )
+    cursor = 0
+    while True:
+        page = await attempt_store.list_unpublished_page(
+            after_row_id=cursor,
+            limit=_REPAIR_PAGE_SIZE,
+        )
+        if not page:
+            break
+        for record in page:
+            cursor = record.row_id
+            try:
+                if await publish_attempt_event(
+                    record.attempt,
+                    attempt_store=attempt_store,
+                    workflow=workflow,
+                    reconcile=False,
+                ):
+                    repaired += 1
+            except Exception as exc:  # noqa: BLE001 - next startup/POST retries
+                logger.warning(
+                    "EXERCISE_EVENT_REPAIR_DEFERRED exception_type={}",
+                    type(exc).__name__,
+                )
     return repaired
 
 
