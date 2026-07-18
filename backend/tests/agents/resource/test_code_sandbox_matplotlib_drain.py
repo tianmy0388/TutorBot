@@ -24,7 +24,12 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from tutor.agents.resource.code_sandbox import CodeSandboxAgent, _safe_run_python, _wrap_user_code
+from tutor.agents.resource.code_sandbox import (
+    CodeSandboxAgent,
+    _code_uses_matplotlib,
+    _safe_run_python,
+    _wrap_user_code,
+)
 from tutor.core.context import UnifiedContext
 from tutor.services.config.settings import Settings
 from tutor.services.llm.base import LLMResponse
@@ -83,6 +88,34 @@ async def test_code_sandbox_drains_matplotlib_figures_to_artifacts():
         p = resolve_artifact_key(art["artifact_key"], get_settings().data_dir)
         assert p.exists(), f"artifact path missing: {p}"
         assert p.stat().st_size > 0, f"artifact is empty: {p}"
+
+
+def test_ast_detects_matplotlib_imports_without_executing_code() -> None:
+    assert _code_uses_matplotlib("import matplotlib as mpl")
+    assert _code_uses_matplotlib("from matplotlib import pyplot as plt")
+    assert not _code_uses_matplotlib("import numpy as np\nprint(np.arange(2))")
+    # Invalid generated code remains a subprocess SyntaxError, not an AST crash.
+    assert not _code_uses_matplotlib("def incomplete(")
+
+
+@pytest.mark.asyncio
+async def test_figure_contract_without_artifact_is_typed_failure(tmp_path: Path) -> None:
+    llm = _mock_llm(json.dumps({
+        "title": "没有图像",
+        "language": "python",
+        "code": "print('no plot')",
+        "explanation": "示例",
+        "output_kind": "figure",
+    }, ensure_ascii=False))
+    settings = Settings(env="test", data_dir=tmp_path, execution_python=sys.executable)
+
+    resource = await CodeSandboxAgent(llm=llm, settings=settings).process(
+        UnifiedContext(), topic="figure"
+    )
+
+    assert resource.format_specific["output_kind"] == "figure"
+    assert resource.format_specific["execution_status"] == "failed"
+    assert resource.format_specific["error_code"] == "FIGURE_EXPECTED_BUT_NOT_PRODUCED"
 
 
 def _run_plot(code: str, *, settings: Settings, monkeypatch):
@@ -184,7 +217,7 @@ plt.figure(); plt.plot([3, 4])
 
 
 def test_matplotlib_capture_uses_required_export_quality() -> None:
-    wrapped = _wrap_user_code("print('ok')", Path("scratch"))
+    wrapped = _wrap_user_code("print('ok')", Path("scratch"), capture_matplotlib=True)
     assert "bbox_inches='tight'" in wrapped
     assert "dpi=160" in wrapped
 

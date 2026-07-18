@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
-import type { Resource } from "@/lib/types";
+import type { CodeResourceFormat, Resource } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useTutorStore } from "@/lib/store";
 import { ImageLightbox, type ImageArtifact } from "./ImageLightbox";
@@ -72,18 +72,7 @@ export function CodeViewer({ resource }: { resource: Resource }) {
   const latestPackageId = useTutorStore(
     (s) => s.latestPackage?.package_id ?? null,
   );
-  const formatSpec = (resource.format_specific ?? {}) as {
-    language?: string;
-    code?: string;
-    explanation?: string;
-    execution_status?: string;
-    stdout?: string;
-    stderr?: string;
-    files?: CodeFile[];
-    runtime?: string;
-    dependencies?: string[];
-    artifacts?: CodeArtifact[];
-  };
+  const formatSpec = (resource.format_specific ?? {}) as CodeResourceFormat;
 
   const [copied, setCopied] = useState(false);
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -113,6 +102,11 @@ export function CodeViewer({ resource }: { resource: Resource }) {
   const showExecution =
     formatSpec.execution_status &&
     formatSpec.execution_status !== "not_run";
+  const executionFailed =
+    formatSpec.execution_status === "failed" ||
+    formatSpec.execution_status === "timeout";
+  const figureExpectedButMissing =
+    formatSpec.error_code === "FIGURE_EXPECTED_BUT_NOT_PRODUCED";
 
   // **2026-07-08 fix (585f367d):** turn each artifact into a URL
   // pointing at the backend streaming endpoint so matplotlib figures
@@ -277,9 +271,30 @@ export function CodeViewer({ resource }: { resource: Resource }) {
             </pre>
           )}
 
+          {figureExpectedButMissing && (
+            <div
+              role="alert"
+              className="rounded-md border border-red-900/30 bg-red-950/20 p-3 text-xs text-red-300"
+            >
+              图片生成失败：代码声明应生成图像，但没有产生可展示的图片产物。
+            </div>
+          )}
+
           {formatSpec.stderr && (
-            <pre className="bg-black/70 rounded-md p-3 text-xs font-mono text-red-300 whitespace-pre-wrap border border-red-900/30 flex gap-2">
-              <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+            <pre
+              className={cn(
+                "bg-black/70 rounded-md p-3 text-xs font-mono whitespace-pre-wrap border flex gap-2",
+                executionFailed
+                  ? "text-red-300 border-red-900/30"
+                  : "text-amber-300 border-amber-900/30",
+              )}
+            >
+              <AlertTriangle
+                className={cn(
+                  "w-3.5 h-3.5 shrink-0 mt-0.5",
+                  executionFailed ? "text-red-400" : "text-amber-400",
+                )}
+              />
               <span className="flex-1">{formatSpec.stderr}</span>
             </pre>
           )}

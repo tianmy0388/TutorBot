@@ -330,6 +330,21 @@ export interface Resource {
   unverified_claims?: string[];
 }
 
+export interface CodeResourceFormat {
+  language?: string;
+  code?: string;
+  explanation?: string;
+  output_kind?: "text" | "figure";
+  execution_status?: "not_run" | "pending" | "success" | "failed" | "timeout";
+  stdout?: string;
+  stderr?: string;
+  error_code?: string;
+  runtime?: string;
+  dependencies?: string[];
+  artifacts?: Array<{ name: string; path?: string; kind?: string }>;
+  files?: Array<{ name: string; language: string; code: string }>;
+}
+
 export interface ResourcePackage {
   package_id: string;
   topic: string;

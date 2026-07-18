@@ -294,6 +294,7 @@ class CodeResource(BaseModel):
     language: str = "python"
     code: str = ""
     explanation: str = ""
+    output_kind: Literal["text", "figure"] = "text"
     execution_status: Literal["not_run", "pending", "success", "failed", "timeout"] = "not_run"
     stdout: str = ""
     stderr: str = ""

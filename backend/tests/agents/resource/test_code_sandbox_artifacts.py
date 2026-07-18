@@ -6,7 +6,11 @@ import sys
 from pathlib import Path
 
 from tutor.agents.resource import code_sandbox
-from tutor.agents.resource.code_sandbox import _safe_run_python
+from tutor.agents.resource.code_sandbox import (
+    _filter_runner_owned_stderr,
+    _safe_run_python,
+    _wrap_user_code,
+)
 from tutor.services.config.settings import Settings
 
 
@@ -17,6 +21,25 @@ def _run(code: str, settings: Settings):
         timeout=30,
         settings=settings,
     )
+
+
+def test_text_only_code_does_not_import_matplotlib_or_emit_cache_noise(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(env="test", data_dir=tmp_path, execution_python=sys.executable)
+
+    status, stdout, stderr, error_code, _deps, artifacts, _duration = _run(
+        "print('ok')", settings
+    )
+
+    assert status == "success"
+    assert stdout == "ok\n"
+    assert stderr == ""
+    assert error_code is None
+    assert artifacts == []
+    wrapped = _wrap_user_code("print('ok')", tmp_path, capture_matplotlib=False)
+    assert "matplotlib" not in wrapped
+    assert "pyplot" not in wrapped
 
 
 def test_repeated_runs_share_the_exact_persistent_matplotlib_cache(
@@ -60,8 +83,8 @@ def test_repeated_runs_warm_dependency_probe_once_with_shared_environment(
     code_sandbox._DEPENDENCY_PROBE_CACHE.clear()
     monkeypatch.setattr(code_sandbox, "_probe_dependency_versions", probe)
 
-    first = _run("print('first')", settings)
-    second = _run("print('second')", settings)
+    first = _run("import matplotlib\nprint('first')", settings)
+    second = _run("import matplotlib\nprint('second')", settings)
 
     assert first[0] == second[0] == "success"
     assert len(calls) == 1
@@ -115,6 +138,20 @@ plt.show()
     assert "keep this educational warning" in result[2]
     assert "FigureCanvasAgg is interactive enough" in result[2]
     assert "FigureCanvasAgg is non-interactive" not in result[2]
+
+
+def test_only_exact_runner_owned_matplotlib_diagnostics_are_filtered() -> None:
+    stderr = (
+        "Matplotlib is building the font cache; this may take a moment.\n"
+        "UserWarning: FigureCanvasAgg is non-interactive, and thus cannot be shown\n"
+        "<sandbox>:1: UserWarning: educational\n"
+    )
+
+    filtered = _filter_runner_owned_stderr(stderr)
+
+    assert "building the font cache" not in filtered
+    assert "FigureCanvasAgg is non-interactive" not in filtered
+    assert "UserWarning: educational" in filtered
 
 
 def test_artifact_keys_are_portable_and_never_expose_scratch_paths(
@@ -185,7 +222,7 @@ def test_cache_path_collision_returns_typed_preparation_failure(
     cache_parent.mkdir()
     (cache_parent / "matplotlib").write_text("not a directory", encoding="utf-8")
 
-    result = _run("print('must not run')", settings)
+    result = _run("import matplotlib", settings)
 
     assert result[0] == "failed"
     assert result[3] == "CODE_RUNTIME_PREPARATION_FAILED"
@@ -206,7 +243,7 @@ def test_cache_permission_error_returns_typed_preparation_failure(
         return original_mkdir(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "mkdir", deny_cache)
-    result = _run("print('must not run')", settings)
+    result = _run("import matplotlib", settings)
 
     assert result[0] == "failed"
     assert result[3] == "CODE_RUNTIME_PREPARATION_FAILED"

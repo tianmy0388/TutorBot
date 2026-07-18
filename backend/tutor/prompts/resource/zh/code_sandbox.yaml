@@ -18,6 +18,7 @@ system:
       "code": "完整代码（不含 ``` 围栏）",
       "explanation": "代码讲解（2-4 句话）",
       "expected_output": "运行后的预期输出",
+      "output_kind": "text 或 figure（只有代码会生成可视化图片时使用 figure）",
       "difficulty": 2
     }
     ```
@@ -27,6 +28,10 @@ system:
     - 大型库（torch, tensorflow）
     - 复杂正则
     - 不安全的 `eval`/`exec`
+
+    ## 输出类型
+    - 必须显式声明 `output_kind`：普通打印、数值计算或文本演示使用 `text`。
+    - 只有代码应产生并展示 Matplotlib 等可视化图片时才使用 `figure`；此时必须实际创建图像。
 
     ## 推荐示例类型
     - numpy 数组操作

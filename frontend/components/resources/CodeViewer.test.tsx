@@ -157,3 +157,56 @@ describe("CodeViewer image artifacts", () => {
     expect(screen.getByRole("dialog", { name: "图片查看器" })).toBeVisible();
   });
 });
+
+describe("CodeViewer execution diagnostics", () => {
+  it("shows stderr from a successful text run as an amber warning", () => {
+    const resource = codeResource();
+    resource.format_specific = {
+      language: "python",
+      code: "print('ok')",
+      output_kind: "text",
+      execution_status: "success",
+      stderr: "educational warning",
+      artifacts: [],
+    };
+
+    render(<CodeViewer resource={resource} />);
+
+    expect(screen.getByText("educational warning").closest("pre")).toHaveClass(
+      "text-amber-300",
+    );
+  });
+
+  it.each(["failed", "timeout"])("shows %s diagnostics in red", (status) => {
+    const resource = codeResource();
+    resource.format_specific = {
+      language: "python",
+      code: "raise RuntimeError()",
+      execution_status: status,
+      stderr: "execution diagnostic",
+      artifacts: [],
+    };
+
+    render(<CodeViewer resource={resource} />);
+
+    expect(screen.getByText("execution diagnostic").closest("pre")).toHaveClass(
+      "text-red-300",
+    );
+  });
+
+  it("explains a missing expected figure as an image-generation failure", () => {
+    const resource = codeResource();
+    resource.format_specific = {
+      language: "python",
+      code: "print('no plot')",
+      output_kind: "figure",
+      execution_status: "failed",
+      error_code: "FIGURE_EXPECTED_BUT_NOT_PRODUCED",
+      artifacts: [],
+    };
+
+    render(<CodeViewer resource={resource} />);
+
+    expect(screen.getByText(/图片生成失败/)).toBeInTheDocument();
+  });
+});

@@ -33,6 +33,7 @@ Phase 5 will swap in a proper sandboxed runner (Docker / RestrictedPython).
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -80,9 +81,10 @@ CODE_OUTPUT_SCHEMA: dict[str, Any] = {
         "code": {"type": "string"},
         "explanation": {"type": "string"},
         "expected_output": {"type": "string"},
+        "output_kind": {"type": "string", "enum": ["text", "figure"]},
         "difficulty": {"type": "integer", "minimum": 1, "maximum": 5},
     },
-    "required": ["title", "code", "explanation"],
+    "required": ["title", "code", "explanation", "output_kind"],
 }
 
 
@@ -155,6 +157,7 @@ class CodeSandboxAgent(BaseAgent):
         code = str(data.get("code") or "").strip()
         explanation = str(data.get("explanation") or "")
         language = str(data.get("language") or "python")
+        output_kind = "figure" if data.get("output_kind") == "figure" else "text"
         difficulty = max(1, min(5, int(data.get("difficulty") or 3)))
 
         # **2026-06-22 fix (Task 8):** when the LLM returns the code
@@ -212,6 +215,7 @@ class CodeSandboxAgent(BaseAgent):
                 language=language,
                 code="",
                 explanation="",
+                output_kind=output_kind,
                 execution_status="failed",
                 stdout="",
                 stderr="LLM did not return usable Python code",
@@ -264,6 +268,10 @@ class CodeSandboxAgent(BaseAgent):
                 settings=settings,
             )
 
+        if output_kind == "figure" and execution_status == "success" and not artifacts:
+            execution_status = "failed"
+            error_code = "FIGURE_EXPECTED_BUT_NOT_PRODUCED"
+
         # Subprocess diagnostics are untrusted strings. Preserve useful
         # educational errors while removing credential-shaped fragments.
         stdout = redact_text(stdout)
@@ -274,6 +282,7 @@ class CodeSandboxAgent(BaseAgent):
             language=language,
             code=code,
             explanation=explanation,
+            output_kind=output_kind,
             execution_status=execution_status,  # type: ignore[arg-type]
             stdout=stdout[:2000],
             stderr=stderr[:2000],
@@ -311,6 +320,7 @@ class CodeSandboxAgent(BaseAgent):
                 "CODE_RUN_TIMEOUT": "执行超时（请简化代码或拆分）",
                 "CODE_RUNTIME_PREPARATION_FAILED": "代码运行环境准备失败（请检查数据目录权限）",
                 "MATPLOTLIB_CAPTURE_FAILED": "Matplotlib 图片保存失败（请重试）",
+                "FIGURE_EXPECTED_BUT_NOT_PRODUCED": "预期生成图片，但代码没有产生图片产物",
             }.get(error_code, error_code)
             markdown += f"\n**错误类型**：{pretty}\n"
         if artifacts:
@@ -340,7 +350,7 @@ class CodeSandboxAgent(BaseAgent):
             generated_by=[self.agent_name],
             confidence_score=confidence,
             topic=topic,
-            tags=["code", language],
+            tags=["code", language, output_kind],
         )
 
 
@@ -401,29 +411,30 @@ def _safe_run_python(
     """
     started = time.monotonic()
     deps: dict[str, str] = {}
+    capture_matplotlib = _code_uses_matplotlib(code)
     try:
         code_runs_dir = settings.data_dir / getattr(
             settings, "code_run_subdir", "code_runs"
         )
         code_runs_dir.mkdir(parents=True, exist_ok=True)
-        # Matplotlib's font/config cache is application data, not a run
-        # artifact. Prepare it before the scratch directory so a cache
-        # failure cannot leave an orphaned run directory.
-        matplotlib_cache = (settings.data_dir / "cache" / "matplotlib").resolve()
-        matplotlib_cache.mkdir(parents=True, exist_ok=True)
         # UUID names avoid same-millisecond collisions between concurrent
         # jobs in the same backend process.
         scratch = code_runs_dir / f"run_{uuid.uuid4().hex}"
         scratch.mkdir(parents=True, exist_ok=False)
         env = os.environ.copy()
-        env["MPLBACKEND"] = "Agg"
-        env["MPLCONFIGDIR"] = str(matplotlib_cache)
         env["PYTHONIOENCODING"] = "utf-8"
-        deps = _cached_dependency_versions(
-            interpreter,
-            matplotlib_cache=matplotlib_cache,
-            env=env,
-        )
+        if capture_matplotlib:
+            # Matplotlib's font/config cache is application data, not a run
+            # artifact. Only create it for code that actually imports it.
+            matplotlib_cache = (settings.data_dir / "cache" / "matplotlib").resolve()
+            matplotlib_cache.mkdir(parents=True, exist_ok=True)
+            env["MPLBACKEND"] = "Agg"
+            env["MPLCONFIGDIR"] = str(matplotlib_cache)
+            deps = _cached_dependency_versions(
+                interpreter,
+                matplotlib_cache=matplotlib_cache,
+                env=env,
+            )
     except Exception:  # noqa: BLE001 - preparation failures are a typed result
         return (
             "failed",
@@ -438,7 +449,13 @@ def _safe_run_python(
     # artifact directory.
     try:
         proc = subprocess.run(
-            [interpreter, "-c", _wrap_user_code(code, scratch)],
+            [
+                interpreter,
+                "-c",
+                _wrap_user_code(
+                    code, scratch, capture_matplotlib=capture_matplotlib
+                ),
+            ],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -513,7 +530,9 @@ def _safe_run_python(
         pass
 
     stdout_text = _redact_scratch_path(proc.stdout or "", scratch)
-    stderr_text = _redact_scratch_path(proc.stderr or "", scratch)
+    stderr_text = _filter_runner_owned_stderr(
+        _redact_scratch_path(proc.stderr or "", scratch)
+    )
     if proc.returncode == 0:
         return ("success", stdout_text, stderr_text, None, deps, artifacts, duration)
 
@@ -536,6 +555,21 @@ def _redact_scratch_path(text: str, scratch: Path) -> str:
     for value in sorted(variants, key=len, reverse=True):
         redacted = redacted.replace(value, "<sandbox>")
     return redacted
+
+
+_RUNNER_OWNED_STDERR_LINES = {
+    "Matplotlib is building the font cache; this may take a moment.",
+    "UserWarning: FigureCanvasAgg is non-interactive, and thus cannot be shown",
+}
+
+
+def _filter_runner_owned_stderr(stderr: str) -> str:
+    """Remove only exact diagnostics emitted by our Matplotlib runner."""
+    return "".join(
+        line
+        for line in stderr.splitlines(keepends=True)
+        if line.strip() not in _RUNNER_OWNED_STDERR_LINES
+    )
 
 
 def _natural_path_key(path: Path) -> tuple[tuple[int, int | str], ...]:
@@ -922,7 +956,27 @@ def _submission_terminal(
 __all__ = ["CodeSandboxAgent", "CODE_OUTPUT_SCHEMA", "run_code_submission"]
 
 
-def _wrap_user_code(code: str, scratch: Path) -> str:
+def _code_uses_matplotlib(code: str) -> bool:
+    """Return whether an AST import references Matplotlib without executing code."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Let the child preserve the existing SyntaxError classification.
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "matplotlib" or alias.name.startswith("matplotlib.") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "matplotlib" or (node.module or "").startswith("matplotlib."):
+                return True
+    return False
+
+
+def _wrap_user_code(
+    code: str, scratch: Path, *, capture_matplotlib: bool = True
+) -> str:
     """Wrap ``code`` with a post-run matplotlib drain.
 
     The sandbox forces ``MPLBACKEND=Agg`` and replaces ``plt.show()``
@@ -946,6 +1000,9 @@ def _wrap_user_code(code: str, scratch: Path) -> str:
     first; the remaining names are no-ops on hosts that lack them
     but matplotlib skips them cleanly.
     """
+    if not capture_matplotlib:
+        return "exec(compile(" + repr(code) + ", '<sandbox>', 'exec'), {})\n"
+
     scratch_literal = repr(str(scratch))
     return (
         # 1. Configure matplotlib for CJK BEFORE importing pyplot so

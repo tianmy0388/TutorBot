@@ -763,6 +763,7 @@ async def test_code_sandbox_runs_simple_code():
     # Code was executed (since short)
     assert resource.format_specific["execution_status"] in ("success", "failed")
     assert "print" in resource.format_specific["code"]
+    assert resource.format_specific["output_kind"] == "text"
 
 
 @pytest.mark.asyncio
