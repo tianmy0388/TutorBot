@@ -168,6 +168,111 @@ async def test_tutoring_receives_answer_safe_recent_exercises_without_profile(
 
 
 @pytest.mark.asyncio
+async def test_profile_failure_still_passes_recent_exercises(
+    tutor_capability,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event_store = LearningEventStore(tmp_path / "profile-failure-events.db")
+    await event_store.init()
+    await event_store.append(
+        LearningEvent(
+            event_id="exercise-response:profile-failure",
+            user_id="failure-user",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="chain_rule",
+            score=0.0,
+            metadata={"question_type": "short_answer"},
+        )
+    )
+
+    async def fail_profile(_user_id: str):
+        raise RuntimeError("private profile failure")
+
+    class CapturingTutoringAgent:
+        last_profile: dict | None = None
+
+        async def process(self, *args, profile, **kwargs):  # type: ignore[no-untyped-def]
+            self.last_profile = profile
+            return __import__(
+                "tutor.agents.tutor.tutoring", fromlist=["TutoringAnswer"]
+            ).TutoringAnswer(tldr="captured")
+
+    monkeypatch.setattr(tutor_capability.builder, "get", fail_profile)
+    capturing_agent = CapturingTutoringAgent()
+    tutor_capability.tutoring_agent = capturing_agent
+    tutor_capability.event_store = event_store
+    bus = StreamBus()
+    queue = bus.subscribe()
+    try:
+        await tutor_capability.run(
+            UnifiedContext(user_id="failure-user", user_message="解释链式法则"), bus
+        )
+        await bus.close()
+        emitted = []
+        while (event := await queue.get()) is not None:
+            emitted.append(event)
+        assert capturing_agent.last_profile is not None
+        assert capturing_agent.last_profile["recent_exercises"][0][
+            "concept_id"
+        ] == "chain_rule"
+        codes = {event.metadata.get("code") for event in emitted}
+        assert "TUTORING_PROFILE_LOAD_FAILED" in codes
+        assert "TUTORING_EXERCISE_EVIDENCE_LOAD_FAILED" not in codes
+    finally:
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_evidence_failure_passes_empty_recent_exercises_and_keeps_profile(
+    tutor_capability,
+    fresh_builder,
+    monkeypatch,
+) -> None:
+    from tutor.services.learner_profile.schema import LearnerProfile
+
+    await fresh_builder.store.replace(
+        LearnerProfile(user_id="profile-user"), source="evidence-failure"
+    )
+
+    async def fail_evidence(_user_id: str, limit: int = 10):
+        raise RuntimeError("private evidence failure")
+
+    class CapturingTutoringAgent:
+        last_profile: dict | None = None
+
+        async def process(self, *args, profile, **kwargs):  # type: ignore[no-untyped-def]
+            self.last_profile = profile
+            return __import__(
+                "tutor.agents.tutor.tutoring", fromlist=["TutoringAnswer"]
+            ).TutoringAnswer(tldr="captured")
+
+    monkeypatch.setattr(
+        tutor_capability.event_store,
+        "recent_exercise_evidence",
+        fail_evidence,
+    )
+    capturing_agent = CapturingTutoringAgent()
+    tutor_capability.tutoring_agent = capturing_agent
+    bus = StreamBus()
+    queue = bus.subscribe()
+    await tutor_capability.run(
+        UnifiedContext(user_id="profile-user", user_message="解释链式法则"), bus
+    )
+    await bus.close()
+    emitted = []
+    while (event := await queue.get()) is not None:
+        emitted.append(event)
+
+    assert capturing_agent.last_profile is not None
+    assert capturing_agent.last_profile["user_id"] == "profile-user"
+    assert capturing_agent.last_profile["recent_exercises"] == []
+    codes = {event.metadata.get("code") for event in emitted}
+    assert "TUTORING_EXERCISE_EVIDENCE_LOAD_FAILED" in codes
+    assert "TUTORING_PROFILE_LOAD_FAILED" not in codes
+
+
+@pytest.mark.asyncio
 async def test_web_sources_are_added_to_answer_context_and_result(tutor_capability) -> None:
     source = SearchSource(
         title="Current LSTM source",

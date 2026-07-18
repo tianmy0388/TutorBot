@@ -30,6 +30,7 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.types import Integer as SqlInteger
 
 from tutor.services.config.settings import get_settings
+from tutor.services.exercise_responses.schema import ExerciseQuestionType
 from tutor.services.learning_events.schema import (
     EventType,
     LearningEvent,
@@ -181,6 +182,24 @@ class LearningEventStore:
     async def record(self, event: LearningEvent) -> LearningEvent:
         """Compatibility wrapper around idempotent append."""
         return (await self.append(event)).event
+
+    async def get_for_user(
+        self,
+        event_id: str,
+        user_id: str,
+    ) -> LearningEvent | None:
+        """Read one event by stable ID without crossing the owner boundary."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(EventRow).where(
+                        EventRow.event_id == event_id,
+                        EventRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return self._row_to_event(row) if row is not None else None
 
     async def record_many(self, events: Iterable[LearningEvent]) -> int:
         """Append multiple events in one transaction. Returns count."""
@@ -344,14 +363,21 @@ class LearningEventStore:
             evidence = []
             for row in rows:
                 event = self._row_to_event(row)
+                raw_question_type = event.metadata.get("question_type")
+                try:
+                    question_type = (
+                        ExerciseQuestionType(raw_question_type).value
+                        if isinstance(raw_question_type, str)
+                        else ""
+                    )
+                except ValueError:
+                    question_type = ""
                 evidence.append(
                     {
                         "event_id": event.event_id,
                         "concept_id": event.concept_id,
                         "score": event.score,
-                        "question_type": str(
-                            event.metadata.get("question_type") or ""
-                        ),
+                        "question_type": question_type,
                         "created_at": event.created_at.isoformat(),
                     }
                 )

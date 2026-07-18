@@ -307,18 +307,29 @@ class TutoringCapability(BaseCapability):
             try:
                 profile = await self._builder.get(context.user_id)
                 profile_snapshot = dict(profile.to_summary()) if profile else {}
-                profile_snapshot["recent_exercises"] = (
-                    await self.event_store.recent_exercise_evidence(
-                        context.user_id,
-                        limit=10,
-                    )
-                )
                 context.metadata["learner_profile"] = profile
             except Exception:
                 await report_degraded(
                     stream,
                     code="TUTORING_PROFILE_LOAD_FAILED",
                     summary="画像加载失败，将使用默认教学策略",
+                    source="tutoring_capability",
+                    stage="answer_generation",
+                )
+
+            profile_snapshot["recent_exercises"] = []
+            try:
+                profile_snapshot["recent_exercises"] = (
+                    await self.event_store.recent_exercise_evidence(
+                        context.user_id,
+                        limit=10,
+                    )
+                )
+            except Exception:
+                await report_degraded(
+                    stream,
+                    code="TUTORING_EXERCISE_EVIDENCE_LOAD_FAILED",
+                    summary="近期练习记录加载失败，将使用画像继续回答",
                     source="tutoring_capability",
                     stage="answer_generation",
                 )

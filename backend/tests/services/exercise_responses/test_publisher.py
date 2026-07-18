@@ -15,7 +15,7 @@ from tutor.services.exercise_responses.schema import (
     ExerciseSubmission,
 )
 from tutor.services.exercise_responses.store import ExerciseResponseStore
-from tutor.services.learning_events.schema import EventType
+from tutor.services.learning_events.schema import EventType, LearningEvent
 from tutor.services.learning_events.store import LearningEventStore
 
 
@@ -77,6 +77,9 @@ async def test_startup_repair_pages_past_failure_without_starving_tail() -> None
             if event.event_id == "exercise-response:submission-0":
                 raise RuntimeError("persistent first-row failure")
 
+        async def get_for_user(self, event_id: str, user_id: str):
+            return None
+
     store = FakeResponseStore()
     event_store = FakeEventStore()
     repaired = await repair_unpublished_submission_events(
@@ -125,6 +128,9 @@ async def test_startup_repair_stops_at_initial_high_watermark() -> None:
             return True
 
     class EventStore:
+        async def get_for_user(self, event_id: str, user_id: str):
+            return None
+
         async def append(self, event) -> None:
             return None
 
@@ -182,6 +188,84 @@ async def test_real_store_repairs_append_then_mark_crash_exactly_once(
             durable.user_id, event_types=[EventType.EXERCISE_SCORED]
         )
         assert [event.event_id for event in events] == [
+            f"exercise-response:{durable.submission_id}"
+        ]
+    finally:
+        await response_store.close()
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_upgrade_repair_reuses_owned_legacy_submission_event(tmp_path) -> None:
+    response_store = ExerciseResponseStore(tmp_path / "legacy-responses.db")
+    event_store = LearningEventStore(tmp_path / "legacy-events.db")
+    await response_store.init()
+    await event_store.init()
+    durable = await response_store.save_submission(_submission(20))
+    await event_store.append(
+        LearningEvent(
+            event_id=f"exercise-submission:{durable.submission_id}",
+            user_id=durable.user_id,
+            session_id=durable.session_id,
+            course=durable.course,
+            event_type=EventType.EXERCISE_SCORED,
+            target_id=durable.question_id,
+            concept_id=durable.concept_id,
+            score=durable.score,
+            correct=durable.correct,
+            metadata={
+                "submission_id": durable.submission_id,
+                "question_type": durable.question_type.value,
+            },
+            created_at=durable.created_at,
+        )
+    )
+    try:
+        assert await repair_unpublished_submission_events(
+            response_store=response_store,
+            workflow=SimpleNamespace(event_store=event_store),  # type: ignore[arg-type]
+        ) == 1
+        events = await event_store.query(
+            durable.user_id, event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert [event.event_id for event in events] == [
+            f"exercise-submission:{durable.submission_id}"
+        ]
+        persisted = await response_store.get_submission_for_user(
+            durable.submission_id, durable.user_id
+        )
+        assert persisted is not None and persisted.event_published
+    finally:
+        await response_store.close()
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_upgrade_repair_does_not_reuse_other_users_legacy_event(tmp_path) -> None:
+    response_store = ExerciseResponseStore(tmp_path / "owned-responses.db")
+    event_store = LearningEventStore(tmp_path / "owned-events.db")
+    await response_store.init()
+    await event_store.init()
+    durable = await response_store.save_submission(_submission(21))
+    await event_store.append(
+        LearningEvent(
+            event_id=f"exercise-submission:{durable.submission_id}",
+            user_id="other-user",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id=durable.concept_id,
+            score=durable.score,
+            metadata={"submission_id": durable.submission_id},
+        )
+    )
+    try:
+        assert await repair_unpublished_submission_events(
+            response_store=response_store,
+            workflow=SimpleNamespace(event_store=event_store),  # type: ignore[arg-type]
+        ) == 1
+        owned = await event_store.query(
+            durable.user_id, event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert [event.event_id for event in owned] == [
             f"exercise-response:{durable.submission_id}"
         ]
     finally:

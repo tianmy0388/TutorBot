@@ -780,7 +780,7 @@ async def test_general_draft_restores_without_event_and_submit_scores_server_sid
             "local-user", event_types=[EventType.EXERCISE_SCORED]
         )
         assert len(events) == 1
-        assert events[0].event_id == f"exercise-submission:{body['submission_id']}"
+        assert events[0].event_id == f"exercise-response:{body['submission_id']}"
         assert events[0].score == 1.0
         assert events[0].concept_id == "selection"
         assert events[0].target_id == "q-single"
@@ -1238,7 +1238,7 @@ async def test_startup_repairs_general_submission_and_closes_response_store(
             "local-user", event_types=[EventType.EXERCISE_SCORED]
         )
         assert [event.event_id for event in events] == [
-            "exercise-submission:general-crash-gap"
+            "exercise-response:general-crash-gap"
         ]
 
     assert app.state.exercise_response_store._engine is None

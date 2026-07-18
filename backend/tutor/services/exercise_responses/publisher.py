@@ -17,6 +17,21 @@ from tutor.services.learning_events.workflow import LearningWorkflow
 _REPAIR_PAGE_SIZE = 1000
 
 
+def _matches_legacy_submission(
+    event: LearningEvent,
+    submission: ExerciseSubmission,
+) -> bool:
+    """Validate that an owner-scoped legacy event is this submission."""
+    return (
+        event.event_type == EventType.EXERCISE_SCORED
+        and event.metadata.get("submission_id") == submission.submission_id
+        and event.target_id == submission.question_id
+        and event.concept_id == (submission.concept_id or submission.question_id)
+        and event.score == submission.score
+        and event.correct == submission.correct
+    )
+
+
 async def publish_submission_event(
     submission: ExerciseSubmission,
     *,
@@ -55,6 +70,27 @@ async def publish_submission_event(
         return await response_store.mark_event_published(
             submission.submission_id, submission.user_id
         )
+
+    legacy = await workflow.event_store.get_for_user(
+        f"exercise-submission:{submission.submission_id}",
+        submission.user_id,
+    )
+    if legacy is not None and _matches_legacy_submission(legacy, submission):
+        marked = await response_store.mark_event_published(
+            submission.submission_id,
+            submission.user_id,
+        )
+        if not marked:
+            return False
+        if reconcile:
+            await workflow.reconcile_user(
+                submission.user_id,
+                session_id=submission.session_id,
+                course=submission.course,
+            )
+            if runner is not None:
+                await runner.resume_pending()
+        return True
 
     event = LearningEvent(
         event_id=f"exercise-response:{submission.submission_id}",

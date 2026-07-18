@@ -155,6 +155,32 @@ async def test_recent_exercise_evidence_is_bounded_scored_and_answer_safe(workfl
 
 
 @pytest.mark.asyncio
+async def test_recent_evidence_rejects_malicious_question_type_metadata(workflow):
+    _, events, _, _ = workflow
+    secret = "SECRET_QUESTION_TYPE_PAYLOAD"
+    await events.append(
+        LearningEvent(
+            event_id="malicious-question-type",
+            user_id="local-user",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="chain_rule",
+            score=0.5,
+            metadata={
+                "question_type": {
+                    "kind": "short_answer",
+                    "secret": secret,
+                }
+            },
+        )
+    )
+
+    evidence = await events.recent_exercise_evidence("local-user")
+
+    assert evidence[0]["question_type"] == ""
+    assert secret not in str(evidence)
+
+
+@pytest.mark.asyncio
 async def test_assessment_completion_triggers_immediately_and_survives_restart(workflow):
     service, events, _, jobs = workflow
     appended = await events.append(

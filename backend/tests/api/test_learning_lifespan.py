@@ -46,6 +46,9 @@ async def test_create_app_lifespan_owns_learning_services_under_injected_setting
         assert kg_service.loader.kb_dir == injected_kb_dir
         assert kg_service.default_course() == "injected-course"
         assert app.state.capabilities.get("path_planning")._kg_service is kg_service
+        tutoring = app.state.capabilities.get("tutoring")
+        assert tutoring is not None
+        assert tutoring.event_store is workflow.event_store
         path_follow_up = app.state.learning_runner._follow_up_builder("path_rebuild")
         assert path_follow_up._kg_service is kg_service
         assert workflow.event_store._engine is not None

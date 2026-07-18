@@ -72,7 +72,10 @@ async def lifespan(app: FastAPI):
             profile_store=workflow.profile_store,
             kg_service=kg_service,
         ),
-        TutoringCapability(builder=profile_builder),
+        TutoringCapability(
+            builder=profile_builder,
+            event_store=workflow.event_store,
+        ),
         AssessmentCapability(
             builder=profile_builder,
             event_store=workflow.event_store,
