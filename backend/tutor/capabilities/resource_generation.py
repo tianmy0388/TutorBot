@@ -80,6 +80,7 @@ from tutor.services.learner_profile.builder import (
     ProfileBuilder,
     get_profile_builder,
 )
+from tutor.services.learner_profile.dialogue_ingest import ingest_dialogue_signal
 from tutor.services.resource_package.schema import (
     ArtifactRef,
     Resource,
@@ -1115,6 +1116,11 @@ class ResourceGenerationCapability(BaseCapability):
                 )
 
         follow_up_tasks = self._video_follow_up_specs(package, context.user_id)
+        # Conversational profile building: best-effort, post-package. This
+        # run intentionally still used the pre-turn profile (same-turn async
+        # decision in the approved design).
+        _, profile_follow_ups = await ingest_dialogue_signal(context, stream)
+        follow_up_tasks = (*follow_up_tasks, *profile_follow_ups)
         artifact_refs: list[ArtifactRef] = []
         for resource in package.resources:
             format_specific = resource.format_specific or {}

@@ -1435,3 +1435,87 @@ async def test_resource_planning_overview_skips_video():
     profile_snapshot = {"modality_dominant": "video"}
     planned = cap._plan_resources(intent=intent, profile_snapshot=profile_snapshot, kg_summary={})
     assert ResourceType.VIDEO not in planned
+
+
+# ---------------------------------------------------------------------------
+# Conversational profile building (Task 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dialogue_ingest_follow_ups_appended(
+    capability,
+    fresh_builder,
+    monkeypatch,
+):
+    """Self-intro turns attach path_rebuild after the video follow-ups."""
+    from tutor.core.capability_result import FollowUpTaskSpec
+
+    spec = FollowUpTaskSpec(
+        kind="path_rebuild",
+        dedupe_key="path_rebuild:2",
+        payload={"user_id": "user-1", "profile_version": 2, "profile": {}},
+    )
+
+    async def fake_ingest(context, stream):
+        return True, (spec,)
+
+    monkeypatch.setattr(
+        "tutor.capabilities.resource_generation.ingest_dialogue_signal",
+        fake_ingest,
+    )
+    result = await capability.run(
+        UnifiedContext(
+            job_id="job-dialogue-ingest-follow-ups",
+            user_id="alice",
+            user_message="系统学习 LSTM",
+            language="zh",
+        ),
+        StreamBus(),
+    )
+
+    assert spec in result.follow_up_tasks
+    # 既有 video_render follow-ups 仍然保留
+    assert any(s.kind == "video_render" for s in result.follow_up_tasks)
+
+
+class _ProfileCapturingAgent:
+    """Delegate wrapper that records the ``profile`` kwarg of each call."""
+
+    def __init__(self, delegate) -> None:
+        self.delegate = delegate
+        self.agent_name = getattr(delegate, "agent_name", "profile_capturing")
+        self.profiles: list[dict[str, Any]] = []
+
+    async def process(self, *args, **kwargs):
+        profile = kwargs.get("profile")
+        if profile is not None:
+            self.profiles.append(dict(profile))
+        return await self.delegate.process(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_profile_snapshot_carries_major_into_generation(
+    capability,
+    fresh_builder,
+):
+    """`to_summary()` major flows into the snapshot handed to the agents."""
+    profile = await fresh_builder.get("alice")
+    profile.metadata["major"] = "计算机科学"
+    await fresh_builder.store.replace(profile, source="seed")
+
+    capturing = _ProfileCapturingAgent(capability.content_expert)
+    capability.content_expert = capturing
+
+    await capability.run(
+        UnifiedContext(
+            job_id="job-profile-snapshot-major",
+            user_id="alice",
+            user_message="系统学习 LSTM",
+            language="zh",
+        ),
+        StreamBus(),
+    )
+
+    assert capturing.profiles, "content_expert never received a profile snapshot"
+    assert capturing.profiles[0].get("major") == "计算机科学"
