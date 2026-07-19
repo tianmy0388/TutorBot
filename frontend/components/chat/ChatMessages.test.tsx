@@ -224,12 +224,18 @@ describe("ChatMessages — terminal state", () => {
     render(<ChatMessages />);
 
     expect(screen.queryByText("来自旧 activeTurn 的错误内容")).not.toBeInTheDocument();
-    expect(screen.getByText("准备学习内容")).toBeInTheDocument();
+    expect(screen.getByText(/请稍等一下/)).toBeInTheDocument();
   });
 
   it("renders the newest nonterminal job from newest-first jobOrder", () => {
-    const newest = runningJob("job-newest", "最新任务输出");
-    const older = runningJob("job-older", "旧任务输出");
+    const newest = {
+      ...runningJob("job-newest", ""),
+      events: [progressEvent("最新任务输出", "e-newest")],
+    };
+    const older = {
+      ...runningJob("job-older", ""),
+      events: [progressEvent("旧任务输出", "e-older")],
+    };
     mockStoreState({
       jobs: {
         jobsById: {
@@ -246,7 +252,7 @@ describe("ChatMessages — terminal state", () => {
     expect(screen.queryByText("旧任务输出")).not.toBeInTheDocument();
   });
 
-  it("renders the streamed text from jobsById on a succeeded job", () => {
+  it("renders live progress events from jobsById on a non-terminal job", () => {
     const now = Date.now();
     const job: ClientJob = {
       job_id: "job_2",
@@ -259,16 +265,17 @@ describe("ChatMessages — terminal state", () => {
       last_seq: 0,
       event_count: 0,
       seen_event_ids: new Set(),
-      events: [],
+      events: [progressEvent("self-attention 计算 QKV 注意力。", "e-progress-1")],
       result: null,
       error: null,
-      text_buffer: "self-attention 计算 QKV 注意力。",
+      text_buffer: "",
       thinking_buffer: "",
       stage: "",
       open_stages: [],
     };
     // While the job is non-terminal, ChatMessages renders the live
-    // streaming view. The per-job buffer is authoritative and must be visible.
+    // task-process card. The per-job event stream is authoritative and
+    // its progress texts must be visible.
     mockStoreState({
       activeTurn: {
         turn_id: "t1",
@@ -287,8 +294,8 @@ describe("ChatMessages — terminal state", () => {
     });
 
     const { container } = render(<ChatMessages />);
-    // ReactMarkdown may split the text into sub-elements; the
-    // easiest robust assertion is to check the container's
+    // The progress line may be split across sub-elements (bullet span);
+    // the easiest robust assertion is to check the container's
     // textContent.
     expect(container.textContent ?? "").toMatch(/self-attention.*QKV.*注意力/);
   });
@@ -413,5 +420,20 @@ function runningJob(jobId: string, text: string): ClientJob {
     finished_at: null,
     events: [],
     text_buffer: text,
+  };
+}
+
+function progressEvent(text: string, eventId: string): ClientJob["events"][number] {
+  return {
+    type: "progress",
+    source: "test",
+    stage: "",
+    content: "",
+    metadata: { message: text },
+    session_id: "s1",
+    turn_id: "",
+    seq: 1,
+    timestamp: 1,
+    event_id: eventId,
   };
 }
