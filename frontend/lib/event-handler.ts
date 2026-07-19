@@ -934,6 +934,7 @@ function isEqualRevisionVideoAdvance(
     if (!currentRepairJob && incomingRepairJob) {
       return (
         current.render_status === "failed" &&
+        !historyTerminalizes(current.repair_history, incomingRepairJob) &&
         ["pending", "running"].includes(stringField(incoming.repair_status))
       );
     }

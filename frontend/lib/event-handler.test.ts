@@ -492,6 +492,35 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     });
   });
 
+  it("rejects a delayed first-looking repair job already terminalized by canonical history", () => {
+    setCanonicalVideo({
+      render_status: "failed",
+      source_revision: 3,
+      video_url: "/static/manim/last-good.mp4",
+      repair_history: [
+        {
+          job_id: "repair-delayed",
+          failed_revision: 3,
+          status: "failed",
+          summary: "already finished",
+        },
+      ],
+    });
+
+    dispatchVideoSnapshot({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "pending",
+      repair_job_id: "repair-delayed",
+    });
+
+    expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+    expect(currentVideoFormat()).toMatchObject({
+      repair_history: [expect.objectContaining({ job_id: "repair-delayed" })],
+      video_url: "/static/manim/last-good.mp4",
+    });
+  });
+
   it.each([
     ["failed", "pending"],
     ["ready", "running"],
