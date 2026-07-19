@@ -735,7 +735,12 @@ export const setConversationWebSearch = (
   );
 
 export const deleteConversation = (userId: string, sessionId: string) =>
-  request<{ deleted: boolean; session_id: string }>(
+  request<{
+    deleted: boolean;
+    session_id: string;
+    packages_deleted: number;
+    jobs_deleted: number;
+  }>(
     `/conversations/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}`,
     { method: "DELETE" },
   );

@@ -15,7 +15,7 @@
  * Pair with `useJobQueue` to drive submit / subscribe / cancel.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Loader2,
   CheckCircle2,
@@ -100,6 +100,23 @@ export function JobTray() {
   const jobsById = useTutorStore((s) => s.jobsById);
   const queue = useJobQueue(userId);
   const [open, setOpen] = useState(false);
+  const sessionId = useTutorStore((s) => s.sessionId);
+  const resubscribeAttempted = useRef<Set<string>>(new Set());
+
+  // 2026-07-19 plan: after a page refresh the aggregate seeds jobsById
+  // with summaries (no events). Re-attach the event stream for jobs
+  // that are still running so the live TaskProcessCard rebuilds from
+  // the WS replay buffer. One attempt per job per mount; useJobQueue's
+  // own liveClients map dedupes repeat renders.
+  useEffect(() => {
+    if (!sessionId) return;
+    for (const job of Object.values(jobsById)) {
+      if (job.status !== "pending" && job.status !== "running") continue;
+      if (resubscribeAttempted.current.has(job.job_id)) continue;
+      resubscribeAttempted.current.add(job.job_id);
+      queue.subscribe(job.job_id, job.capability, { sessionId });
+    }
+  }, [jobsById, queue, sessionId]);
 
   const queueById = new Map(queue.jobs.map((job) => [job.job_id, job]));
   const mergedJobs: JobSummary[] = [

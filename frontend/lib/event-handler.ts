@@ -13,18 +13,12 @@
 
 import { useTutorStore } from "./store";
 import { getJobIdFromEvent } from "./job-reducer";
-import type { ClientJob } from "./job-reducer";
-import { workflowMessage } from "./workflow-snapshot";
 import { getResourcePackageDetail } from "./api";
 import {
   isUsableResourcePackage,
   isUsableStreamedResource,
 } from "./resource-validation";
-import type {
-  ConversationMessageInput,
-  StreamEvent,
-  StructuredError,
-} from "./types";
+import type { StreamEvent, StructuredError } from "./types";
 import {
   type AssessmentReport,
   type PlannedPath,
@@ -38,14 +32,7 @@ import {
 export interface StreamDispatchContext {
   sessionId?: string;
   userId?: string;
-  appendConversationMessage?: ConversationMessageAppender;
 }
-
-export type ConversationMessageAppender = (
-  userId: string,
-  sessionId: string,
-  message: ConversationMessageInput,
-) => Promise<unknown>;
 
 const STREAM_EVENT_TYPES = new Set<StreamEvent["type"]>([
   "stage_start",
@@ -67,27 +54,6 @@ const STREAM_EVENT_TYPES = new Set<StreamEvent["type"]>([
   "job_terminal",
 ]);
 
-interface InactiveStageHistory {
-  events: StreamEvent[];
-  openStages: string[];
-}
-
-interface InactiveTerminalPersistence {
-  userId: string;
-  sessionId: string;
-  assistant: ConversationMessageInput | null;
-  workflow: ConversationMessageInput;
-  assistantDone: boolean;
-  workflowDone: boolean;
-  assistantInFlight: boolean;
-  workflowInFlight: boolean;
-  finalizedAt: number | null;
-}
-
-const inactiveStageHistory = new Map<string, InactiveStageHistory>();
-const inactiveTerminalPersistence = new Map<string, InactiveTerminalPersistence>();
-const MAX_INACTIVE_STAGE_HISTORIES = 256;
-const MAX_INACTIVE_TERMINAL_RECORDS = 256;
 const resourceRecoveryInFlight = new Map<string, Promise<void>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -161,36 +127,10 @@ export function dispatchStreamEvent(
     authoritativeSessionId &&
     stateAtDispatch.sessionId !== authoritativeSessionId
   ) {
-    const inactiveJobId = getJobIdFromEvent(streamEv);
-    if (inactiveJobId) {
-      recordInactiveStage(authoritativeSessionId, inactiveJobId, streamEv);
-    }
-    if (streamEv.type === "job_terminal" && inactiveJobId) {
-      const contract = (
-        streamEv.metadata as Record<string, unknown> | undefined
-      )?.contract as Record<string, unknown> | undefined;
-      const inactiveUserId = context.userId || stateAtDispatch.userId;
-      if (
-        inactiveUserId &&
-        hasTerminalWorkflowStatus(contract)
-      ) {
-        const persistence = getOrCreateInactiveTerminalPersistence(
-          contract,
-          inactiveJobId,
-          inactiveUserId,
-          authoritativeSessionId,
-          streamEv,
-          takeInactiveStageHistory(authoritativeSessionId, inactiveJobId),
-        );
-        if (persistence) {
-          attemptInactiveTerminalPersistence(
-            stageHistoryKey(authoritativeSessionId, inactiveJobId),
-            persistence,
-            context.appendConversationMessage,
-          );
-        }
-      }
-    }
+    // Events for a non-visible session are dropped. The backend runner
+    // persists the terminal workflow/assistant messages itself
+    // (2026-07-19 plan), so the browser no longer tracks or POSTs
+    // anything for background sessions.
     return;
   }
 
@@ -203,10 +143,6 @@ export function dispatchStreamEvent(
     });
     return;
   }
-
-  const hadWorkflowTimeline =
-    streamEv.type === "job_terminal" &&
-    stateAtDispatch.messages.some((message) => message.id === `workflow:${jobId}`);
 
   // 1. Always reduce into per-job state.
   useTutorStore.getState().applyStreamEvent(streamEv);
@@ -281,63 +217,6 @@ export function dispatchStreamEvent(
       ) {
         buildPartialPackageFromContract(contract, partial, streamEv, context);
       }
-      // Persist the assistant message into the active conversation
-      // so the sidebar's message_count updates in real time
-      // (DeepSeek-style). The contract is the canonical job result
-      // payload from JobRunner; its ``assistant_message`` field is
-      // what we want to show in the conversation history.
-      const assistantText =
-        contract && typeof contract === "object"
-          ? typeof contract.assistant_message === "string"
-            ? (contract.assistant_message as string)
-            : typeof contract.message === "string"
-              ? (contract.message as string)
-              : ""
-          : "";
-      const state = useTutorStore.getState();
-      const persistenceUserId = context.userId || state.userId;
-      const persistenceSessionId = authoritativeSessionId || state.sessionId;
-      if (persistenceUserId && persistenceSessionId) {
-        const cap =
-          typeof contract?.capability === "string"
-            ? (contract.capability as string)
-            : null;
-        if (assistantText) {
-          persistConversationMessage(
-            context.appendConversationMessage,
-            persistenceUserId,
-            persistenceSessionId,
-            {
-              role: "assistant",
-              content: assistantText,
-              job_id: jobId,
-              capability: cap,
-              metadata: {
-                job_id: jobId,
-                capability: cap,
-                client_message_id: `terminal:${jobId}`,
-              },
-            },
-            "assistant",
-          );
-        }
-        const workflow = state.messages.find((message) => message.id === `workflow:${jobId}`);
-        if (!hadWorkflowTimeline && workflow) {
-          persistConversationMessage(
-            context.appendConversationMessage,
-            persistenceUserId,
-            persistenceSessionId,
-            {
-              role: workflow.role as ConversationMessageInput["role"],
-              content: workflow.content,
-              job_id: jobId,
-              capability: cap,
-              metadata: workflow.metadata,
-            },
-            "workflow_timeline",
-          );
-        }
-      }
       // Always clear the legacy single-activeTurn indicator. The new
       // job-reducer model doesn't touch activeTurn.phase, but
       // Legacy consumers can otherwise keep showing stale progress while phase !==
@@ -360,206 +239,6 @@ export function dispatchStreamEvent(
     default:
       break;
   }
-}
-
-function terminalAssistantMessage(
-  contract: Record<string, unknown> | undefined,
-  jobId: string,
-): ConversationMessageInput | null {
-  if (!contract) return null;
-  const content =
-    typeof contract.assistant_message === "string"
-      ? contract.assistant_message
-      : typeof contract.message === "string"
-        ? contract.message
-        : "";
-  if (!content) return null;
-  const capability =
-    typeof contract.capability === "string" ? contract.capability : null;
-  return {
-    role: "assistant",
-    content,
-    job_id: jobId,
-    capability,
-    metadata: { job_id: jobId, capability, client_message_id: `terminal:${jobId}` },
-  };
-}
-
-function terminalWorkflowMessage(
-  contract: Record<string, unknown> | undefined,
-  jobId: string,
-  event: StreamEvent,
-  stageHistory: InactiveStageHistory | undefined,
-): ConversationMessageInput | null {
-  const status = contract?.status;
-  if (!hasTerminalWorkflowStatus(contract)) return null;
-  const job: ClientJob = {
-    job_id: jobId,
-    capability: typeof contract?.capability === "string" ? contract.capability : "",
-    status: status as ClientJob["status"],
-    message_preview: "",
-    submitted_at: Date.now(),
-    started_at: null,
-    finished_at: event.timestamp ? event.timestamp * 1000 : Date.now(),
-    last_seq: event.seq ?? 0,
-    events: [...(stageHistory?.events ?? []), event],
-    result: null,
-    error: null,
-    event_count: 1,
-    seen_event_ids: new Set(event.event_id ? [event.event_id] : []),
-    text_buffer: "",
-    thinking_buffer: "",
-    stage: "",
-    open_stages: stageHistory?.openStages ?? [],
-  };
-  const workflow = workflowMessage(job, status as import("./types").JobTerminalStatus);
-  return {
-    role: "assistant",
-    content: workflow.content,
-    job_id: jobId,
-    capability: job.capability || null,
-    metadata: workflow.metadata,
-  };
-}
-
-function hasTerminalWorkflowStatus(contract: Record<string, unknown> | undefined): boolean {
-  return ["succeeded", "partial", "failed", "cancelled"].includes(contract?.status as string);
-}
-
-function stageHistoryKey(sessionId: string, jobId: string): string {
-  return `${sessionId}:${jobId}`;
-}
-
-function recordInactiveStage(sessionId: string, jobId: string, event: StreamEvent): void {
-  if ((event.type !== "stage_start" && event.type !== "stage_end") || !event.stage) return;
-  const key = stageHistoryKey(sessionId, jobId);
-  const current = inactiveStageHistory.get(key) ?? { events: [], openStages: [] };
-  const events = event.type === "stage_start" ? [...current.events, event] : current.events;
-  let openStages = current.openStages;
-  if (event.type === "stage_start") {
-    openStages = [...openStages, event.stage];
-  } else {
-    const index = openStages.lastIndexOf(event.stage);
-    if (index >= 0) {
-      openStages = [...openStages.slice(0, index), ...openStages.slice(index + 1)];
-    }
-  }
-  inactiveStageHistory.set(key, { events, openStages });
-  while (inactiveStageHistory.size > MAX_INACTIVE_STAGE_HISTORIES) {
-    const oldest = inactiveStageHistory.keys().next().value;
-    if (oldest === undefined) break;
-    inactiveStageHistory.delete(oldest);
-  }
-}
-
-function takeInactiveStageHistory(
-  sessionId: string,
-  jobId: string,
-): InactiveStageHistory | undefined {
-  const key = stageHistoryKey(sessionId, jobId);
-  const history = inactiveStageHistory.get(key);
-  inactiveStageHistory.delete(key);
-  return history;
-}
-
-function getOrCreateInactiveTerminalPersistence(
-  contract: Record<string, unknown> | undefined,
-  jobId: string,
-  userId: string,
-  sessionId: string,
-  event: StreamEvent,
-  stageHistory: InactiveStageHistory | undefined,
-): InactiveTerminalPersistence | null {
-  const key = stageHistoryKey(sessionId, jobId);
-  const existing = inactiveTerminalPersistence.get(key);
-  if (existing) return existing;
-  const workflow = terminalWorkflowMessage(contract, jobId, event, stageHistory);
-  if (!workflow) return null;
-  const assistant = terminalAssistantMessage(contract, jobId);
-  const persistence: InactiveTerminalPersistence = {
-    userId,
-    sessionId,
-    assistant,
-    workflow,
-    assistantDone: assistant === null,
-    workflowDone: false,
-    assistantInFlight: false,
-    workflowInFlight: false,
-    finalizedAt: null,
-  };
-  inactiveTerminalPersistence.set(key, persistence);
-  while (inactiveTerminalPersistence.size > MAX_INACTIVE_TERMINAL_RECORDS) {
-    const oldest = inactiveTerminalPersistence.keys().next().value;
-    if (oldest === undefined) break;
-    inactiveTerminalPersistence.delete(oldest);
-  }
-  return persistence;
-}
-
-function attemptInactiveTerminalPersistence(
-  key: string,
-  persistence: InactiveTerminalPersistence,
-  appendConversationMessage?: ConversationMessageAppender,
-): void {
-  if (!persistence.assistantDone && !persistence.assistantInFlight && persistence.assistant) {
-    persistence.assistantInFlight = true;
-    void persistConversationMessage(
-      appendConversationMessage,
-      persistence.userId,
-      persistence.sessionId,
-      persistence.assistant,
-      "assistant",
-    ).then((success) => {
-      persistence.assistantInFlight = false;
-      if (success) persistence.assistantDone = true;
-      finalizeInactiveTerminalPersistence(key, persistence);
-    });
-  }
-  if (!persistence.workflowDone && !persistence.workflowInFlight) {
-    persistence.workflowInFlight = true;
-    void persistConversationMessage(
-      appendConversationMessage,
-      persistence.userId,
-      persistence.sessionId,
-      persistence.workflow,
-      "workflow_timeline",
-    ).then((success) => {
-      persistence.workflowInFlight = false;
-      if (success) persistence.workflowDone = true;
-      finalizeInactiveTerminalPersistence(key, persistence);
-    });
-  }
-}
-
-function finalizeInactiveTerminalPersistence(
-  key: string,
-  persistence: InactiveTerminalPersistence,
-): void {
-  if (inactiveTerminalPersistence.get(key) !== persistence) return;
-  if (persistence.assistantDone && persistence.workflowDone && persistence.finalizedAt === null) {
-    persistence.finalizedAt = Date.now();
-  }
-}
-
-function persistConversationMessage(
-  adapter: ConversationMessageAppender | undefined,
-  userId: string,
-  sessionId: string,
-  message: ConversationMessageInput,
-  label: string,
-): Promise<boolean> {
-  const pending = adapter
-    ? Promise.resolve().then(() => adapter(userId, sessionId, message))
-    : import("./api").then(({ appendConversationMessage }) =>
-        appendConversationMessage(userId, sessionId, message),
-      );
-  return pending.then(
-    () => true,
-    (error: unknown) => {
-      console.warn(`appendConversationMessage(${label}) failed`, error);
-      return false;
-    },
-  );
 }
 
 function parseStructuredError(value: unknown): StructuredError | null {
