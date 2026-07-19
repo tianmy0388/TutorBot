@@ -38,7 +38,8 @@ All items below were implemented test-first and independently reviewed clean unl
 10. Intelligent Manim repair UI base implementation:
    - `d636bac feat: expose intelligent Manim repair`
    - `3d9e021 fix: preserve terminal Manim repair state`
-   - final event-ordering review fixes are still in progress at the time this handoff was created; see the next section.
+   - `70d0733 fix: harden equal-revision repair ordering`
+   - implementation and tests are complete; the final narrow read-only re-review was still running when this line was updated.
 
 ## Task 9 final behavior and evidence
 
@@ -55,7 +56,7 @@ Task 9 is complete and review-clean.
 
 ## Current active work: finish Task 10 review fixes
 
-Current HEAD before the active fix: `3d9e021`.
+Current Task 10 implementation HEAD: `70d0733` (a separate handoff-doc commit `522deb8` precedes it).
 
 The first Task 10 implementation passed:
 
@@ -71,21 +72,27 @@ Independent review confirmed the `VideoViewer` local tracking fix, but found two
 1. Equal-revision first repair transition is incorrectly rejected when the current failed resource has no `repair_job_id` and the incoming snapshot introduces the first repair job. Accept this causal `no job -> first pending/running repair job` transition.
 2. Same-job, same-terminal (`ready` or `failed`) incremental snapshots are accepted without ordering evidence and can overwrite a newer canonical URL/history. At equal revision, treat an already-terminal same-job state as immutable (or perform only demonstrably monotonic enrichment); do not wholesale replace it.
 
-The active implementer has already been instructed to add RED tests for both cases, retain all prior ordering tests, run focused/full/typecheck, commit separately, update the Task 10 report/review package, and leave `next-env.d.ts` untouched.
+The active implementer completed both cases and committed `70d0733`:
 
-At handoff creation, `git status --short` showed:
+- RED: 3 failed / 30 passed;
+- focused: 55/55 passed;
+- full frontend: 259/259 passed;
+- TypeScript: passed;
+- `git diff --check`: passed;
+- Playwright was not repeated because the final patch changes event ordering only.
+
+After commit, `git status --short` should show only:
 
 ```text
- M frontend/lib/event-handler.test.ts
  M frontend/next-env.d.ts
 ```
 
-The first line is the active Task 10 RED test work; the second is the unrelated pre-existing user file.
+This is the unrelated pre-existing user file.
 
-After the implementer finishes:
+To close Task 10:
 
-1. Inspect the new commit and `git status --short`.
-2. Re-run/confirm:
+1. Obtain/confirm a clean independent review of `c5a11d8..70d0733`, particularly the two final event-ordering cases. A narrow re-review was requested before this update.
+2. If desired, re-run/confirm:
 
    ```powershell
    cd E:\github\TutorBot\.worktrees\tutorbot-reliability\frontend
@@ -151,4 +158,3 @@ Then perform a fresh whole-branch read-only review and final verification. Do no
 - Broad Python `compileall` sees an existing generated invalid Manim fixture under `backend/tutor/services/manim_render/output/.../source.py`; syntax-check changed production modules or exclude generated output.
 - Existing pytest deprecation warnings are not part of this follow-up.
 - Never stage `frontend/next-env.d.ts`.
-
