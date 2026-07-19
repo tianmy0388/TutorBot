@@ -40,7 +40,7 @@ All items below were implemented test-first and independently reviewed clean unl
    - `3d9e021 fix: preserve terminal Manim repair state`
    - `70d0733 fix: harden equal-revision repair ordering`
    - `9c0537e fix: reject terminalized first repair snapshots`
-   - implementation and tests are complete; the final ultra-narrow read-only re-review was still running when this line was updated.
+   - implementation, tests and final independent read-only review are complete and clean.
 
 ## Task 9 final behavior and evidence
 
@@ -94,7 +94,7 @@ This is the unrelated pre-existing user file.
 
 To close Task 10:
 
-1. Obtain/confirm a clean independent review of `c5a11d8..9c0537e`, particularly the final event-ordering/history guard. An ultra-narrow re-review was requested before this update.
+1. Task 10 review is clean through `9c0537e`; no further Task 10 work is required unless Task 11 exposes a new integration issue.
 2. If desired, re-run/confirm:
 
    ```powershell
