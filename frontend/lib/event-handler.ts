@@ -156,7 +156,7 @@ export function dispatchStreamEvent(
     (streamEv.metadata as Record<string, unknown> | undefined)
       ?.profile_updated === true
   ) {
-    void refreshLearningState(context.userId || useTutorStore.getState().userId, "");
+    void refreshLearningState(context.userId || useTutorStore.getState().userId, "").catch(() => undefined);
   }
 
   // 2. Capability-specific routing for known event types.
