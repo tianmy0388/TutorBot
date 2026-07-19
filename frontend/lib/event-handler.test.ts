@@ -385,6 +385,58 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     expect(mockStoreState.latestPackage).toBeNull();
   });
 
+  it("hydrates a same-resource video repair snapshot after backend restart", () => {
+    mockStoreState.latestPackage = {
+      package_id: "pkg-repair",
+      resources: [
+        {
+          resource_id: "r-video",
+          type: "video",
+          title: "动画演示",
+          content: "",
+          format_specific: {
+            render_status: "failed",
+            source_revision: 2,
+            repair_status: "failed",
+            repair_job_id: "repair-old",
+          },
+        },
+      ],
+    };
+
+    dispatchStreamEvent(
+      resourceEvent("r-video", "video", "动画演示", {
+        metadata: { package_id: "pkg-repair" },
+        format_specific: {
+          render_status: "failed",
+          source_revision: 2,
+          repair_status: "running",
+          repair_job_id: "repair-restarted",
+          repair_history: [
+            {
+              job_id: "repair-old",
+              failed_revision: 2,
+              status: "failed",
+              error_code: "repair_render_failed",
+              summary: "上一轮安全诊断",
+            },
+          ],
+        },
+      }),
+    );
+
+    const updated = mockStoreState.setLatestPackage.mock.calls.at(-1)?.[0] as {
+      resources: Array<{ format_specific: Record<string, unknown> }>;
+    };
+    expect(updated.resources).toHaveLength(1);
+    expect(updated.resources[0].format_specific).toMatchObject({
+      source_revision: 2,
+      repair_status: "running",
+      repair_job_id: "repair-restarted",
+      repair_history: [expect.objectContaining({ summary: "上一轮安全诊断" })],
+    });
+  });
+
   it("recovers an invalid durable package once using the authoritative user", async () => {
     let resolveRecovery!: (value: unknown) => void;
     const recovery = new Promise<unknown>((resolve) => {

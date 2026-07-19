@@ -829,52 +829,81 @@ function handleIncrementalResource(
   // findIndex lookup matches the placeholder not the real resource
   // and we'd push a duplicate. Walk the array once, replace by id,
   // and bail if a real copy is already present.
-  let alreadyHasReal = false;
-  for (const r of existingResources) {
-    if (
-      r &&
-      typeof r === "object" &&
-      (r as Record<string, unknown>).resource_id === resourceId
-    ) {
-      alreadyHasReal = true;
-      break;
+  const existingIndex = existingResources.findIndex(
+    (candidate) =>
+      isRecord(candidate) && candidate.resource_id === resourceId,
+  );
+  if (existingIndex >= 0) {
+    const current = existingResources[existingIndex];
+    if (shouldReplaceIncrementalVideoSnapshot(current, raw) && existing) {
+      const resources = [...existingResources];
+      resources[existingIndex] = raw;
+      store.setLatestPackage({
+        ...existing,
+        resources: resources as never,
+      });
     }
+    return;
   }
-  if (!alreadyHasReal) {
-    // Strip any prior partial placeholders for this id before push.
-    const filtered = existingResources.filter(
-      (r) =>
-        !(
-          r &&
-          typeof r === "object" &&
-          (r as Record<string, unknown>).resource_id === resourceId
-        ),
-    );
-    filtered.push(raw);
-    store.setLatestPackage({
-      package_id: placeholderPackageId,
-      topic:
-        typeof raw.topic === "string"
-          ? (raw.topic as string)
-          : existing?.topic ?? "",
-      resources: filtered as never,
-      created_at: existing?.created_at ?? new Date().toISOString(),
-      target_profile_snapshot:
-        existing?.target_profile_snapshot ?? {},
-      learning_path_summary:
-        existing?.learning_path_summary ?? {},
-      generated_by: existing?.generated_by ?? [],
-      metadata: {
-        ...(existing?.metadata ?? {}),
-        incremental: true,
-        display_summary:
-          typeof existing?.metadata?.display_summary === "string"
-            ? existing.metadata.display_summary
-            : `已生成 ${filtered.length} 项资源`,
-      },
-    });
-  }
-  // else: we already have a real resource with this id; nothing to do.
+  // Strip any prior partial placeholders for this id before push.
+  const filtered = existingResources.filter(
+    (candidate) =>
+      !(
+        isRecord(candidate) && candidate.resource_id === resourceId
+      ),
+  );
+  filtered.push(raw);
+  store.setLatestPackage({
+    package_id: placeholderPackageId,
+    topic:
+      typeof raw.topic === "string"
+        ? (raw.topic as string)
+        : existing?.topic ?? "",
+    resources: filtered as never,
+    created_at: existing?.created_at ?? new Date().toISOString(),
+    target_profile_snapshot:
+      existing?.target_profile_snapshot ?? {},
+    learning_path_summary:
+      existing?.learning_path_summary ?? {},
+    generated_by: existing?.generated_by ?? [],
+    metadata: {
+      ...(existing?.metadata ?? {}),
+      incremental: true,
+      display_summary:
+        typeof existing?.metadata?.display_summary === "string"
+          ? existing.metadata.display_summary
+          : `已生成 ${filtered.length} 项资源`,
+    },
+  });
+}
+
+function shouldReplaceIncrementalVideoSnapshot(
+  current: unknown,
+  incoming: Record<string, unknown>,
+): boolean {
+  if (!isRecord(current) || incoming.type !== "video") return false;
+  const currentFormat = isRecord(current.format_specific)
+    ? current.format_specific
+    : {};
+  const incomingFormat = isRecord(incoming.format_specific)
+    ? incoming.format_specific
+    : {};
+  const currentRevision =
+    typeof currentFormat.source_revision === "number"
+      ? currentFormat.source_revision
+      : 0;
+  const incomingRevision =
+    typeof incomingFormat.source_revision === "number"
+      ? incomingFormat.source_revision
+      : 0;
+  if (incomingRevision > currentRevision) return true;
+  if (incomingRevision < currentRevision) return false;
+  return (
+    incomingFormat.repair_job_id !== currentFormat.repair_job_id ||
+    incomingFormat.repair_status !== currentFormat.repair_status ||
+    incomingFormat.render_status !== currentFormat.render_status ||
+    incomingFormat.video_url !== currentFormat.video_url
+  );
 }
 
 function packageIdFromValue(value: unknown): string | null {

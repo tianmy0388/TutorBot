@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
-import type { Resource } from "@/lib/types";
+import type { Resource, VideoResourceFormat } from "@/lib/types";
 import {
   getJobDetail,
   getResourcePackageDetail,
@@ -66,12 +66,16 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   const canonicalPackageId =
     typeof canonicalResource.metadata?.package_id === "string"
       ? canonicalResource.metadata.package_id
-      : "";
+      : latestPackage?.package_id ?? "";
   const canonicalRenderJobId =
     typeof canonicalResource.format_specific?.render_job_id === "string"
       ? canonicalResource.format_specific.render_job_id
       : "";
-  const child = useTutorStore((state) =>
+  const canonicalRepairJobId =
+    typeof canonicalResource.format_specific?.repair_job_id === "string"
+      ? canonicalResource.format_specific.repair_job_id
+      : "";
+  const renderChild = useTutorStore((state) =>
     Object.values(state.jobsById)
       .flatMap((job) => job.children ?? [])
       .filter(
@@ -80,6 +84,20 @@ export function VideoViewer({ resource }: { resource: Resource }) {
           (candidate.metadata?.resource_id === canonicalResource.resource_id ||
             candidate.dedupe_key?.endsWith(`:${canonicalResource.resource_id}`)) &&
           (!canonicalRenderJobId || candidate.job_id === canonicalRenderJobId),
+      )
+      .at(-1),
+  );
+  const repairChild = useTutorStore((state) =>
+    Object.values(state.jobsById)
+      .flatMap((job) => job.children ?? [])
+      .filter(
+        (candidate) =>
+          candidate.task_kind === "video_repair_render" &&
+          (candidate.metadata?.resource_id === canonicalResource.resource_id ||
+            candidate.dedupe_key?.includes(
+              `:${canonicalResource.resource_id}:`,
+            )) &&
+          (!canonicalRepairJobId || candidate.job_id === canonicalRepairJobId),
       )
       .at(-1),
   );
@@ -97,30 +115,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   // contract). The previous code did a non-null cast and crashed at
   // ``formatSpec.video_url``. Default to an empty object so all the
   // optional-chain reads below stay safe.
-  const formatSpec = (canonicalResource.format_specific ?? {}) as {
-    video_url?: string;
-    manim_code?: string;
-    scene_class?: string;
-    render_status?: string;
-    duration_seconds?: number;
-    render_error?: string;
-    render_failure?: {
-      error_code?: string;
-      summary?: string;
-      traceback_tail?: string[] | string;
-      log_artifact_key?: string;
-    };
-    artifacts?: Array<{
-      name?: string;
-      kind?: string;
-      artifact_key?: string;
-    }>;
-    scenes?: Array<{ name: string; duration: number; description?: string }>;
-    concept?: string;
-    fps?: number;
-    resolution?: string;
-    render_job_id?: string;
-  };
+  const formatSpec = (canonicalResource.format_specific ?? {}) as VideoResourceFormat;
 
   const [showCode, setShowCode] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -132,7 +127,6 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   const [videoLoadFailed, setVideoLoadFailed] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState("");
-  const [retryQueued, setRetryQueued] = useState(false);
   const [retryTracking, setRetryTracking] = useState<{
     jobId: string;
     parentJobId: string;
@@ -150,12 +144,12 @@ export function VideoViewer({ resource }: { resource: Resource }) {
       ? "failed"
       : formatSpec.render_status === "ready"
         ? "ready"
-        : child?.status === "failed" || child?.status === "cancelled"
+        : renderChild?.status === "failed" || renderChild?.status === "cancelled"
           ? "failed"
-          : child?.status === "succeeded"
+          : renderChild?.status === "succeeded"
             ? "succeeded"
-            : child?.status === "pending" || child?.status === "running"
-              ? child.status
+            : renderChild?.status === "pending" || renderChild?.status === "running"
+              ? renderChild.status
               : formatSpec.render_status ?? "unknown";
   const isFailed = effectiveRenderStatus === "failed";
   const isSucceeded =
@@ -176,6 +170,18 @@ export function VideoViewer({ resource }: { resource: Resource }) {
       renderStatus === "rendering" ||
       renderStatus === "running");
   const isUnavailable = !isReady && !isFailed && !isSucceeded && !isPending;
+  const persistedRepairActive =
+    formatSpec.repair_status === "pending" ||
+    formatSpec.repair_status === "running" ||
+    (formatSpec.repair_status === undefined &&
+      (repairChild?.status === "pending" || repairChild?.status === "running"));
+  const isRepairActive = retrying || !!retryTracking || persistedRepairActive;
+  const boundedRepairHistory = (formatSpec.repair_history ?? []).slice(-10);
+  const latestRepairFailure = [...boundedRepairHistory]
+    .reverse()
+    .find((attempt) => attempt.status === "failed");
+  const isRepairFailed =
+    formatSpec.repair_status === "failed" && !isRepairActive;
 
   const failure = formatSpec.render_failure;
   const failureSummary = videoLoadFailed
@@ -196,8 +202,19 @@ export function VideoViewer({ resource }: { resource: Resource }) {
       + `/resources/${encodeURIComponent(canonicalResource.resource_id)}/artifacts/${encodeURIComponent(logArtifact.name)}`
     : "";
 
+  const trackingJobId =
+    retryTracking?.jobId || (persistedRepairActive ? canonicalRepairJobId : "");
+  const trackingPollJobId =
+    retryTracking?.parentJobId || repairChild?.parent_job_id || trackingJobId;
+  const trackingPackageId = retryTracking?.packageId || packageId;
+
   useEffect(() => {
-    if (!retryTracking || retrySyncPaused) return;
+    if (
+      !trackingJobId ||
+      !trackingPollJobId ||
+      !trackingPackageId ||
+      retrySyncPaused
+    ) return;
     let cancelled = false;
     let activeDelay: ReturnType<typeof createRetryPollingDelay> | null = null;
 
@@ -216,27 +233,28 @@ export function VideoViewer({ resource }: { resource: Resource }) {
           if (!terminalObserved) {
             const detail = await getJobDetail(
               userId,
-              retryTracking.parentJobId,
+              trackingPollJobId,
             );
             if (cancelled) return;
             rehydrateJobFromDetail(detail);
             consecutiveFailures = 0;
-            const current = detail.children?.find(
-              (candidate) => candidate.job_id === retryTracking.jobId,
-            );
-            terminalObserved = !!current &&
+            const currentStatus = detail.job_id === trackingJobId
+              ? detail.status
+              : detail.children?.find(
+                  (candidate) => candidate.job_id === trackingJobId,
+                )?.status;
+            terminalObserved = !!currentStatus &&
               ["succeeded", "partial", "failed", "cancelled"].includes(
-                current.status,
+                currentStatus,
               );
           }
           if (terminalObserved) {
             const persisted = await getResourcePackageDetail(
               userId,
-              retryTracking.packageId,
+              trackingPackageId,
             );
             if (!cancelled) {
               setLatestPackage(persisted);
-              setRetryQueued(false);
               setRetryError("");
               setRetryTracking(null);
             }
@@ -268,16 +286,17 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     rehydrateJobFromDetail,
     retrySyncPaused,
     retrySyncRevision,
-    retryTracking,
     setLatestPackage,
+    trackingJobId,
+    trackingPackageId,
+    trackingPollJobId,
     userId,
   ]);
 
   const retry = async () => {
-    if (!packageId || retrying) return;
+    if (!packageId || retrying || isRepairActive) return;
     setRetrying(true);
     setRetryError("");
-    setRetryQueued(false);
     setRetrySyncPaused(false);
     try {
       const snapshot = await retryVideoRender(
@@ -286,7 +305,6 @@ export function VideoViewer({ resource }: { resource: Resource }) {
         canonicalResource.resource_id,
       );
       reconcileVideoRetry(snapshot);
-      setRetryQueued(true);
       setRetryTracking({
         jobId: snapshot.job_id,
         parentJobId: snapshot.parent_job_id,
@@ -300,7 +318,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
   };
 
   const resumeRetrySync = () => {
-    if (!retryTracking) return;
+    if (!trackingJobId) return;
     setRetryError("");
     setRetrySyncPaused(false);
     setRetrySyncRevision((revision) => revision + 1);
@@ -359,7 +377,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
         </div>
       )}
 
-      {retryTracking && retryError && (
+      {trackingJobId && retryError && (
         <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3 text-left">
           <div className="text-xs text-amber-200">
             状态同步失败：{retryError}
@@ -393,9 +411,6 @@ export function VideoViewer({ resource }: { resource: Resource }) {
               ? "正在执行 Manim 渲染任务"
               : "任务已排队 — 通常 30 秒内完成"}
           </div>
-          {retryQueued && (
-            <div className="mt-2 text-xs text-green-300">重试任务已排队</div>
-          )}
           <div className="mt-3 h-1 bg-bg-panel rounded-full overflow-hidden max-w-xs mx-auto">
             <div className="h-full bg-gradient-to-r from-pink-500 to-pink-400 animate-pulse w-2/3" />
           </div>
@@ -436,22 +451,40 @@ export function VideoViewer({ resource }: { resource: Resource }) {
               <div className="mt-3">
                 <button
                   type="button"
-                  aria-label="重新渲染视频"
+                  aria-label="智能修复并重新渲染"
                   onClick={retry}
-                  disabled={retrying}
+                  disabled={isRepairActive}
                   className="inline-flex items-center gap-1 rounded border border-red-700/50 px-2 py-1 text-xs text-red-200 hover:bg-red-900/30 disabled:opacity-60"
                 >
-                  <RefreshCw className={cn("h-3 w-3", retrying && "animate-spin")} />
-                  {retrying ? "正在提交…" : "重新渲染"}
+                  <RefreshCw className={cn("h-3 w-3", isRepairActive && "animate-spin")} />
+                  {retrying ? "正在提交…" : "智能修复并重新渲染"}
                 </button>
-                {retryQueued && (
-                  <span className="ml-2 text-xs text-green-300">重试任务已排队</span>
-                )}
-                {retryError && (
+                {retryError && !trackingJobId && (
                   <div className="mt-1 text-xs text-red-300">{retryError}</div>
                 )}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {isRepairActive && (
+        <div className="rounded-lg border border-violet-700/40 bg-violet-950/20 p-4">
+          <div className="flex items-center gap-2 text-sm font-medium text-violet-200">
+            <RefreshCw className="h-4 w-4 animate-spin" />
+            正在生成修复代码并重新渲染…
+          </div>
+          <div className="mt-1 text-xs text-violet-300/80">
+            原始渲染失败信息会保留，完成后将自动同步最新视频。
+          </div>
+        </div>
+      )}
+
+      {isRepairFailed && (
+        <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-4">
+          <div className="text-sm font-medium text-amber-200">智能修复失败</div>
+          <div className="mt-1 text-xs text-amber-300/80">
+            {latestRepairFailure?.summary || "本次修复未生成可播放视频，可再次手动修复。"}
           </div>
         </div>
       )}

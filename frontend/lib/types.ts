@@ -345,6 +345,48 @@ export interface CodeResourceFormat {
   files?: Array<{ name: string; language: string; code: string }>;
 }
 
+export type VideoRepairStatus = "pending" | "running" | "ready" | "failed";
+
+export interface VideoRepairHistoryRecord {
+  job_id: string;
+  failed_revision: number;
+  status: "ready" | "failed";
+  error_code?: string;
+  summary?: string;
+  log_artifact_key?: string;
+}
+
+/** Browser-safe public projection of a video resource. */
+export interface VideoResourceFormat {
+  video_url?: string;
+  artifact_key?: string;
+  manim_code?: string;
+  scene_class?: string;
+  render_status?: "pending" | "rendering" | "ready" | "failed";
+  render_job_id?: string;
+  render_error?: string;
+  render_failure?: {
+    error_code?: string;
+    summary?: string;
+    traceback_tail?: string[] | string;
+    log_artifact_key?: string;
+  };
+  source_revision?: number;
+  repair_status?: VideoRepairStatus;
+  repair_job_id?: string;
+  repair_history?: VideoRepairHistoryRecord[];
+  duration_seconds?: number;
+  artifacts?: Array<{
+    name?: string;
+    kind?: string;
+    artifact_key?: string;
+  }>;
+  scenes?: Array<{ name: string; duration: number; description?: string }>;
+  concept?: string;
+  fps?: number;
+  resolution?: string;
+}
+
 export interface ResourcePackage {
   package_id: string;
   topic: string;

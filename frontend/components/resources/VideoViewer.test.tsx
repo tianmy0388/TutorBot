@@ -41,6 +41,21 @@ const baseResource = {
   metadata: { package_id: "pkg-1" },
 } satisfies Resource;
 
+const failedResource = {
+  ...baseResource,
+  format_specific: {
+    render_status: "failed",
+    render_job_id: "initial-render-child",
+    source_revision: 0,
+    render_failure: {
+      error_code: "process_exit",
+      summary: "原始 Manim 渲染失败",
+      traceback_tail: ["ValueError: original failure"],
+      log_artifact_key: "manim_logs/initial/attempt.log",
+    },
+  },
+} satisfies Resource;
+
 function childSummary(status: JobChildSummary["status"]): JobChildSummary {
   return {
     job_id: `child-${status}`,
@@ -86,6 +101,33 @@ function retryChild(status: JobChildSummary["status"]): JobChildSummary {
   return {
     ...childSummary(status),
     job_id: "retry-child",
+    capability: "video_repair_render",
+    task_kind: "video_repair_render",
+    dedupe_key: "video-repair:pkg-1:video-1:0:1",
+    metadata: {
+      package_id: "pkg-1",
+      resource_id: "video-1",
+      failed_revision: 0,
+    },
+  };
+}
+
+function retryResponse(resource: Resource = failedResource) {
+  return {
+    job_id: "retry-child",
+    parent_job_id: "parent",
+    package_id: "pkg-1",
+    resource_id: "video-1",
+    status: "pending" as const,
+    child: retryChild("pending"),
+    resource: {
+      ...resource,
+      format_specific: {
+        ...resource.format_specific,
+        repair_status: "pending",
+        repair_job_id: "retry-child",
+      },
+    },
   };
 }
 
@@ -106,14 +148,18 @@ const readyResource = {
   ...baseResource,
   format_specific: {
     render_status: "ready",
-    render_job_id: "retry-child",
+    repair_status: "ready",
+    repair_job_id: "retry-child",
+    source_revision: 1,
     video_url: "/static/manim/retry.mp4",
     artifact_key: "manim_videos/retry.mp4",
   },
 } satisfies Resource;
 
 async function beginRetry() {
-  fireEvent.click(screen.getByRole("button", { name: "重新渲染视频" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "智能修复并重新渲染" }),
+  );
   await act(async () => {
     await Promise.resolve();
   });
@@ -130,29 +176,7 @@ beforeEach(() => {
   mocks.retryVideoRender.mockReset();
   mocks.getJobDetail.mockReset();
   mocks.getResourcePackageDetail.mockReset();
-  mocks.retryVideoRender.mockResolvedValue({
-    job_id: "retry-child",
-    parent_job_id: "parent",
-    package_id: "pkg-1",
-    resource_id: "video-1",
-    status: "pending",
-    child: {
-      job_id: "retry-child",
-      capability: "video_render",
-      parent_job_id: "parent",
-      task_kind: "video_render",
-      status: "pending",
-      metadata: { package_id: "pkg-1", resource_id: "video-1" },
-    },
-    resource: {
-      ...baseResource,
-      format_specific: {
-        ...baseResource.format_specific,
-        render_status: "pending",
-        render_job_id: "retry-child",
-      },
-    },
-  });
+  mocks.retryVideoRender.mockResolvedValue(retryResponse());
 });
 
 afterEach(() => {
@@ -237,11 +261,14 @@ describe("VideoViewer durable render lifecycle", () => {
     expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
   });
 
-  it("submits a new durable retry child without reopening the old child", async () => {
+  it("labels the failed-video action as intelligent regeneration and preserves the original failure", async () => {
+    setCanonicalResource(failedResource);
     setChildren(childSummary("failed"));
-    render(<VideoViewer resource={baseResource} />);
+    render(<VideoViewer resource={failedResource} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "重新渲染视频" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "智能修复并重新渲染" }),
+    );
 
     await waitFor(() =>
       expect(mocks.retryVideoRender).toHaveBeenCalledWith(
@@ -250,10 +277,36 @@ describe("VideoViewer durable render lifecycle", () => {
         "video-1",
       ),
     );
-    expect(screen.getByText("重试任务已排队")).toBeInTheDocument();
+    expect(screen.getByText("原始 Manim 渲染失败")).toBeInTheDocument();
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
+    expect(screen.queryByText("视频渲染中…")).not.toBeInTheDocument();
     expect(
       useTutorStore.getState().jobsById.parent.children?.[0],
     ).toEqual(childSummary("failed"));
+  });
+
+  it("keeps intelligent repair single-flight while its request is pending", async () => {
+    setCanonicalResource(failedResource);
+    let resolveRetry: (value: unknown) => void = () => {};
+    mocks.retryVideoRender.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRetry = resolve;
+      }),
+    );
+    render(<VideoViewer resource={failedResource} />);
+
+    const action = screen.getByRole("button", {
+      name: "智能修复并重新渲染",
+    });
+    fireEvent.click(action);
+    fireEvent.click(action);
+
+    expect(action).toBeDisabled();
+    expect(mocks.retryVideoRender).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveRetry(undefined);
+      await Promise.resolve();
+    });
   });
 
   it("reconciles a new retry revision through running to a playable resource", async () => {
@@ -301,21 +354,26 @@ describe("VideoViewer durable render lifecycle", () => {
       ...failed,
       format_specific: {
         render_status: "ready",
-        render_job_id: "retry-child",
+        repair_status: "ready",
+        repair_job_id: "retry-child",
+        source_revision: 1,
         video_url: "/static/manim/retry.mp4",
         artifact_key: "manim_videos/retry.mp4",
       },
     } satisfies Resource;
     mocks.getResourcePackageDetail.mockResolvedValue(packageWith(ready));
+    mocks.retryVideoRender.mockResolvedValueOnce(retryResponse(failed));
     render(<VideoViewer resource={failed} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "重新渲染视频" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "智能修复并重新渲染" }),
+    );
 
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.queryByText("旧渲染失败")).not.toBeInTheDocument();
-    expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+    expect(screen.getByText("旧渲染失败")).toBeInTheDocument();
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
     expect(
       useTutorStore.getState().jobsById.parent.children?.map((item) => item.job_id),
     ).toEqual(["child-failed", "retry-child"]);
@@ -360,6 +418,131 @@ describe("VideoViewer durable render lifecycle", () => {
     ).toBe("failed");
   });
 
+  it("shows the latest bounded repair diagnostic and permits another manual repair", async () => {
+    setCanonicalResource({
+      ...failedResource,
+      format_specific: {
+        ...failedResource.format_specific,
+        repair_status: "failed",
+        repair_job_id: "repair-failed",
+        repair_history: Array.from({ length: 12 }, (_, index) => ({
+          job_id: `repair-${index}`,
+          failed_revision: index,
+          status: "failed",
+          error_code: "repair_render_failed",
+          summary: `安全诊断 ${index}`,
+        })),
+      },
+    });
+
+    render(<VideoViewer resource={failedResource} />);
+
+    expect(screen.getByText("智能修复失败")).toBeInTheDocument();
+    expect(screen.getByText("安全诊断 11")).toBeInTheDocument();
+    expect(screen.queryByText("安全诊断 0")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "智能修复并重新渲染" }),
+    ).toBeEnabled();
+  });
+
+  it("lets a canonical repair failure override a stale running child", () => {
+    const terminalRepairFailure = {
+      ...failedResource,
+      format_specific: {
+        ...failedResource.format_specific,
+        repair_status: "failed",
+        repair_job_id: "retry-child",
+        repair_history: [
+          {
+            job_id: "retry-child",
+            failed_revision: 0,
+            status: "failed",
+            error_code: "repair_render_failed",
+            summary: "重启后恢复的安全诊断",
+          },
+        ],
+      },
+    } satisfies Resource;
+    setCanonicalResource(terminalRepairFailure);
+    setChildren(childSummary("failed"), retryChild("running"));
+
+    render(<VideoViewer resource={terminalRepairFailure} />);
+
+    expect(screen.getByText("智能修复失败")).toBeInTheDocument();
+    expect(screen.getByText("重启后恢复的安全诊断")).toBeInTheDocument();
+    expect(
+      screen.queryByText("正在生成修复代码并重新渲染…"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "智能修复并重新渲染" }),
+    ).toBeEnabled();
+  });
+
+  it("restores active repair polling after unmount and remount", async () => {
+    vi.useFakeTimers();
+    const repairing = {
+      ...failedResource,
+      format_specific: {
+        ...failedResource.format_specific,
+        repair_status: "running",
+        repair_job_id: "retry-child",
+      },
+    } satisfies Resource;
+    setCanonicalResource(repairing);
+    setChildren(childSummary("failed"), retryChild("running"));
+    mocks.getJobDetail.mockResolvedValue(parentDetail("running"));
+
+    const view = render(<VideoViewer resource={repairing} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(1);
+    view.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+
+    render(<VideoViewer resource={repairing} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("原始 Manim 渲染失败")).toBeInTheDocument();
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
+  });
+
+  it("hydrates a backend restart snapshot and refreshes the canonical package after terminal", async () => {
+    vi.useFakeTimers();
+    const restartSnapshot = {
+      ...failedResource,
+      format_specific: {
+        ...failedResource.format_specific,
+        repair_status: "pending",
+        repair_job_id: "retry-child",
+      },
+    } satisfies Resource;
+    setCanonicalResource(restartSnapshot);
+    setChildren(childSummary("failed"), retryChild("running"));
+    mocks.getJobDetail.mockResolvedValueOnce(parentDetail("succeeded"));
+    mocks.getResourcePackageDetail.mockResolvedValueOnce(
+      packageWith(readyResource),
+    );
+
+    render(<VideoViewer resource={restartSnapshot} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenCalledWith("local-user", "parent");
+    expect(mocks.getResourcePackageDetail).toHaveBeenCalledWith(
+      "local-user",
+      "pkg-1",
+    );
+    expect(document.querySelector("source")).toHaveAttribute(
+      "src",
+      "/static/manim/retry.mp4",
+    );
+  });
+
   it("recovers after a transient job polling failure", async () => {
     vi.useFakeTimers();
     setChildren(childSummary("failed"));
@@ -375,7 +558,7 @@ describe("VideoViewer durable render lifecycle", () => {
     await beginRetry();
 
     expect(screen.getByText(/temporary poll failure/)).toBeInTheDocument();
-    expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000);
     });
@@ -450,7 +633,7 @@ describe("VideoViewer durable render lifecycle", () => {
     });
 
     expect(screen.getByText(/permanent poll failure/)).toBeInTheDocument();
-    expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
     const recover = screen.getByRole("button", {
       name: "继续同步视频状态",
     });
@@ -554,7 +737,9 @@ describe("VideoViewer durable render lifecycle", () => {
     mocks.retryVideoRender.mockRejectedValueOnce(new Error("network down"));
     render(<VideoViewer resource={baseResource} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "重新渲染视频" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "智能修复并重新渲染" }),
+    );
 
     expect(await screen.findByText("network down")).toBeInTheDocument();
     expect(screen.getByText("渲染失败")).toBeInTheDocument();
