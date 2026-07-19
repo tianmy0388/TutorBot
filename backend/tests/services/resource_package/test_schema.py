@@ -493,3 +493,20 @@ def test_public_video_dump_sanitizes_legacy_structured_render_failure() -> None:
     assert "C:\\private" not in str(failure)
     assert "log_artifact_key" not in failure
     assert "unexpected" not in failure
+
+
+def test_public_video_dump_sanitizes_legacy_top_level_render_error_code() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "render_error": "legacy failure",
+            "render_error_code": "provider-token=SECRET_CODE " + ("x" * 500),
+        },
+    )
+
+    public = public_resource_dump(resource)["format_specific"]
+
+    assert len(public["render_error_code"]) <= 120
+    assert "SECRET_CODE" not in public["render_error_code"]

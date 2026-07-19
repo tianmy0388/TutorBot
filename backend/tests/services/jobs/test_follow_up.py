@@ -1116,6 +1116,112 @@ async def test_active_child_bind_does_not_run_for_ineligible_parent(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_child_insert_and_external_bind_block_claim_until_bound(tmp_path) -> None:
+    first = JobStore(tmp_path / "jobs.db")
+    second = JobStore(tmp_path / "jobs.db")
+    await first.init()
+    await second.init()
+    parent = Job(job_id="insert-bind-parent", status=JobStatus.SUCCEEDED)
+    await first.save(parent)
+    bind_entered = asyncio.Event()
+    release_bind = asyncio.Event()
+    bound_jobs: set[str] = set()
+    inserted_job_ids: list[str] = []
+
+    async def bind_resource(child: Job) -> bool:
+        inserted_job_ids.append(child.job_id)
+        bind_entered.set()
+        await release_bind.wait()
+        bound_jobs.add(child.job_id)
+        return True
+
+    submit = asyncio.create_task(
+        first.create_child_if_absent_with_bind(
+            parent_job_id=parent.job_id,
+            task_kind="video_repair_render",
+            dedupe_key="repair:insert-bind-success",
+            payload={
+                "package_id": "pkg",
+                "resource_id": "video",
+                "user_id": "owner",
+                "failed_revision": 0,
+            },
+            bind=bind_resource,
+        )
+    )
+    await asyncio.wait_for(bind_entered.wait(), timeout=2)
+    claim = asyncio.create_task(
+        second.claim_child(
+            inserted_job_ids[0],
+            owner="runner",
+            lease_seconds=60,
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not claim.done()
+    release_bind.set()
+
+    child = await submit
+    claimed = await claim
+    assert child is not None and claimed is not None
+    assert claimed.job_id == child.job_id
+    assert claimed.job_id in bound_jobs
+    await second.close()
+    await first.close()
+
+
+@pytest.mark.asyncio
+async def test_child_insert_bind_false_is_never_visible_or_claimable(tmp_path) -> None:
+    first = JobStore(tmp_path / "jobs.db")
+    second = JobStore(tmp_path / "jobs.db")
+    await first.init()
+    await second.init()
+    parent = Job(job_id="insert-reject-parent", status=JobStatus.SUCCEEDED)
+    await first.save(parent)
+    bind_entered = asyncio.Event()
+    release_bind = asyncio.Event()
+    inserted_job_ids: list[str] = []
+
+    async def reject_bind(child: Job) -> bool:
+        inserted_job_ids.append(child.job_id)
+        bind_entered.set()
+        await release_bind.wait()
+        return False
+
+    submit = asyncio.create_task(
+        first.create_child_if_absent_with_bind(
+            parent_job_id=parent.job_id,
+            task_kind="video_repair_render",
+            dedupe_key="repair:insert-bind-false",
+            payload={
+                "package_id": "pkg",
+                "resource_id": "video",
+                "user_id": "owner",
+                "failed_revision": 0,
+            },
+            bind=reject_bind,
+        )
+    )
+    await asyncio.wait_for(bind_entered.wait(), timeout=2)
+    claim = asyncio.create_task(
+        second.claim_child(
+            inserted_job_ids[0],
+            owner="runner",
+            lease_seconds=60,
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not claim.done()
+    release_bind.set()
+
+    assert await submit is None
+    assert await claim is None
+    assert await first.get_children(parent.job_id) == []
+    await second.close()
+    await first.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_heartbeat_cancels_owner_execution_without_terminal_write(
     tmp_path,
     monkeypatch,

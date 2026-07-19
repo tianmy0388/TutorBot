@@ -619,9 +619,12 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
         elif format_specific.get("render_status") == "failed":
             # Pre-structured Manim records stored the complete host traceback
             # in render_error. Never expose that legacy blob to a browser.
-            format_specific["render_error_code"] = str(
-                format_specific.get("render_error_code") or "legacy_render_failure"
-            )
+            format_specific["render_error_code"] = sanitize_public_diagnostic(
+                str(
+                    format_specific.get("render_error_code")
+                    or "legacy_render_failure"
+                )
+            )[:120]
             format_specific["render_error"] = "渲染流程未生成可播放视频。"
         data["format_specific"] = format_specific
         return data

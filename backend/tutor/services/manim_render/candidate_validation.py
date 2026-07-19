@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,6 +71,7 @@ _FORBIDDEN_IO_ROOTS = {
     "urllib",
 }
 _FORBIDDEN_FILE_METHODS = {
+    "dump",
     "glob",
     "iterdir",
     "mkdir",
@@ -86,6 +87,53 @@ _FORBIDDEN_FILE_METHODS = {
     "write_bytes",
     "write_text",
 }
+_ALLOWED_NUMPY_CALLS = {
+    "numpy.abs",
+    "numpy.arange",
+    "numpy.array",
+    "numpy.asarray",
+    "numpy.clip",
+    "numpy.column_stack",
+    "numpy.concatenate",
+    "numpy.cos",
+    "numpy.cross",
+    "numpy.dot",
+    "numpy.exp",
+    "numpy.hstack",
+    "numpy.linalg.norm",
+    "numpy.linspace",
+    "numpy.log",
+    "numpy.max",
+    "numpy.maximum",
+    "numpy.mean",
+    "numpy.min",
+    "numpy.minimum",
+    "numpy.ones",
+    "numpy.ones_like",
+    "numpy.random.choice",
+    "numpy.random.default_rng",
+    "numpy.random.normal",
+    "numpy.random.permutation",
+    "numpy.random.rand",
+    "numpy.random.randint",
+    "numpy.random.randn",
+    "numpy.random.random",
+    "numpy.random.random_sample",
+    "numpy.random.seed",
+    "numpy.random.shuffle",
+    "numpy.random.uniform",
+    "numpy.reshape",
+    "numpy.sin",
+    "numpy.sqrt",
+    "numpy.stack",
+    "numpy.std",
+    "numpy.sum",
+    "numpy.tan",
+    "numpy.vstack",
+    "numpy.zeros",
+    "numpy.zeros_like",
+}
+_FORBIDDEN_ASSET_CALLS = {"ImageMobject", "SVGMobject", "add_sound"}
 _FORBIDDEN_NUMPY_IO = {
     "fromfile",
     "genfromtxt",
@@ -116,9 +164,19 @@ def validate_manim_candidate(
     code: str,
     *,
     workdir: Path,
-    runtime_namespace: Mapping[str, object] | Collection[str],
+    runtime_namespace: Mapping[str, object],
 ) -> CandidateValidation:
     """Reject deterministic source defects before spending a render attempt."""
+    if not isinstance(runtime_namespace, Mapping):
+        return CandidateValidation(
+            valid=False,
+            issues=(
+                CandidateValidationIssue(
+                    code="INVALID_RUNTIME_NAMESPACE",
+                    message="Manim runtime namespace must map names to runtime objects",
+                ),
+            ),
+        )
     issues: list[CandidateValidationIssue] = []
     try:
         tree = ast.parse(code)
@@ -197,6 +255,7 @@ def validate_manim_candidate(
     issues.extend(_validate_imports(tree, runtime_names))
     issues.extend(_validate_manim_aliases(tree, aliases, runtime_names))
     issues.extend(_validate_external_io(tree, aliases))
+    issues.extend(_validate_asset_aliases(tree, aliases))
     locally_defined = _defined_names(tree)
     issues.extend(
         _validate_python_surface(tree, runtime_names, locally_defined)
@@ -450,10 +509,8 @@ def _is_dunder(name: str) -> bool:
 
 
 def _runtime_mobject_methods(
-    runtime_namespace: Mapping[str, object] | Collection[str],
+    runtime_namespace: Mapping[str, object],
 ) -> set[str]:
-    if not isinstance(runtime_namespace, Mapping):
-        return set()
     mobject = runtime_namespace.get("Mobject")
     if not inspect.isclass(mobject):
         return set()
@@ -510,11 +567,11 @@ def _validate_external_io(
                         line=node.lineno,
                     )
                 )
-            elif root == "numpy" and terminal in _FORBIDDEN_NUMPY_IO:
+            elif root == "numpy" and name not in _ALLOWED_NUMPY_CALLS:
                 issues.append(
                     CandidateValidationIssue(
-                        code="EXTERNAL_IO",
-                        message=f"numpy.{terminal} file I/O is not allowed",
+                        code="DISALLOWED_NUMPY_CALL",
+                        message=f"NumPy call {name} is outside the computation allowlist",
                         line=node.lineno,
                     )
                 )
@@ -537,6 +594,57 @@ def _validate_external_io(
                         line=node.lineno,
                     )
                 )
+    return issues
+
+
+def _validate_asset_aliases(
+    tree: ast.AST,
+    import_aliases: dict[str, str],
+) -> list[CandidateValidationIssue]:
+    """Reject direct and assignment-aliased external asset callables."""
+    asset_aliases: set[str] = set()
+
+    def is_asset_reference(node: ast.AST) -> bool:
+        raw_name = _call_name(node)
+        resolved = _resolve_alias(raw_name, import_aliases)
+        return (
+            resolved.rsplit(".", 1)[-1] in _FORBIDDEN_ASSET_CALLS
+            or raw_name in asset_aliases
+        )
+
+    assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for assignment in assignments:
+            value = assignment.value
+            if value is None or not is_asset_reference(value):
+                continue
+            targets = (
+                assignment.targets
+                if isinstance(assignment, ast.Assign)
+                else [assignment.target]
+            )
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in asset_aliases:
+                    asset_aliases.add(target.id)
+                    changed = True
+
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not is_asset_reference(node.func):
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="EXTERNAL_ASSET",
+                message="Repair candidates cannot call external asset constructors",
+                line=node.lineno,
+            )
+        )
     return issues
 
 

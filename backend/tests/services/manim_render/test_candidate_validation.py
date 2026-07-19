@@ -95,7 +95,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert "UNAVAILABLE_MANIM_SYMBOL" in {issue.code for issue in result.issues}
@@ -105,7 +105,7 @@ def test_validator_rejects_syntax_error(tmp_path):
     result = validate_manim_candidate(
         "class MainScene(Scene):\n    def construct(self)\n        pass\n",
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert "SYNTAX_ERROR" in {issue.code for issue in result.issues}
@@ -115,7 +115,7 @@ def test_validator_rejects_main_scene_without_scene_base(tmp_path):
     result = validate_manim_candidate(
         "class MainScene:\n    def construct(self):\n        pass\n",
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert "MISSING_MAIN_SCENE" in {issue.code for issue in result.issues}
@@ -132,7 +132,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace={*NAMESPACE, "ImageMobject"},
+        runtime_namespace={**RUNTIME_NAMESPACE, "ImageMobject": object()},
     )
 
     assert "MISSING_EXTERNAL_ASSET" in {issue.code for issue in result.issues}
@@ -153,7 +153,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert result.valid is True
@@ -183,7 +183,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert "DISALLOWED_IMPORT" in {issue.code for issue in result.issues}
@@ -218,12 +218,13 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert {issue.code for issue in result.issues} & {
         "EXTERNAL_IO",
         "DYNAMIC_IMPORT",
+        "DISALLOWED_NUMPY_CALL",
     }
 
 
@@ -240,7 +241,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace={*NAMESPACE, "Scene", "Dot"},
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert result.valid is True
@@ -292,7 +293,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert "UNAVAILABLE_MANIM_SYMBOL" in {issue.code for issue in result.issues}
@@ -458,3 +459,113 @@ class MainScene(Scene):
     )
 
     assert result.valid is True
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "np.lib.format.open_memmap('escape.npy')",
+        "np.array([1.0]).dump('escape.pkl')",
+    ],
+)
+def test_validator_rejects_numpy_namespace_and_ndarray_file_escapes(
+    tmp_path,
+    statement,
+):
+    code = f"""from manim import *
+import numpy as np
+class MainScene(Scene):
+    def construct(self):
+        {statement}
+        self.add(Dot())
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert {issue.code for issue in result.issues} & {
+        "DISALLOWED_NUMPY_CALL",
+        "EXTERNAL_IO",
+    }
+
+
+def test_validator_allows_explicit_numpy_computation_surface(tmp_path):
+    code = """from manim import *
+import numpy as np
+class MainScene(Scene):
+    def construct(self):
+        x = np.arange(3)
+        y = np.linspace(0.0, 1.0, 3)
+        base = np.array([x, y, np.zeros(3), np.ones(3)])
+        points = np.stack([base[0], np.sin(base[1]), np.exp(base[1])]).reshape((-1, 3))
+        jitter = np.random.normal(0.0, 0.1, 3) + np.random.uniform(0.0, 0.1, 3)
+        self.add(Dot(point=points[0] + jitter))
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert result.valid is True
+
+
+@pytest.mark.parametrize(
+    ("assignment", "call"),
+    [
+        ("maker = alias = SVGMobject", "self.add(alias('x.svg'))"),
+        (
+            "maker = manim.ImageMobject\n        alias = maker",
+            "self.add(alias('x.png'))",
+        ),
+        (
+            "maker = self.add_sound\n        alias = maker",
+            "alias('x.wav')",
+        ),
+    ],
+)
+def test_validator_rejects_asset_constructor_assignment_aliases(
+    tmp_path,
+    assignment,
+    call,
+):
+    code = f"""import manim
+from manim import *
+class MainScene(Scene):
+    def construct(self):
+        {assignment}
+        {call}
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace={
+            **RUNTIME_NAMESPACE,
+            "SVGMobject": object(),
+            "ImageMobject": object(),
+        },
+    )
+
+    assert "EXTERNAL_ASSET" in {issue.code for issue in result.issues}
+
+
+def test_validator_rejects_non_mapping_runtime_namespace_fail_closed(tmp_path):
+    code = """from manim import *
+class MainScene(Scene):
+    def construct(self):
+        dot = Dot()
+        self.add(VGroup(dot.get_left))
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace={"Scene", "Dot", "VGroup", "Mobject"},  # type: ignore[arg-type]
+    )
+
+    assert "INVALID_RUNTIME_NAMESPACE" in {issue.code for issue in result.issues}

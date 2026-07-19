@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
@@ -43,6 +43,23 @@ class FollowUpScheduler:
                 )
             )
         return children
+
+    async def enqueue_bound(
+        self,
+        parent_job_id: str,
+        spec: FollowUpTaskSpec,
+        *,
+        bind: Callable[[Job], Awaitable[bool]],
+    ) -> Job | None:
+        """Persist one child only if its external resource bind succeeds."""
+        validate_follow_up_spec(spec)
+        return await self.store.create_child_if_absent_with_bind(
+            parent_job_id=parent_job_id,
+            task_kind=spec.kind,
+            dedupe_key=spec.dedupe_key,
+            payload=spec.payload,
+            bind=bind,
+        )
 
 
 class VideoRenderFollowUpCapability(BaseCapability):
@@ -169,7 +186,7 @@ class VideoRepairFollowUpCapability(BaseCapability):
         settings=None,
         repair_agent=None,
         render_service=None,
-        runtime_namespace=None,
+        runtime_namespace: Mapping[str, object] | None = None,
         runtime_versions=None,
     ) -> None:
         super().__init__()
@@ -511,20 +528,17 @@ class VideoRepairFollowUpCapability(BaseCapability):
         self,
     ) -> tuple[
         dict[str, str],
-        Mapping[str, object] | Collection[str],
+        Mapping[str, object],
     ]:
         if self._runtime_versions is not None and self._runtime_namespace is not None:
-            namespace = (
-                dict(self._runtime_namespace)
-                if isinstance(self._runtime_namespace, Mapping)
-                else set(self._runtime_namespace)
-            )
-            return dict(self._runtime_versions), namespace
+            if not isinstance(self._runtime_namespace, Mapping):
+                raise TypeError("runtime_namespace must map names to runtime objects")
+            return dict(self._runtime_versions), dict(self._runtime_namespace)
         import platform
         try:
             import manim
         except Exception:
-            return {"python": platform.python_version(), "manim": "unavailable"}, set()
+            return {"python": platform.python_version(), "manim": "unavailable"}, {}
         return (
             {
                 "python": platform.python_version(),

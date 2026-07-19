@@ -298,3 +298,56 @@ Verification evidence:
 - Real installed-Manim pipeline: `1 passed` in 15.13 seconds.
 - Final combined post-lint run including all new cases: `190 passed,
   0 failed`; final real-Manim rerun: `1 passed` in 15.83 seconds.
+
+## Third review hardening follow-up
+
+The third review focused on namespace allowlisting and eliminating the final
+pre-bind claim window. Focused RED produced `9 failed`:
+
+- NumPy namespace escape calls (`numpy.lib.format.open_memmap`) and ndarray
+  serialization (`array.dump`) were accepted.
+- SVG, image, and audio callables could be assigned and invoked through simple
+  or chained aliases.
+- A set-only runtime namespace silently disabled runtime Mobject inspection.
+- A legacy top-level `render_error_code` remained secret-bearing and unbounded.
+- The two transactional insert/bind concurrency tests failed because the bound
+  enqueue primitive did not exist.
+
+NumPy calls rooted at `numpy` or an imported NumPy alias now use an explicit
+full-name computation allowlist (array construction, ranges, zeros/ones,
+stacking/reshape, numeric functions, linear-algebra norm, and selected safe
+random functions). Every other rooted NumPy call is rejected by default;
+ndarray `dump` and `tofile` remain explicitly forbidden file-capable methods.
+The representative native Manim/NumPy scene passed while both new escape cases
+were rejected.
+
+Asset validation now computes assignment aliases to a fixed point, including
+multi-target chained assignments, and rejects calls through aliases of
+`SVGMobject`, `ImageMobject`, and `add_sound`, whether referenced directly or
+through the `manim` module alias. Runtime namespaces are Mapping-only and carry
+actual runtime objects; direct validation fails closed with
+`INVALID_RUNTIME_NAMESPACE` for a set, injected capability callers now supply
+mappings, and unavailable-Manim fallback uses an empty mapping.
+
+The new-child retry path now uses `create_child_if_absent_with_bind`. JobStore
+holds one jobs DB `BEGIN IMMEDIATE` transaction across parent lookup, child
+insert/on-conflict selection, and the resource CAS callback. The child is
+therefore uncommitted and unclaimable until binding succeeds; false binding
+deletes it before commit and returns 409. Two independent JobStore connections
+prove a claim started after insertion blocks until callback release, then
+either observes the correctly bound child or no child. Existing active-child
+reuse continues through the prior atomic active-child guard. Lock order remains
+jobs→resources.
+
+Finally, legacy unstructured `render_error_code` is redacted and bounded on
+every public read with the same diagnostic sanitizer used for structured
+failures.
+
+Verification evidence:
+
+- New focused GREEN: `13 passed, 0 failed`.
+- Full candidate validator plus refreshed repair compatibility: `53 passed`.
+- Retry API compatibility after bound-enqueue race adaptation: `18 passed`.
+- Final combined prior-plus-new suite: `200 passed, 0 failed`.
+- Changed-file Ruff: `All checks passed!`.
+- Real installed-Manim pipeline: `1 passed` in 16.70 seconds.

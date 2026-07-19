@@ -199,11 +199,16 @@ def test_video_retry_completion_race_cannot_overwrite_terminal_resource(
         await packages.save(package, user_id="owner")
 
     asyncio.run(seed())
-    original_enqueue = FollowUpScheduler.enqueue
+    original_enqueue_bound = FollowUpScheduler.enqueue_bound
 
-    async def enqueue_then_complete(self, parent_job_id, specs):
-        children = await original_enqueue(self, parent_job_id, specs)
-        child = children[0]
+    async def enqueue_then_complete(self, parent_job_id, spec, *, bind):
+        child = await original_enqueue_bound(
+            self,
+            parent_job_id,
+            spec,
+            bind=bind,
+        )
+        assert child is not None
         terminal_resource = await packages.get_resource("race-video")
         assert terminal_resource is not None
         terminal_resource.format_specific.update(
@@ -230,9 +235,13 @@ def test_video_retry_completion_race_cannot_overwrite_terminal_resource(
                 '"C:\\Program Files\\Tutor Bot\\scene.py"'
             ),
         )
-        return children
+        return child
 
-    monkeypatch.setattr(FollowUpScheduler, "enqueue", enqueue_then_complete)
+    monkeypatch.setattr(
+        FollowUpScheduler,
+        "enqueue_bound",
+        enqueue_then_complete,
+    )
     runner = SimpleNamespace(store=jobs, resume_pending=AsyncMock(return_value=0))
     app = FastAPI()
     app.state.settings = SimpleNamespace(multi_user_enabled=True)

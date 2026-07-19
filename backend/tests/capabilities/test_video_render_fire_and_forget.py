@@ -841,7 +841,11 @@ async def test_video_repair_regenerates_twice_after_validation_then_renders_once
         package_store=store,
         repair_agent=agent,
         render_service=renderer,
-        runtime_namespace={"Scene", "Dot", "Create"},
+        runtime_namespace={
+            "Scene": object(),
+            "Dot": object(),
+            "Create": object(),
+        },
         runtime_versions={"python": "3.11", "manim": "0.20"},
     )
     result = await capability.run(
@@ -916,7 +920,7 @@ async def test_video_repair_failure_preserves_original_source_and_error_with_his
         package_store=store,
         repair_agent=_ScriptedRepairAgent([]),
         render_service=_FakeRenderService(success=True),
-        runtime_namespace={"Scene"},
+        runtime_namespace={"Scene": object()},
         runtime_versions={"python": "3.11"},
     )
     with pytest.raises(RuntimeError, match="Video repair failed"):
@@ -1009,7 +1013,10 @@ async def test_pending_video_repair_child_resumes_after_runner_refresh(
     monkeypatch.setattr(
         VideoRepairFollowUpCapability,
         "_runtime",
-        lambda self: ({"python": "3.11", "manim": "0.20"}, {"Scene", "Dot", "Create"}),
+        lambda self: (
+            {"python": "3.11", "manim": "0.20"},
+            {"Scene": object(), "Dot": object(), "Create": object()},
+        ),
     )
     module_patch = monkeypatch_for_module(mr_module, _FakeRenderService(success=True))
     runner = JobRunner(job_store=job_store, capability_registry=_EmptyCapabilities())  # type: ignore[arg-type]
@@ -1052,7 +1059,11 @@ async def test_video_repair_child_cannot_cross_owner_boundary(tmp_path) -> None:
         package_store=store,
         repair_agent=_ScriptedRepairAgent([REPAIR_GOOD_CODE]),
         render_service=_FakeRenderService(success=True),
-        runtime_namespace={"Scene", "Dot", "Create"},
+        runtime_namespace={
+            "Scene": object(),
+            "Dot": object(),
+            "Create": object(),
+        },
         runtime_versions={"python": "3.11"},
     )
 
@@ -1109,7 +1120,11 @@ async def test_video_repair_empty_publish_preserves_original_failure(tmp_path) -
         package_store=store,
         repair_agent=_ScriptedRepairAgent([REPAIR_GOOD_CODE]),
         render_service=_FakeRenderService(success=True, video_path=None),
-        runtime_namespace={"Scene", "Dot", "Create"},
+        runtime_namespace={
+            "Scene": object(),
+            "Dot": object(),
+            "Create": object(),
+        },
         runtime_versions={"python": "3.11"},
     )
     capability._render_service.render = _empty_publish_render  # type: ignore[method-assign]
