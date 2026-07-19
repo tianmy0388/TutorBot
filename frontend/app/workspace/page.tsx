@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   BookOpenCheck,
   ClipboardCheck,
@@ -24,6 +29,11 @@ import { CourseTaskWorkbench } from "@/components/workspace/CourseTaskWorkbench"
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useTutorStore } from "@/lib/store";
 import { refreshLearningState } from "@/lib/learning-state";
+import {
+  clampDetailWidth,
+  readDetailWidth,
+  writeDetailWidth,
+} from "@/lib/detail-pane-width";
 import { cn } from "@/lib/utils";
 
 type DetailPane = "status" | "path" | "resource" | "explanation" | "review";
@@ -49,6 +59,27 @@ export default function WorkspacePage() {
   const [taskCreationOpen, setTaskCreationOpen] = useState(false);
   const [detailPane, setDetailPane] = useState<DetailPane>("status");
   const [detailOpen, setDetailOpen] = useState(false);
+  const [detailWidth, setDetailWidth] = useState(520);
+  const [isWideLayout, setIsWideLayout] = useState(false);
+  const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+
+  // Load the persisted width once mounted (SSR-safe: readDetailWidth
+  // falls back to the default when window/localStorage is unavailable).
+  useEffect(() => {
+    setDetailWidth(readDetailWidth());
+  }, []);
+
+  // The drag handle only exists at xl+; below that the pane stays an
+  // absolute overlay with its existing fixed width (out of scope).
+  useEffect(() => {
+    // matchMedia is unavailable in some test/embedded environments.
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(min-width: 1280px)");
+    const update = () => setIsWideLayout(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
   const userSelectedPane = useRef(false);
   const restoreAttempted = useRef(false);
   const lastPackageId = useRef<string | null>(null);
@@ -129,6 +160,39 @@ export default function WorkspacePage() {
     setDetailOpen(true);
   };
 
+  const handleResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    resizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: detailWidth,
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture may be unavailable in older touch WebViews.
+    }
+  };
+
+  const handleResizeMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    // The pane is anchored to the right: dragging left widens it.
+    setDetailWidth(clampDetailWidth(drag.startWidth + (drag.startX - event.clientX)));
+  };
+
+  const handleResizeEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    resizeRef.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Ignore — capture may already be released.
+    }
+    writeDetailWidth(detailWidth);
+  };
+
   return (
     <div className="flex h-full overflow-hidden bg-bg-panel">
       <main className="flex min-w-0 flex-1 flex-col">
@@ -174,7 +238,21 @@ export default function WorkspacePage() {
           </section>
 
           {detailOpen && !showOverview && (
-            <aside className="absolute inset-y-0 right-0 z-30 flex w-[min(520px,96vw)] shrink-0 flex-col overflow-hidden border-l border-border bg-bg-panel xl:relative" aria-label="学习详情">
+            <aside
+              className="absolute inset-y-0 right-0 z-30 flex w-[min(520px,96vw)] shrink-0 flex-col overflow-hidden border-l border-border bg-bg-panel xl:relative"
+              style={isWideLayout ? { width: detailWidth } : undefined}
+              aria-label="学习详情"
+            >
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="调整详情面板宽度"
+                className="absolute inset-y-0 left-0 z-40 hidden w-1.5 cursor-col-resize xl:block"
+                onPointerDown={handleResizeStart}
+                onPointerMove={handleResizeMove}
+                onPointerUp={handleResizeEnd}
+                onPointerCancel={handleResizeEnd}
+              />
               <div className="flex min-h-14 shrink-0 items-center gap-1 overflow-x-auto border-b border-border px-2">
                 <DetailTab active={detailPane === "status"} onClick={() => choosePane("status")} icon={BookOpenCheck} label="学习状态" />
                 <DetailTab active={detailPane === "path"} onClick={() => choosePane("path")} icon={Map} label="下一步" badge={plannedPath ? "" : undefined} />
