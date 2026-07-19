@@ -212,7 +212,9 @@ async def test_init_migrates_an_existing_empty_database(tmp_path) -> None:
     assert {"exercise_drafts", "exercise_submissions"} <= tables
     assert {"user_id", "package_id", "resource_id", "question_id", "answer_json"} <= draft_columns
     assert {
+        "answer",
         "event_published",
+        "explanation",
         "grading_status",
         "linked_code_attempt_id",
         "answer_json",
@@ -270,6 +272,69 @@ async def test_two_store_instances_concurrently_migrate_legacy_grading_status(
             for row in connection.execute("PRAGMA table_info(exercise_submissions)")
         }
     assert "grading_status" in columns
+
+
+@pytest.mark.asyncio
+async def test_init_adds_feedback_columns_to_pre_feedback_submission_table(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "responses.db"
+    original = ExerciseResponseStore(db_path)
+    await original.init()
+    await original.save_submission(_submission("legacy-row"))
+    await original.close()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("ALTER TABLE exercise_submissions DROP COLUMN answer")
+        connection.execute(
+            "ALTER TABLE exercise_submissions DROP COLUMN explanation"
+        )
+
+    migrated = ExerciseResponseStore(db_path)
+    await migrated.init()
+    try:
+        persisted = await migrated.get_submission_for_user("legacy-row", USER)
+        assert persisted is not None
+        # Rows written before feedback capture degrade to no-feedback.
+        assert persisted.answer is None
+        assert persisted.explanation is None
+        assert persisted.correct is True
+        assert persisted.score == 1.0
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_feedback_fields_round_trip(tmp_path) -> None:
+    store = ExerciseResponseStore(tmp_path / "responses.db")
+    await store.init()
+    try:
+        saved = await store.save_submission(
+            ExerciseSubmission(
+                submission_id="feedback-row",
+                user_id=USER,
+                session_id="sess-general",
+                package_id=PACKAGE,
+                resource_id=RESOURCE,
+                question_id="q-fill",
+                question_type="fill_blank",
+                answer_json=["Hello World"],
+                answer=[["hello world"], "unused"],
+                explanation="A greeting.",
+                correct=True,
+                score=1.0,
+                concept_id="strings",
+                course="python",
+            )
+        )
+        persisted = await store.get_submission_for_user(saved.submission_id, USER)
+        assert persisted is not None
+        assert persisted.answer == [["hello world"], "unused"]
+        assert persisted.explanation == "A greeting."
+        state = await store.get_state(USER, PACKAGE, RESOURCE, "q-fill")
+        assert state.submissions[0].answer == [["hello world"], "unused"]
+        assert state.submissions[0].explanation == "A greeting."
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

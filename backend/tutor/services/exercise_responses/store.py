@@ -99,6 +99,8 @@ class ExerciseSubmissionRow(_Base):
     question_id = Column(String(64), nullable=False, index=True)
     question_type = Column(String(32), nullable=False)
     answer_json = Column(JSON, nullable=False)
+    answer = Column(JSON, nullable=True)
+    explanation = Column(String, nullable=True)
     grading_status = Column(
         String(32), nullable=False, default=ExerciseGradingStatus.AUTO_GRADED.value
     )
@@ -145,19 +147,31 @@ class ExerciseResponseStore:
             try:
                 await connection.run_sync(_Base.metadata.create_all)
                 columns = await self._submission_columns(connection)
-                if "grading_status" not in columns:
+                for name, ddl in (
+                    (
+                        "grading_status",
+                        "ALTER TABLE exercise_submissions ADD COLUMN "
+                        "grading_status VARCHAR(32) NOT NULL "
+                        "DEFAULT 'auto_graded'",
+                    ),
+                    (
+                        "answer",
+                        "ALTER TABLE exercise_submissions ADD COLUMN answer JSON",
+                    ),
+                    (
+                        "explanation",
+                        "ALTER TABLE exercise_submissions ADD COLUMN "
+                        "explanation VARCHAR",
+                    ),
+                ):
+                    if name in columns:
+                        continue
                     try:
-                        await connection.exec_driver_sql(
-                            "ALTER TABLE exercise_submissions ADD COLUMN "
-                            "grading_status VARCHAR(32) NOT NULL "
-                            "DEFAULT 'auto_graded'"
-                        )
+                        await connection.exec_driver_sql(ddl)
                     except OperationalError:
                         # A cooperating initializer is serialized by the write
                         # lock. Re-check also makes mixed-version startup safe.
-                        if "grading_status" not in await self._submission_columns(
-                            connection
-                        ):
+                        if name not in await self._submission_columns(connection):
                             raise
                 await connection.commit()
             except BaseException:
@@ -342,6 +356,8 @@ class ExerciseResponseStore:
                     question_id=submission.question_id,
                     question_type=submission.question_type.value,
                     answer_json=submission.answer_json,
+                    answer=submission.answer,
+                    explanation=submission.explanation,
                     grading_status=submission.grading_status.value,
                     correct=(
                         submission.correct if submission.correct is not None else False
@@ -480,6 +496,8 @@ class ExerciseResponseStore:
                 "question_id": row.question_id,
                 "question_type": row.question_type,
                 "answer_json": row.answer_json,
+                "answer": row.answer,
+                "explanation": row.explanation,
                 "grading_status": grading_status,
                 "correct": (
                     None

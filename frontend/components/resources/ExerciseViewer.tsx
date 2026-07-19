@@ -25,7 +25,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useTutorStore } from "@/lib/store";
 import { useExerciseResponses } from "@/hooks/useExerciseResponses";
-import type { CodeExerciseQuestion, PublicCodeSpec, Resource } from "@/lib/types";
+import type { CodeExerciseQuestion, ExerciseSubmission, PublicCodeSpec, Resource } from "@/lib/types";
 import { CodeExerciseEditor } from "./CodeExerciseEditor";
 
 interface ParsedQuestion {
@@ -291,6 +291,8 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
               isSub={isSub}
               correct={correct}
               submitting={responses.submitting[q.id] === true}
+              submitError={responses.submitErrors[q.id]}
+              submission={submission}
               answer={responses.drafts[q.id]}
               setAnswer={(v) => responses.setDraft(q.id, v)}
               submit={() => { void responses.submit(q.id); }}
@@ -372,6 +374,8 @@ function QuestionCard({
   isSub,
   correct,
   submitting,
+  submitError,
+  submission,
   answer,
   setAnswer,
   submit,
@@ -382,6 +386,8 @@ function QuestionCard({
   isSub: boolean;
   correct: boolean;
   submitting: boolean;
+  submitError?: string;
+  submission?: ExerciseSubmission;
   answer: any;
   setAnswer: (v: any) => void;
   submit: () => void;
@@ -420,7 +426,7 @@ function QuestionCard({
         <div className="space-y-2">
           {q.options.map((opt, index) => {
             const checked = answer === opt.label;
-            const isAnswer = String(q.answer) === opt.label;
+            const isAnswer = String(submission?.answer) === opt.label;
             return (
               <label
                 key={JSON.stringify([q.id, opt.label || "option", index])}
@@ -459,9 +465,10 @@ function QuestionCard({
           {q.options.map((opt, index) => {
             const current = Array.isArray(answer) ? answer : [];
             const checked = current.includes(opt.label);
-            const isAnswer = Array.isArray(q.answer)
-              ? (q.answer as string[]).includes(opt.label)
-              : String(q.answer) === opt.label;
+            const canonical = submission?.answer;
+            const isAnswer = Array.isArray(canonical)
+              ? canonical.includes(opt.label)
+              : String(canonical) === opt.label;
             return (
               <label
                 key={JSON.stringify([q.id, opt.label || "option", index])}
@@ -503,7 +510,7 @@ function QuestionCard({
         <div className="flex gap-2">
           {[true, false].map((v) => {
             const checked = answer === v;
-            const isAnswer = q.answer === v;
+            const isAnswer = submission?.answer === v;
             return (
               <button
                 key={String(v)}
@@ -539,6 +546,7 @@ function QuestionCard({
           question={q}
           answer={answer}
           isSub={isSub}
+          submission={submission}
           setAnswer={setAnswer}
         />
       )}
@@ -561,10 +569,13 @@ function QuestionCard({
             重做
           </button>
         )}
-        {isSub && q.explanation && (
+        {!isSub && submitError && (
+          <span className="text-xs text-red-400 leading-relaxed">{submitError}</span>
+        )}
+        {isSub && submission?.explanation && (
           <div className="text-xs text-fg-muted ml-2 flex-1 leading-relaxed">
             <span className="font-semibold text-brand-300">解析：</span>
-            {q.explanation}
+            {submission.explanation}
           </div>
         )}
       </div>
@@ -581,22 +592,35 @@ function FillBlankInput({
   question: q,
   answer,
   isSub,
+  submission,
   setAnswer,
 }: {
   question: ParsedQuestion;
   answer: string[];
   isSub: boolean;
+  submission?: ExerciseSubmission;
   setAnswer: (v: string[]) => void;
 }) {
   const segments = useMemo(() => _splitBlanks(q.question), [q.question]);
-  const expected = Array.isArray(q.answer) ? q.answer : [q.answer];
+  // Per-slot canonical answers come from the submission — the public resource
+  // projection strips them. Old submissions without one render neutrally.
+  const expected = useMemo<Array<string | string[]>>(() => {
+    const canonical = submission?.answer;
+    if (Array.isArray(canonical)) return canonical;
+    return canonical == null ? [] : [String(canonical)];
+  }, [submission]);
+  // The draft is cleared on submit, so post-submit slots echo the submitted
+  // values; pre-submit they follow the draft as before.
+  const displayed = isSub && Array.isArray(submission?.answer_json)
+    ? (submission.answer_json as string[])
+    : answer;
 
   if (segments.length === 1 && !segments[0].blankKey) {
     // No blank markers found — render a single input.
     return (
       <input
         type="text"
-        value={Array.isArray(answer) ? (answer[0] ?? "") : (answer ?? "")}
+        value={Array.isArray(displayed) ? (displayed[0] ?? "") : (displayed ?? "")}
         disabled={isSub}
         onChange={(e) => setAnswer([e.target.value])}
         className="w-full bg-bg-panel border border-fg/10 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-brand-500"
@@ -612,10 +636,12 @@ function FillBlankInput({
           return seg.text ? <span key={i}>{seg.text} </span> : null;
         }
         const blankIdx = parseInt(seg.blankKey.replace("blank_", ""), 10);
-        const userVal = (Array.isArray(answer) ? answer[blankIdx] : "") ?? "";
-        const exp = String(expected[blankIdx] ?? "");
-        const slotCorrect = isSub
-          ? _normalizeFillBlank(exp, String(userVal))
+        const userVal = (Array.isArray(displayed) ? displayed[blankIdx] : "") ?? "";
+        const entry = expected[blankIdx];
+        const variants = Array.isArray(entry) ? entry : entry == null ? [] : [entry];
+        const exp = variants.length ? String(variants[0]) : "";
+        const slotCorrect = isSub && variants.length
+          ? variants.some((variant) => _normalizeFillBlank(String(variant), String(userVal)))
           : null;
         return (
           <span key={seg.blankKey} className="inline-flex items-center gap-1 mx-0.5 align-baseline">
@@ -635,13 +661,15 @@ function FillBlankInput({
               <span
                 className={cn(
                   "px-2 py-0.5 rounded text-sm font-mono border",
-                  slotCorrect
+                  slotCorrect === null
+                    ? "border-fg/10"
+                    : slotCorrect
                     ? "bg-green-950/20 border-green-700/50 text-green-300"
                     : "bg-red-950/20 border-red-700/50 text-red-300",
                 )}
               >
                 {userVal || "(空)"}
-                {slotCorrect ? (
+                {slotCorrect === null ? null : slotCorrect ? (
                   <Check className="w-3 h-3 inline ml-1" />
                 ) : (
                   <X className="w-3 h-3 inline ml-1" />

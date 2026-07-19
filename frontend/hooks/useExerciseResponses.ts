@@ -60,6 +60,18 @@ function abortError(reason: unknown) {
     && (reason as { name?: string }).name === "AbortError";
 }
 
+function conflictError(reason: unknown) {
+  return typeof reason === "object" && reason !== null
+    && (reason as { status?: unknown }).status === 409;
+}
+
+function errorMessage(reason: unknown) {
+  const candidate = reason as { detail?: unknown; message?: unknown } | null;
+  if (typeof candidate?.detail === "string" && candidate.detail) return candidate.detail;
+  if (typeof candidate?.message === "string" && candidate.message) return candidate.message;
+  return String(reason);
+}
+
 function submissionId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -133,6 +145,7 @@ export function useExerciseResponses(
   const submissionRequestsRef = useRef(new Map<string, SubmissionRequest>());
   const submissionGenerationRef = useRef(new Map<string, number>());
   const [submitting, setSubmitting] = useState<Record<string, boolean>>({});
+  const [submitErrors, setSubmitErrors] = useState<Record<string, string>>({});
 
   const replaceEntries = useCallback((next: Record<string, ResponseEntry>) => {
     entriesRef.current = next;
@@ -184,6 +197,7 @@ export function useExerciseResponses(
     activeKeyRef.current = requestKey;
     replaceEntries({});
     setSubmitting({});
+    setSubmitErrors({});
     const loadVersions = new Map(versionsRef.current);
     if (!identity.packageId || !identity.userId || !identity.resourceId || !questionIds.length) {
       return () => { active = false; };
@@ -290,7 +304,14 @@ export function useExerciseResponses(
       });
       if (options.keepDraft && !newerDraft) queueDraft(questionId, answer);
       return saved;
-    }).catch(() => undefined).finally(() => {
+    }).catch((reason: unknown) => {
+      // Conflicts keep the silent idempotency behavior; any other failure is
+      // surfaced so a rejected submit never looks like a saved one.
+      if (conflictError(reason)) return undefined;
+      if (activeKeyRef.current !== responseIdentity) return undefined;
+      setSubmitErrors((current) => ({ ...current, [questionId]: errorMessage(reason) }));
+      return undefined;
+    }).finally(() => {
       request.promise = undefined;
       if (activeKeyRef.current === responseIdentity) {
         setSubmitting((current) => ({ ...current, [questionId]: false }));
@@ -299,6 +320,12 @@ export function useExerciseResponses(
     request.promise = promise;
     submissionRequestsRef.current.set(requestKey, request);
     setSubmitting((current) => ({ ...current, [questionId]: true }));
+    setSubmitErrors((current) => {
+      if (!(questionId in current)) return current;
+      const next = { ...current };
+      delete next[questionId];
+      return next;
+    });
     return promise;
   }, [identity, identityKey, queueDraft, replaceEntries]);
 
@@ -311,8 +338,9 @@ export function useExerciseResponses(
       entry.submission ? [[id, entry.submission]] : [],
     )) as Record<string, ExerciseSubmission>,
     submitting,
+    submitErrors,
     setDraft,
     submit,
     resetDraft,
-  }), [visible, submitting, setDraft, submit, resetDraft]);
+  }), [visible, submitting, submitErrors, setDraft, submit, resetDraft]);
 }

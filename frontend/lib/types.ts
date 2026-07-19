@@ -631,6 +631,11 @@ export interface ExerciseSubmission {
   question_id: string;
   question_type?: string;
   answer_json: ExerciseResponseAnswer;
+  /** Server-owned canonical answer captured at submit time (owner-private).
+   * Fill-blank multi-blank answers may nest per-slot accepted variants. */
+  answer?: string | boolean | Array<string | string[]> | null;
+  /** Server-owned explanation captured at submit time (owner-private). */
+  explanation?: string | null;
   grading_status: "auto_graded" | "manual_review";
   correct: boolean | null;
   score: number | null;

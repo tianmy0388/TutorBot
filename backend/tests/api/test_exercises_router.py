@@ -108,6 +108,7 @@ def _general_package(*, owner: str = "local-user") -> ResourcePackage:
                 {"label": "B", "text": "B"},
             ],
             "answer": "B",
+            "explanation": "B is the correct option.",
         },
         {
             "id": "q-multiple",
@@ -134,6 +135,14 @@ def _general_package(*, owner: str = "local-user") -> ResourcePackage:
             "knowledge_point": "strings",
             "question": "Greeting",
             "answer": "Hello World",
+        },
+        {
+            "id": "q-fill-multi",
+            "type": "fill_blank",
+            "knowledge_point": "geography",
+            "question": "The capital of France is ___ and of Germany is ___.",
+            "answer": [["paris", "parisian"], "berlin"],
+            "explanation": "Paris and Berlin are the capitals.",
         },
         {
             "id": "q-short",
@@ -765,8 +774,10 @@ async def test_general_draft_restores_without_event_and_submit_scores_server_sid
             assert body["correct"] is True
             assert body["score"] == 1.0
             assert body["user_id"] == "local-user"
-            assert "canonical" not in submitted.text
-            assert '"answer":"B"' not in submitted.text
+            # Submissions are owner-private: they carry the canonical answer
+            # and explanation so post-submit feedback survives a refresh.
+            assert body["answer"] == "B"
+            assert body["explanation"] == "B is the correct option."
 
             final_state = await client.get(
                 "/api/v1/exercises/pkg-general/resources/resource-general/responses",
@@ -774,7 +785,10 @@ async def test_general_draft_restores_without_event_and_submit_scores_server_sid
             )
             assert final_state.status_code == 200
             assert final_state.json()["draft"] is None
-            assert final_state.json()["submissions"][0]["submission_id"] == body["submission_id"]
+            restored = final_state.json()["submissions"][0]
+            assert restored["submission_id"] == body["submission_id"]
+            assert restored["answer"] == "B"
+            assert restored["explanation"] == "B is the correct option."
 
         events = await app.state.learning_workflow.event_store.query(
             "local-user", event_types=[EventType.EXERCISE_SCORED]
@@ -818,6 +832,184 @@ async def test_general_answer_types_are_normalized(
         assert response.status_code == 200
         assert response.json()["correct"] is True
         assert response.json()["score"] == 1.0
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer_json", "expected"),
+    [
+        ([" Hello World "], True),
+        (["hello world"], True),
+        (["goodbye"], False),
+        ([None], False),
+    ],
+)
+async def test_fill_blank_single_accepts_ui_array_submissions(
+    tmp_path, answer_json, expected
+) -> None:
+    """Single-blank arrays from the UI unwrap to the accepted-variants path."""
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-fill/submit",
+                json={
+                    "session_id": "sess-general",
+                    "answer_json": answer_json,
+                    "client_submission_id": f"fill-single-{json.dumps(answer_json)}",
+                },
+            )
+        assert response.status_code == 200
+        assert response.json()["correct"] is expected
+        assert response.json()["score"] == (1.0 if expected else 0.0)
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer_json", "expected"),
+    [
+        (["Paris", "Berlin"], True),
+        (["parisian", " BERLIN "], True),
+        (["paris", None], False),
+        (["lyon", "berlin"], False),
+    ],
+)
+async def test_fill_blank_multi_arrays_score_positionally(
+    tmp_path, answer_json, expected
+) -> None:
+    """Multi-blank arrays score per position against per-slot variants."""
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-fill-multi/submit",
+                json={
+                    "session_id": "sess-general",
+                    "answer_json": answer_json,
+                    "client_submission_id": f"fill-multi-{json.dumps(answer_json)}",
+                },
+            )
+        assert response.status_code == 200
+        assert response.json()["correct"] is expected
+        assert response.json()["score"] == (1.0 if expected else 0.0)
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer_json",
+    [
+        ["paris", 42],
+        ["paris", ["berlin"]],
+        ["paris", {"text": "berlin"}],
+        ["paris", "berlin", "extra"],
+    ],
+)
+async def test_fill_blank_malformed_array_submissions_have_typed_errors(
+    tmp_path, answer_json
+) -> None:
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-fill-multi/submit",
+                json={"session_id": "sess", "answer_json": answer_json},
+            )
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "MALFORMED_ANSWER"
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_fill_blank_array_retry_is_idempotent_and_conflicts_on_change(
+    tmp_path,
+) -> None:
+    app = await _ready_app(tmp_path)
+    payload = {
+        "session_id": "sess-general",
+        "answer_json": [" Paris ", "Berlin"],
+        "client_submission_id": "fill-multi-retry",
+    }
+    url = "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-fill-multi/submit"
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            first = await client.post(url, json=payload)
+            retry = await client.post(url, json=payload)
+            conflict = await client.post(
+                url, json={**payload, "answer_json": ["paris", "bonn"]}
+            )
+        assert first.status_code == retry.status_code == 200
+        assert first.json()["submission_id"] == retry.json()["submission_id"]
+        assert first.json()["correct"] is True
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"]["code"] == "SUBMISSION_ID_CONFLICT"
+        events = await app.state.learning_workflow.event_store.query(
+            "local-user", event_types=[EventType.EXERCISE_SCORED]
+        )
+        assert len(events) == 1
+    finally:
+        await _close_app(app)
+
+
+@pytest.mark.asyncio
+async def test_submission_carries_feedback_and_public_resource_stays_stripped(
+    tmp_path,
+) -> None:
+    app = await _ready_app(tmp_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            submitted = await client.post(
+                "/api/v1/exercises/pkg-general/resources/resource-general/questions/q-fill-multi/submit",
+                json={
+                    "session_id": "sess-general",
+                    "answer_json": ["Paris", "Berlin"],
+                    "client_submission_id": "feedback-fill-multi",
+                },
+            )
+            assert submitted.status_code == 200
+            body = submitted.json()
+            assert body["answer"] == [["paris", "parisian"], "berlin"]
+            assert body["explanation"] == "Paris and Berlin are the capitals."
+
+            state = await client.get(
+                "/api/v1/exercises/pkg-general/resources/resource-general/responses",
+                params={"question_id": "q-fill-multi"},
+            )
+            assert state.status_code == 200
+            restored = state.json()["submissions"][0]
+            assert restored["answer"] == body["answer"]
+            assert restored["explanation"] == body["explanation"]
+
+            public = await client.get(
+                "/api/v1/resources/packages/local-user/pkg-general"
+            )
+            assert public.status_code == 200
+            questions = {
+                item["id"]: item
+                for item in public.json()["resources"][0]["format_specific"][
+                    "questions"
+                ]
+            }
+            assert "answer" not in questions["q-fill-multi"]
+            assert "accepted_answers" not in questions["q-fill-multi"]
+            assert "explanation" not in questions["q-fill-multi"]
+            assert "parisian" not in public.text
     finally:
         await _close_app(app)
 
@@ -871,7 +1063,7 @@ async def test_general_wrong_retry_conflict_and_strict_request(tmp_path) -> None
         ("q-multiple", "A,C"),
         ("q-multiple", ["A", " a ", "C"]),
         ("q-boolean", "maybe"),
-        ("q-fill", ["hello"]),
+        ("q-fill", ["hello", 42]),
         ("q-short", {"text": "dynamic programming"}),
     ],
 )

@@ -203,6 +203,42 @@ def _normalized_boolean(value: Any) -> bool:
     raise _malformed_answer()
 
 
+def _normalized_blank_text(value: Any) -> str:
+    """Normalize one fill-blank element; unfilled slots are simply wrong."""
+    if value is None:
+        return ""
+    return _normalized_text(value)
+
+
+def _fill_blank_variants(entry: Any) -> set[str]:
+    variants = entry if isinstance(entry, list) else [entry]
+    return {_normalized_text(variant) for variant in variants}
+
+
+def _score_fill_blank(submitted: Any, canonical: Any) -> bool:
+    if isinstance(submitted, list):
+        if len(submitted) == 1:
+            # Single-blank arrays from the UI unwrap to the string path.
+            submitted = "" if submitted[0] is None else submitted[0]
+        elif not submitted:
+            raise _malformed_answer()
+        else:
+            # Multi-blank: positional scoring against an equal-length
+            # canonical list; each entry is one accepted string or a list
+            # of accepted variant strings.
+            if not isinstance(canonical, list) or len(canonical) != len(submitted):
+                raise _malformed_answer()
+            return all(
+                _normalized_blank_text(item) in _fill_blank_variants(entry)
+                for item, entry in zip(submitted, canonical, strict=True)
+            )
+    submitted_text = _normalized_text(submitted)
+    accepted = canonical if isinstance(canonical, list) else [canonical]
+    if not accepted:
+        raise _malformed_answer()
+    return submitted_text in {_normalized_text(item) for item in accepted}
+
+
 def _score_answer(question_type: ExerciseQuestionType, submitted: Any, canonical: Any) -> tuple[bool, float]:
     if question_type == ExerciseQuestionType.SINGLE_CHOICE:
         correct = _normalized_text(submitted) == _normalized_text(canonical)
@@ -219,10 +255,9 @@ def _score_answer(question_type: ExerciseQuestionType, submitted: Any, canonical
         correct = submitted_set == canonical_set
     elif question_type == ExerciseQuestionType.TRUE_FALSE:
         correct = _normalized_boolean(submitted) == _normalized_boolean(canonical)
-    elif question_type in {
-        ExerciseQuestionType.FILL_BLANK,
-        ExerciseQuestionType.SHORT_ANSWER,
-    }:
+    elif question_type == ExerciseQuestionType.FILL_BLANK:
+        correct = _score_fill_blank(submitted, canonical)
+    elif question_type == ExerciseQuestionType.SHORT_ANSWER:
         submitted_text = _normalized_text(submitted)
         accepted = canonical if isinstance(canonical, list) else [canonical]
         if not accepted:
@@ -456,6 +491,9 @@ async def submit_exercise_response(
                 question_type, body.answer_json, canonical
             )
 
+    explanation = question.get("explanation")
+    if not isinstance(explanation, str) or not explanation:
+        explanation = None
     submission = ExerciseSubmission(
         client_submission_id=body.client_submission_id,
         user_id=user_id,
@@ -465,6 +503,8 @@ async def submit_exercise_response(
         question_id=question_id,
         question_type=question_type,
         answer_json=answer_json,
+        answer=question.get("answer"),
+        explanation=explanation,
         grading_status=grading_status,
         correct=correct,
         score=score,

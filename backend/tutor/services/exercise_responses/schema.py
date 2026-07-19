@@ -64,6 +64,19 @@ def exercise_submission_request_identity(
         normalized_answer = tuple(sorted(normalized_items))
     elif kind == ExerciseQuestionType.TRUE_FALSE:
         normalized_answer = _normalized_request_boolean(answer_json)
+    elif kind == ExerciseQuestionType.FILL_BLANK and isinstance(answer_json, list):
+        # The UI drafts fill-blank answers as per-blank arrays: a single-blank
+        # array unwraps to the bare-string identity, and null holes (sparse
+        # unfilled slots) normalize to empty text.
+        if len(answer_json) == 1:
+            normalized_answer = _normalized_request_text(
+                "" if answer_json[0] is None else answer_json[0]
+            )
+        else:
+            normalized_answer = tuple(
+                _normalized_request_text("" if item is None else item)
+                for item in answer_json
+            )
     else:
         normalized_answer = _normalized_request_text(answer_json)
     return (
@@ -108,6 +121,10 @@ class ExerciseSubmission(BaseModel):
     question_id: str = Field(min_length=1, max_length=64)
     question_type: ExerciseQuestionType
     answer_json: Any
+    # Server-owned feedback captured at submit time so restored submissions
+    # can render post-submit UI while the public projection stays stripped.
+    answer: Any = None
+    explanation: str | None = None
     grading_status: ExerciseGradingStatus = ExerciseGradingStatus.AUTO_GRADED
     correct: bool | None
     score: float | None = Field(ge=0.0, le=1.0, allow_inf_nan=False)

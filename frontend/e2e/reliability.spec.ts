@@ -85,7 +85,6 @@ const FIXTURE_RESOURCES = [
           knowledge_point: "Python functions",
           question: "实现 add(a, b)，返回两数之和。",
           options: [],
-          explanation: "返回 a + b。",
           code_spec: {
             language: "python",
             starter_code: "def add(a, b):\n    pass\n",
@@ -115,7 +114,6 @@ const FIXTURE_RESOURCES = [
             { label: "C", text: "三个独立的注意力头" },
             { label: "D", text: "编码器与解码器" },
           ],
-          explanation: "Q、K、V 都是同一输入经过不同线性变换得到的。",
         },
       ],
     },
