@@ -146,3 +146,103 @@ async def test_extractor_failure_degrades_to_noop(isolated_store):
     )
     assert ingested is False
     assert follow_ups == ()
+
+
+@pytest.mark.asyncio
+async def test_blank_precreated_profile_still_cold_starts_on_goal(isolated_store):
+    # Mirrors the answering capabilities: they call ProfileBuilder.get() ->
+    # store.get_or_create() before ingest runs, persisting a blank v1 profile.
+    # A goal-only message from such a user must still trigger extraction.
+    await isolated_store.get_or_create("user-1")
+    extractor = FeatureExtractorAgent(
+        llm=_mock_llm(
+            {
+                "motivation": {
+                    "goal_type": "curiosity",
+                    "goal_description": "反向传播",
+                },
+                "confidence": 0.8,
+            }
+        )
+    )
+
+    ingested, follow_ups = await ingest_dialogue_signal(
+        _context("我想学反向传播"),
+        StreamBus(),
+        builder=ProfileBuilder(store=isolated_store),
+        extractor=extractor,
+    )
+
+    assert ingested is True
+    profile = await isolated_store.get("user-1")
+    assert profile is not None
+    assert profile.motivation.goal_description == "反向传播"
+
+
+@pytest.mark.asyncio
+async def test_blank_precreated_profile_plain_question_still_skips(isolated_store):
+    await isolated_store.get_or_create("user-1")
+    extractor = FeatureExtractorAgent(llm=_mock_llm({"major": "不应出现"}))
+    ingested, follow_ups = await ingest_dialogue_signal(
+        _context("什么是反向传播？"),
+        StreamBus(),
+        builder=ProfileBuilder(store=isolated_store),
+        extractor=extractor,
+    )
+    assert ingested is False
+    assert follow_ups == ()
+    profile = await isolated_store.get("user-1")
+    assert profile is not None
+    assert profile.version == 1
+    assert not profile.metadata
+
+
+@pytest.mark.asyncio
+async def test_nonblank_profile_goal_only_message_still_skips(isolated_store):
+    # Build a NON-blank profile first (metadata major set, version >= 2) by
+    # ingesting a self-intro signal.
+    builder = ProfileBuilder(store=isolated_store)
+    intro_extractor = FeatureExtractorAgent(
+        llm=_mock_llm(
+            {
+                "major": "计算机科学",
+                "motivation": {"goal_type": "exam_prep", "goal_description": "期末"},
+                "confidence": 0.9,
+            }
+        )
+    )
+    ingested, _ = await ingest_dialogue_signal(
+        _context("我是CS研一，准备期末考试"),
+        StreamBus(),
+        builder=builder,
+        extractor=intro_extractor,
+    )
+    assert ingested is True
+    profile = await isolated_store.get("user-1")
+    assert profile is not None
+    assert profile.version >= 2
+    assert profile.metadata.get("major") == "计算机科学"
+
+    # A goal-only follow-up must NOT re-trigger extraction for an
+    # established profile (existing behavior preserved).
+    goal_extractor = FeatureExtractorAgent(
+        llm=_mock_llm(
+            {
+                "motivation": {
+                    "goal_type": "curiosity",
+                    "goal_description": "反向传播",
+                }
+            }
+        )
+    )
+    ingested, follow_ups = await ingest_dialogue_signal(
+        _context("我想学反向传播"),
+        StreamBus(),
+        builder=builder,
+        extractor=goal_extractor,
+    )
+    assert ingested is False
+    assert follow_ups == ()
+    profile = await isolated_store.get("user-1")
+    assert profile is not None
+    assert profile.motivation.goal_description == "期末"

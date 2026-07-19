@@ -62,9 +62,17 @@ async def _ingest(
     store = get_profile_store()
     builder = builder or ProfileBuilder(store=store)
     existing = await store.get(context.user_id)
-    if not detect_profile_signal(
-        context.user_message, has_profile=existing is not None
-    ):
+    # The answering capabilities pre-create a blank profile before ingest
+    # runs; a just-auto-created blank profile counts as no profile so the
+    # cold-start trigger (goal-only / history-only message) still fires.
+    blank = (
+        existing is not None
+        and existing.version <= 1
+        and not existing.metadata
+        and not existing.knowledge_map.scores
+    )
+    has_profile = existing is not None and not blank
+    if not detect_profile_signal(context.user_message, has_profile=has_profile):
         return False, ()
 
     extractor = extractor or FeatureExtractorAgent()
