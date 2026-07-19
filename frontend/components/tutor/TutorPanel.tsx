@@ -18,6 +18,10 @@
  */
 
 import { useState } from "react";
+import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import {
   MessageCircle,
   Lightbulb,
@@ -94,7 +98,10 @@ export function TutorPanel() {
   const answer = useTutorStore((s) => s.latestTutorAnswer);
   const enrichments = useTutorStore((s) => s.latestEnrichments);
 
-  if (!understanding || !answer) {
+  // Answer-only rendering: after a refresh the panel hydrates from the
+  // persisted tutor_answer message, which carries no understanding
+  // (2026-07-19 plan).
+  if (!answer) {
     return <EmptyTutor />;
   }
 
@@ -106,8 +113,8 @@ export function TutorPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-        {/* Question understanding meta */}
-        <UnderstandingMeta understanding={understanding} />
+        {/* Question understanding meta (live sessions only) */}
+        {understanding && <UnderstandingMeta understanding={understanding} />}
 
         {/* 4-layer answer */}
         <AnswerLayer
@@ -138,6 +145,23 @@ export function TutorPanel() {
           tone="green"
           content={answer.example}
         />
+
+        {/* Full markdown answer with LaTeX (same pipeline as ChatMessages) */}
+        {answer.full_markdown && (
+          <div className="py-3 border-t border-border">
+            <div className="text-[10px] uppercase tracking-wider text-fg-muted font-semibold mb-2">
+              完整讲解
+            </div>
+            <div className="prose-tutor text-[12px] leading-7">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeKatex]}
+              >
+                {answer.full_markdown}
+              </ReactMarkdown>
+            </div>
+          </div>
+        )}
 
         {/* Follow-up + related */}
         {(answer.follow_up_suggestion ||

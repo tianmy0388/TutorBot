@@ -888,6 +888,11 @@ export const useTutorStore = create<TutorState>()(
         webSearchConfirmedBySession.set(sessionId, serverWebSearch);
         webSearchDesiredBySession.set(sessionId, serverWebSearch);
       }
+      // 2026-07-19 plan: rebuild the TutorPanel state from the newest
+      // persisted tutor_answer assistant message (backend writes it at
+      // terminal time). Understanding/enrichments are not persisted;
+      // the panel renders answer-only after a refresh.
+      const hydratedTutorAnswer = latestTutorAnswerFromMessages(messages);
       set({
         sessionId,
         sessionOrigin: "server",
@@ -915,7 +920,7 @@ export const useTutorStore = create<TutorState>()(
         latestAssessment: null,
         latestStrategy: null,
         latestUnderstanding: null,
-        latestTutorAnswer: null,
+        latestTutorAnswer: hydratedTutorAnswer,
         latestEnrichments: [],
       });
     },
@@ -1015,6 +1020,27 @@ export const useTutorStore = create<TutorState>()(
 );
 
 // helpers
+
+/** Newest persisted tutor answer, or null. Malformed entries are skipped. */
+function latestTutorAnswerFromMessages(
+  messages: ChatMessage[],
+): TutoringAnswer | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const metadata = messages[index].metadata as
+      | Record<string, unknown>
+      | undefined;
+    if (metadata?.kind !== "tutor_answer") continue;
+    const answer = metadata.answer;
+    if (
+      answer &&
+      typeof answer === "object" &&
+      typeof (answer as { tldr?: unknown }).tldr === "string"
+    ) {
+      return answer as TutoringAnswer;
+    }
+  }
+  return null;
+}
 
 function hydrateConversationMessages(messages: Array<{
   id: string;
