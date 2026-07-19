@@ -246,3 +246,87 @@ async def test_nonblank_profile_goal_only_message_still_skips(isolated_store):
     profile = await isolated_store.get("user-1")
     assert profile is not None
     assert profile.motivation.goal_description == "期末"
+
+
+async def _precreated_profile_with_metadata(isolated_store, metadata: dict):
+    """Mimic resource_generation path_integration: v1 profile + replace()."""
+    profile = await isolated_store.get_or_create("user-1")
+    profile.metadata.update(metadata)
+    await isolated_store.replace(profile, source="resource_capability")
+    return profile
+
+
+@pytest.mark.asyncio
+async def test_capability_bookkeeping_metadata_still_cold_starts(isolated_store):
+    # path_integration writes only auto-bookkeeping keys; the profile still
+    # counts as blank so a first-turn goal-only message triggers extraction.
+    await _precreated_profile_with_metadata(
+        isolated_store,
+        {
+            "resource_history": [{"package_id": "pkg-1", "topic": "t"}],
+            "last_package_id": "pkg-1",
+            "last_topic": "t",
+        },
+    )
+    extractor = FeatureExtractorAgent(
+        llm=_mock_llm(
+            {
+                "motivation": {
+                    "goal_type": "curiosity",
+                    "goal_description": "反向传播",
+                },
+                "confidence": 0.8,
+            }
+        )
+    )
+
+    ingested, follow_ups = await ingest_dialogue_signal(
+        _context("我想学反向传播"),
+        StreamBus(),
+        builder=ProfileBuilder(store=isolated_store),
+        extractor=extractor,
+    )
+
+    assert ingested is True
+    profile = await isolated_store.get("user-1")
+    assert profile is not None
+    assert profile.motivation.goal_description == "反向传播"
+
+
+@pytest.mark.asyncio
+async def test_user_metadata_beside_bookkeeping_blocks_cold_start(isolated_store):
+    # Auto keys plus one real user key (major) = established profile, even at
+    # version 1: a goal-only message must not re-enter cold-start extraction.
+    await _precreated_profile_with_metadata(
+        isolated_store,
+        {
+            "resource_history": [{"package_id": "pkg-1", "topic": "t"}],
+            "last_package_id": "pkg-1",
+            "last_topic": "t",
+            "major": "计算机科学",
+        },
+    )
+    extractor = FeatureExtractorAgent(
+        llm=_mock_llm(
+            {
+                "motivation": {
+                    "goal_type": "curiosity",
+                    "goal_description": "反向传播",
+                }
+            }
+        )
+    )
+
+    ingested, follow_ups = await ingest_dialogue_signal(
+        _context("我想学反向传播"),
+        StreamBus(),
+        builder=ProfileBuilder(store=isolated_store),
+        extractor=extractor,
+    )
+
+    assert ingested is False
+    assert follow_ups == ()
+    profile = await isolated_store.get("user-1")
+    assert profile is not None
+    assert profile.motivation.goal_description == ""
+    assert profile.metadata.get("major") == "计算机科学"

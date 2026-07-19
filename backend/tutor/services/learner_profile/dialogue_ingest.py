@@ -27,6 +27,12 @@ from tutor.services.learner_profile.store import get_profile_store
 
 INGEST_TIMEOUT_SECONDS = 20.0
 
+# Bookkeeping keys the capabilities write into profile.metadata themselves
+# (resource_generation path_integration); they must not count as user signal.
+_AUTO_METADATA_KEYS = frozenset(
+    {"resource_history", "last_package_id", "last_topic"}
+)
+
 
 async def ingest_dialogue_signal(
     context: UnifiedContext,
@@ -65,10 +71,21 @@ async def _ingest(
     # The answering capabilities pre-create a blank profile before ingest
     # runs; a just-auto-created blank profile counts as no profile so the
     # cold-start trigger (goal-only / history-only message) still fires.
+    # Capability bookkeeping (resource_generation path_integration writes
+    # resource_history / last_package_id / last_topic) is excluded.
+    user_metadata = (
+        {
+            key: value
+            for key, value in existing.metadata.items()
+            if key not in _AUTO_METADATA_KEYS
+        }
+        if existing is not None
+        else {}
+    )
     blank = (
         existing is not None
         and existing.version <= 1
-        and not existing.metadata
+        and not user_metadata
         and not existing.knowledge_map.scores
     )
     has_profile = existing is not None and not blank
