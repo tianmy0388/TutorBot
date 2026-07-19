@@ -97,6 +97,94 @@ def _public_artifact(artifact: ArtifactRef) -> ArtifactResult:
     )
 
 
+def _tutor_answer_payload(
+    capability_result: CapabilityResult | None,
+) -> dict[str, Any] | None:
+    """Extract the full tutoring answer for ``metadata.answer``, if present."""
+    if capability_result is None:
+        return None
+    payload = capability_result.payload or {}
+    answer = payload.get("answer")
+    if not isinstance(answer, dict) or not answer.get("tldr"):
+        return None
+    projected = redact_sensitive(answer)
+    return projected if isinstance(projected, dict) else None
+
+
+def _workflow_timeline_metadata(
+    job: Job,
+    *,
+    contract: JobResultContract,
+    finished_at: datetime,
+    started_at: datetime | None,
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the ``workflow_timeline`` message metadata.
+
+    The shape mirrors ``frontend/lib/workflow-snapshot.ts`` so the same
+    component renders live-synthesised and persisted messages identically.
+    Stage pairing mirrors the frontend reducer: ``stage_start`` pushes,
+    ``stage_end`` pops the most recent match; unpaired stages are
+    ``incomplete``.
+    """
+    order: list[str] = []
+    open_stages: list[str] = []
+    progress_messages: list[str] = []
+    for event in events:
+        event_type = event.get("type")
+        stage = event.get("stage")
+        if event_type == "stage_start" and isinstance(stage, str) and stage:
+            if stage not in order:
+                order.append(stage)
+            open_stages.append(stage)
+        elif event_type == "stage_end" and isinstance(stage, str) and stage:
+            for index in range(len(open_stages) - 1, -1, -1):
+                if open_stages[index] == stage:
+                    del open_stages[index]
+                    break
+        elif event_type == "progress":
+            metadata = event.get("metadata") or {}
+            text = ""
+            if isinstance(metadata, dict):
+                candidate = metadata.get("message")
+                if isinstance(candidate, str):
+                    text = candidate
+            text = text or str(event.get("content") or "")
+            if text.strip():
+                progress_messages.append(text)
+
+    stages = [
+        {
+            "name": name,
+            "status": "incomplete" if name in open_stages else "completed",
+        }
+        for name in order
+    ]
+    artifacts = contract.artifacts or []
+    succeeded = sum(1 for artifact in artifacts if artifact.status == "succeeded")
+    duration_ms = None
+    if started_at is not None:
+        # SQLAlchemy's SQLite DateTime columns drop tzinfo on the DB
+        # round-trip; every runner timestamp is UTC, so a naive value
+        # hydrated from the store is UTC as well.
+        start = (
+            started_at if started_at.tzinfo else started_at.replace(tzinfo=UTC)
+        )
+        end = (
+            finished_at if finished_at.tzinfo else finished_at.replace(tzinfo=UTC)
+        )
+        duration_ms = max(0, int((end - start).total_seconds() * 1000))
+    return {
+        "kind": "workflow_timeline",
+        "job_id": job.job_id,
+        "client_message_id": f"workflow:{job.job_id}",
+        "workflow": {"status": contract.status.value, "stages": stages},
+        "duration_ms": duration_ms,
+        "resources": {"total": len(artifacts), "succeeded": succeeded},
+        "progress_excerpt": progress_messages[-50:],
+    }
+
+
 class JobRunner:
     """Async background-task runner for capabilities.
 
@@ -963,6 +1051,20 @@ class JobRunner:
             if contract.error is not None
             else None
         )
+        # Persist the terminal chat messages *before* the terminal status
+        # becomes visible in the store: any observer that sees the job as
+        # terminal (REST poll, hydration, tests) must already find the
+        # workflow/assistant messages in the conversation. The write is
+        # best-effort and idempotent, so a crash between here and
+        # ``set_terminal`` is healed by the replay re-running this path.
+        await self._persist_terminal_messages(
+            job,
+            contract=contract,
+            capability_result=capability_result,
+            finished_at=finished_at,
+            started_at=current.started_at,
+            events=list(current.events or []),
+        )
         persisted = await self.store.set_terminal(
             job.job_id,
             status=job_status,
@@ -986,6 +1088,96 @@ class JobRunner:
         for event in terminal_bundle:
             await self._broadcast(job.job_id, event)
         return True
+
+    async def _persist_terminal_messages(
+        self,
+        job: Job,
+        *,
+        contract: JobResultContract,
+        capability_result: CapabilityResult | None,
+        finished_at: datetime,
+        started_at: datetime | None,
+        events: list[dict[str, Any]],
+    ) -> None:
+        """Best-effort write of the terminal chat messages to the conversation.
+
+        Appends a ``workflow_timeline`` message and exactly one assistant
+        message per job. Tutoring results carry ``metadata.kind ==
+        "tutor_answer"`` plus the full answer object — no second message
+        is written for them. Idempotent per ``job_id`` (dedupes against
+        both its own writes and the legacy browser POST shape). Any
+        failure is logged and swallowed: the job outcome must never
+        depend on this write. Jobs without a persisted conversation row
+        (e.g. CLI runs whose ``session_id`` was auto-minted by
+        :meth:`submit`) and child jobs write nothing.
+        """
+        try:
+            if not job.session_id or job.parent_job_id:
+                return
+            from tutor.services.conversations import get_conversation_store
+            from tutor.services.conversations.schema import Message
+
+            conv_store = get_conversation_store()
+            if await conv_store.get(job.session_id) is None:
+                return
+            existing = await conv_store.list_messages(job.session_id)
+
+            has_workflow = any(
+                (message.metadata or {}).get("kind") == "workflow_timeline"
+                and (message.metadata or {}).get("job_id") == job.job_id
+                for message in existing
+            )
+            if not has_workflow:
+                await conv_store.append_message(
+                    job.session_id,
+                    Message(
+                        role="assistant",
+                        content="",
+                        job_id=job.job_id,
+                        capability=job.capability,
+                        metadata=_workflow_timeline_metadata(
+                            job,
+                            contract=contract,
+                            finished_at=finished_at,
+                            started_at=started_at,
+                            events=events,
+                        ),
+                    ),
+                )
+
+            terminal_client_id = f"terminal:{job.job_id}"
+            has_assistant = any(
+                message.role == "assistant"
+                and (message.metadata or {}).get("client_message_id")
+                == terminal_client_id
+                for message in existing
+            )
+            if has_assistant or not contract.assistant_message:
+                return
+            metadata: dict[str, Any] = {
+                "job_id": job.job_id,
+                "capability": job.capability,
+                "client_message_id": terminal_client_id,
+            }
+            answer = _tutor_answer_payload(capability_result)
+            if answer is not None:
+                metadata["kind"] = "tutor_answer"
+                metadata["answer"] = answer
+            await conv_store.append_message(
+                job.session_id,
+                Message(
+                    role="assistant",
+                    content=contract.assistant_message,
+                    job_id=job.job_id,
+                    capability=job.capability,
+                    metadata=metadata,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "JobRunner terminal conversation persistence failed job={job_id}",
+                job_id=job.job_id[:12],
+            )
 
     async def _settle_child_for_parent(
         self,
