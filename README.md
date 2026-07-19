@@ -150,9 +150,8 @@ Playwright 说明：
 - MiniMax MCP 验收需要 `TUTOR_E2E_MINIMAX_SEARCH=1` 且 MiniMax MCP 服务可达：
 
 ```powershell
-npm run test:e2e -- --grep "MiniMax MCP|completed workflow|exercise draft|intelligent video repair"
+npm run test:e2e -- --grep "MiniMax MCP|completed workflow|exercise draft|intelligent video repair|Mermaid fallback|text-only"
 ```
-
 
 ### 本地历史数据迁移与恢复
 
