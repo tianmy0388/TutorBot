@@ -8,6 +8,7 @@ import { BookMarked, BookOpenText, Files, Home, Moon, Settings, Sun } from "luci
 import { Logo } from "@/components/brand/Logo";
 import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { RecentTasks } from "./RecentTasks";
 
 interface NavItem {
   href: string;
@@ -49,6 +50,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Files className="h-[18px] w-[18px]" />
           最近生成
         </Link>
+        <RecentTasks />
 
         <div className="mt-auto space-y-1 border-t border-border pt-4">
           <button

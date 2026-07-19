@@ -7,6 +7,7 @@ const setTheme = vi.fn();
 
 vi.mock("next/navigation", () => ({
   usePathname: () => pathname,
+  useRouter: () => ({ push: vi.fn() }),
 }));
 
 vi.mock("@/lib/store", () => ({
