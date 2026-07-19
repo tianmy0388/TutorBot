@@ -931,6 +931,12 @@ function isEqualRevisionVideoAdvance(
   const currentRepairJob = stringField(current.repair_job_id);
   const incomingRepairJob = stringField(incoming.repair_job_id);
   if (currentRepairJob || incomingRepairJob) {
+    if (!currentRepairJob && incomingRepairJob) {
+      return (
+        current.render_status === "failed" &&
+        ["pending", "running"].includes(stringField(incoming.repair_status))
+      );
+    }
     if (!currentRepairJob || !incomingRepairJob) return false;
     if (currentRepairJob === incomingRepairJob) {
       return sameJobStatusAdvances(
@@ -968,9 +974,7 @@ function sameJobStatusAdvances(
 ): boolean {
   const currentTerminal = terminalStatuses.includes(currentStatus);
   const incomingTerminal = terminalStatuses.includes(incomingStatus);
-  if (currentTerminal) {
-    return incomingTerminal && incomingStatus === currentStatus;
-  }
+  if (currentTerminal) return false;
   if (incomingTerminal) return true;
   const currentIndex = activeOrder.indexOf(currentStatus);
   const incomingIndex = activeOrder.indexOf(incomingStatus);

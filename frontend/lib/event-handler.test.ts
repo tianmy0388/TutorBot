@@ -468,6 +468,30 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     });
   });
 
+  it("accepts the first repair job at the same revision from a failed video without a repair job", () => {
+    setCanonicalVideo({
+      render_status: "failed",
+      source_revision: 3,
+      video_url: "/static/manim/last-good.mp4",
+    });
+
+    dispatchVideoSnapshot({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "pending",
+      repair_job_id: "repair-first",
+    });
+
+    expect(mockStoreState.setLatestPackage).toHaveBeenCalledTimes(1);
+    expect(currentVideoFormat()).toMatchObject({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "pending",
+      repair_job_id: "repair-first",
+      video_url: "/static/manim/last-good.mp4",
+    });
+  });
+
   it.each([
     ["failed", "pending"],
     ["ready", "running"],
@@ -506,6 +530,68 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
       });
     },
   );
+
+  it("keeps the canonical ready URL over a conflicting same-terminal repair snapshot", () => {
+    setCanonicalVideo({
+      render_status: "ready",
+      source_revision: 3,
+      repair_status: "ready",
+      repair_job_id: "repair-same",
+      video_url: "/static/manim/canonical.mp4",
+    });
+
+    dispatchVideoSnapshot({
+      render_status: "ready",
+      source_revision: 3,
+      repair_status: "ready",
+      repair_job_id: "repair-same",
+      video_url: "/static/manim/delayed.mp4",
+    });
+
+    expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+    expect(currentVideoFormat()).toMatchObject({
+      repair_status: "ready",
+      video_url: "/static/manim/canonical.mp4",
+    });
+  });
+
+  it("keeps canonical failed history over a conflicting same-terminal repair snapshot", () => {
+    setCanonicalVideo({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "failed",
+      repair_job_id: "repair-same",
+      repair_history: [
+        {
+          job_id: "repair-same",
+          failed_revision: 3,
+          status: "failed",
+          summary: "canonical diagnosis",
+        },
+      ],
+    });
+
+    dispatchVideoSnapshot({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "failed",
+      repair_job_id: "repair-same",
+      repair_history: [
+        {
+          job_id: "repair-same",
+          failed_revision: 3,
+          status: "failed",
+          summary: "delayed diagnosis",
+        },
+      ],
+    });
+
+    expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+    expect(currentVideoFormat()).toMatchObject({
+      repair_status: "failed",
+      repair_history: [expect.objectContaining({ summary: "canonical diagnosis" })],
+    });
+  });
 
   it("rejects a delayed old repair job when current history terminalizes it", () => {
     setCanonicalVideo({
