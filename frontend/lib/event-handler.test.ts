@@ -1028,4 +1028,26 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     expect(getProfile).not.toHaveBeenCalled();
     expect(getLearningPath).not.toHaveBeenCalled();
   });
+
+  it("ignores a profile_updated marker on a non-progress event", async () => {
+    dispatchStreamEvent(
+      {
+        type: "observation",
+        source: "profile_dialogue_ingest",
+        stage: "profile_dialogue_ingest",
+        content: "已从对话更新学习画像",
+        metadata: { job_id: "job-3", profile_updated: true, version: 2 },
+        session_id: "s-test",
+        turn_id: "t",
+        seq: 1,
+        timestamp: Date.now() / 1000,
+        event_id: "e3",
+      },
+      { sessionId: "s-test", userId: "local-user" },
+    );
+
+    await Promise.resolve();
+    expect(getProfile).not.toHaveBeenCalled();
+    expect(getLearningPath).not.toHaveBeenCalled();
+  });
 });

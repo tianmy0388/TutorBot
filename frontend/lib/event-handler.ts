@@ -149,8 +149,10 @@ export function dispatchStreamEvent(
   // profile update with metadata.profile_updated (the job runner
   // normalizes the observation to a "progress" event but keeps metadata).
   // Refresh profile + path so the panel reflects the new version without
-  // a manual reload.
+  // a manual reload. The contract is conjunctive: only the normalized
+  // "progress" event triggers the refresh.
   if (
+    streamEv.type === "progress" &&
     (streamEv.metadata as Record<string, unknown> | undefined)
       ?.profile_updated === true
   ) {
