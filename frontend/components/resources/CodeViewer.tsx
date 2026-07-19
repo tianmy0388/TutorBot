@@ -16,7 +16,7 @@
  *    code produced (``figure_N.png``) were invisible on the right pane.
  */
 
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Copy,
   Check,
@@ -28,9 +28,10 @@ import {
 } from "lucide-react";
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
-import type { Resource } from "@/lib/types";
+import type { CodeResourceFormat, Resource } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useTutorStore } from "@/lib/store";
+import { ImageLightbox, type ImageArtifact } from "./ImageLightbox";
 
 interface CodeFile {
   name: string;
@@ -40,8 +41,23 @@ interface CodeFile {
 
 interface CodeArtifact {
   name: string;
-  path: string;
+  path?: string;
   kind?: string;
+}
+
+const IMAGE_KINDS = new Set(["png", "jpg", "jpeg", "svg"]);
+
+function artifactKind(artifact: CodeArtifact) {
+  const explicit = (artifact.kind || "")
+    .toLowerCase()
+    .replace(/^image\//, "")
+    .replace(/^\./, "");
+  const normalized = explicit === "svg+xml" ? "svg" : explicit;
+  if (IMAGE_KINDS.has(normalized)) return normalized;
+  const extension = artifact.name.split(".").pop();
+  const fallback =
+    extension && extension !== artifact.name ? extension.toLowerCase() : "";
+  return IMAGE_KINDS.has(fallback) ? fallback : normalized || fallback;
 }
 
 export function CodeViewer({ resource }: { resource: Resource }) {
@@ -56,20 +72,11 @@ export function CodeViewer({ resource }: { resource: Resource }) {
   const latestPackageId = useTutorStore(
     (s) => s.latestPackage?.package_id ?? null,
   );
-  const formatSpec = (resource.format_specific ?? {}) as {
-    language?: string;
-    code?: string;
-    explanation?: string;
-    execution_status?: string;
-    stdout?: string;
-    stderr?: string;
-    files?: CodeFile[];
-    runtime?: string;
-    dependencies?: string[];
-    artifacts?: CodeArtifact[];
-  };
+  const formatSpec = (resource.format_specific ?? {}) as CodeResourceFormat;
 
   const [copied, setCopied] = useState(false);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
 
   const files: CodeFile[] =
     formatSpec.files && formatSpec.files.length > 0
@@ -95,6 +102,11 @@ export function CodeViewer({ resource }: { resource: Resource }) {
   const showExecution =
     formatSpec.execution_status &&
     formatSpec.execution_status !== "not_run";
+  const executionFailed =
+    formatSpec.execution_status === "failed" ||
+    formatSpec.execution_status === "timeout";
+  const figureExpectedButMissing =
+    formatSpec.error_code === "FIGURE_EXPECTED_BUT_NOT_PRODUCED";
 
   // **2026-07-08 fix (585f367d):** turn each artifact into a URL
   // pointing at the backend streaming endpoint so matplotlib figures
@@ -113,7 +125,7 @@ export function CodeViewer({ resource }: { resource: Resource }) {
     (resource.metadata?.package_id as string | undefined) ||
     latestPackageId ||
     "";
-  const artifactUrl = (name: string) => {
+  const artifactUrl = useCallback((name: string) => {
     // **2026-07-09 fix (sess_ebb / 38a445a1 trace):** the package-
     // scoped artifact route on the backend is
     // ``/resources/packages/{user_id}/{package_id}/...`` — that is,
@@ -141,11 +153,26 @@ export function CodeViewer({ resource }: { resource: Resource }) {
     // persistence). Fall back to the package-less endpoint, which
     // resolves by resource_id alone.
     return `${apiBase}/resources/${encodedUser}/resources/${encodedRid}/artifacts/${encodedName}`;
-  };
+  }, [apiBase, realPackageId, resource.resource_id, userId]);
 
-  const artifacts: CodeArtifact[] = Array.isArray(formatSpec.artifacts)
-    ? formatSpec.artifacts
-    : [];
+  const artifacts = useMemo<CodeArtifact[]>(
+    () => (Array.isArray(formatSpec.artifacts) ? formatSpec.artifacts : []),
+    [formatSpec.artifacts],
+  );
+  const imageArtifacts = useMemo<ImageArtifact[]>(
+    () =>
+      artifacts.flatMap((artifact) => {
+        const kind = artifactKind(artifact);
+        return IMAGE_KINDS.has(kind)
+          ? [{ name: artifact.name, url: artifactUrl(artifact.name), kind }]
+          : [];
+      }),
+    [artifactUrl, artifacts],
+  );
+  const imageIndexByUrl = useMemo(
+    () => new Map(imageArtifacts.map((artifact, index) => [artifact.url, index])),
+    [imageArtifacts],
+  );
 
   return (
     <div className="space-y-4">
@@ -244,9 +271,30 @@ export function CodeViewer({ resource }: { resource: Resource }) {
             </pre>
           )}
 
+          {figureExpectedButMissing && (
+            <div
+              role="alert"
+              className="rounded-md border border-red-900/30 bg-red-950/20 p-3 text-xs text-red-300"
+            >
+              图片生成失败：代码声明应生成图像，但没有产生可展示的图片产物。
+            </div>
+          )}
+
           {formatSpec.stderr && (
-            <pre className="bg-black/70 rounded-md p-3 text-xs font-mono text-red-300 whitespace-pre-wrap border border-red-900/30 flex gap-2">
-              <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+            <pre
+              className={cn(
+                "bg-black/70 rounded-md p-3 text-xs font-mono whitespace-pre-wrap border flex gap-2",
+                executionFailed
+                  ? "text-red-300 border-red-900/30"
+                  : "text-amber-300 border-amber-900/30",
+              )}
+            >
+              <AlertTriangle
+                className={cn(
+                  "w-3.5 h-3.5 shrink-0 mt-0.5",
+                  executionFailed ? "text-red-400" : "text-amber-400",
+                )}
+              />
               <span className="flex-1">{formatSpec.stderr}</span>
             </pre>
           )}
@@ -263,9 +311,15 @@ export function CodeViewer({ resource }: { resource: Resource }) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {artifacts.map((art) => (
               <ArtifactPreview
-                key={art.name}
+                key={`${resource.resource_id}:${artifactUrl(art.name)}`}
                 artifact={art}
                 url={artifactUrl(art.name)}
+                onOpen={() => {
+                  const imageIndex = imageIndexByUrl.get(artifactUrl(art.name));
+                  if (imageIndex === undefined) return;
+                  setLightboxIndex(imageIndex);
+                  setLightboxOpen(true);
+                }}
               />
             ))}
           </div>
@@ -290,6 +344,13 @@ export function CodeViewer({ resource }: { resource: Resource }) {
           </div>
         </div>
       )}
+
+      <ImageLightbox
+        images={imageArtifacts}
+        initialIndex={lightboxIndex}
+        open={lightboxOpen}
+        onOpenChange={setLightboxOpen}
+      />
     </div>
   );
 }
@@ -297,12 +358,15 @@ export function CodeViewer({ resource }: { resource: Resource }) {
 function ArtifactPreview({
   artifact,
   url,
+  onOpen,
 }: {
   artifact: CodeArtifact;
   url: string;
+  onOpen(): void;
 }) {
-  const kind = (artifact.kind || "").toLowerCase();
-  const [errored, setErrored] = useState(false);
+  const kind = artifactKind(artifact);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const errored = failedUrl === url;
 
   if (errored) {
     return (
@@ -313,50 +377,26 @@ function ArtifactPreview({
     );
   }
 
-  if (kind === "png" || kind === "jpg" || kind === "jpeg") {
+  if (IMAGE_KINDS.has(kind)) {
     return (
-      <a
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        className="block rounded-lg overflow-hidden border border-fg/10 bg-bg-card hover:border-brand-500/40 transition-colors"
+      <button
+        type="button"
+        aria-label={`查看 ${artifact.name}`}
+        onClick={onOpen}
+        className="block w-full rounded-lg overflow-hidden border border-fg/10 bg-bg-card text-left hover:border-brand-500/40 transition-colors"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={url}
           alt={artifact.name}
           loading="lazy"
-          onError={() => setErrored(true)}
-          className="w-full h-auto"
+          onError={() => setFailedUrl(url)}
+          className="image-artifact-preview w-full h-auto object-contain"
         />
         <div className="px-3 py-1.5 text-[10px] text-fg-muted font-mono border-t border-fg/5">
           {artifact.name}
         </div>
-      </a>
-    );
-  }
-
-  if (kind === "svg") {
-    return (
-      <a
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        className="block rounded-lg overflow-hidden border border-fg/10 bg-bg-card hover:border-brand-500/40 transition-colors"
-      >
-        <object
-          data={url}
-          type="image/svg+xml"
-          aria-label={artifact.name}
-          className="w-full h-auto"
-          onError={() => setErrored(true)}
-        >
-          <img src={url} alt={artifact.name} onError={() => setErrored(true)} />
-        </object>
-        <div className="px-3 py-1.5 text-[10px] text-fg-muted font-mono border-t border-fg/5">
-          {artifact.name}
-        </div>
-      </a>
+      </button>
     );
   }
 
@@ -385,6 +425,11 @@ function ExecutionStatusBadge({ status }: { status: string }) {
     },
     failed: {
       label: "✗ 运行失败",
+      className: "bg-red-950/40 text-red-300 border-red-800/40",
+      icon: AlertTriangle,
+    },
+    timeout: {
+      label: "⏱ 运行超时",
       className: "bg-red-950/40 text-red-300 border-red-800/40",
       icon: AlertTriangle,
     },

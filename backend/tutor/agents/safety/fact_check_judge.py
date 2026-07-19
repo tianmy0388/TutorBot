@@ -10,7 +10,6 @@ from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.fact_check.verifier import ClaimVerdict
-from tutor.services.llm.base import LLMMessage, LLMRequest
 
 
 @dataclass
@@ -65,12 +64,12 @@ class FactCheckJudge(BaseAgent):
                 temperature=self.default_temperature,
                 response_format={"type": "json_object"},
             )
-        except Exception as exc:
-            logger.warning(f"FactCheckJudge LLM failed: {exc!r}")
+        except Exception:
+            logger.warning("FACT_CHECK_JUDGE_FAILED policy=unverified")
             return JudgeVerdict(
                 verdict=ClaimVerdict.UNVERIFIED,
                 confidence=0.3,
-                reasoning=f"judge failed: {exc}",
+                reasoning="FACT_CHECK_JUDGE_FAILED: evidence judgement unavailable",
             )
 
         data = self.parse_json_response(resp.content, fallback={})

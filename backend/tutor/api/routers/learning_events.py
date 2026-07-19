@@ -10,12 +10,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from tutor.services.learning_events.schema import EventType, LearningEvent
 from tutor.services.learning_events.store import get_learning_event_store
-from tutor.services.learner_profile.builder import ExerciseResult, get_profile_builder
+from tutor.services.learning_events.workflow import LearningWorkflow, get_learning_workflow
+from tutor.services.learner_profile.builder import ProfileBuilder
+from tutor.services.learner_profile.schema import empty_profile
 
 router = APIRouter()
 
@@ -33,58 +36,90 @@ class LearningEventRequest(BaseModel):
 
 
 @router.post("/learning-events")
-async def record_learning_event(req: LearningEventRequest) -> dict[str, Any]:
+async def record_learning_event(
+    req: LearningEventRequest,
+    request: Request,
+) -> dict[str, Any]:
     """Append one learning event and return the persisted payload."""
-    store = get_learning_event_store()
+    workflow: LearningWorkflow = (
+        getattr(request.app.state, "learning_workflow", None)
+        or get_learning_workflow()
+    )
+    store = workflow.event_store
     await store.init()
+    await workflow.profile_store.init()
+    await workflow.job_store.init()
     try:
+        score = req.score
+        if (
+            req.event_type == EventType.EXERCISE_ATTEMPTED
+            and score is None
+            and req.correct is not None
+        ):
+            score = 1.0 if req.correct else 0.0
+        metadata = dict(req.metadata or {})
+        course = str(
+            metadata.get("course")
+            or metadata.get("knowledge_graph_id")
+            or ""
+        )
         event = LearningEvent(
             user_id=req.user_id,
+            session_id=str(metadata.get("session_id") or ""),
+            course=course,
             event_type=req.event_type,
             target_id=req.target_id,
             concept_id=req.concept_id,
             duration_seconds=req.duration_seconds,
-            score=req.score,
+            score=score,
             correct=req.correct,
-            metadata=dict(req.metadata or {}),
+            metadata=metadata,
             created_at=req.created_at or datetime.now(timezone.utc),
         )
-        saved = await store.record(event)
-        profile_update: dict[str, Any] | None = None
-        if (
-            req.event_type == EventType.EXERCISE_ATTEMPTED
-            and req.concept_id.strip()
-            and req.correct is not None
-        ):
-            difficulty_raw = req.metadata.get("difficulty", 3)
-            try:
-                difficulty = max(1, min(5, int(difficulty_raw)))
-            except (TypeError, ValueError):
-                difficulty = 3
-            builder = get_profile_builder()
-            await builder.initialize()
-            profile, _ = await builder.ingest_exercise(
+        appended = await store.append(event)
+        profile_update: dict[str, Any] = {}
+        if req.event_type == EventType.EXERCISE_ATTEMPTED:
+            current = await workflow.profile_store.get(req.user_id)
+            current = current or empty_profile(req.user_id)
+            events = await store.list_since(
                 req.user_id,
-                ExerciseResult(
-                    concept=req.concept_id,
-                    correct=req.correct,
-                    difficulty=difficulty,
-                    elapsed_seconds=req.duration_seconds,
-                    mistake_type=(
-                        str(req.metadata.get("mistake_type"))
-                        if req.metadata.get("mistake_type")
-                        else None
-                    ),
-                    note=str(req.metadata.get("note") or ""),
-                ),
+                current.event_watermark,
+                through_sequence=appended.event.sequence,
+            )
+            candidate = ProfileBuilder(
+                store=workflow.profile_store,
+            ).aggregate_events(
+                current,
+                events,
+                through_sequence=appended.event.sequence,
+            )
+            outcome = await workflow.profile_store.save_event_profile(
+                candidate,
+                expected_watermark=current.event_watermark,
             )
             profile_update = {
-                "profile_version": profile.version,
-                "mastery": profile.knowledge_map.get(req.concept_id),
+                "profile_version": outcome.profile.version,
+                "mastery": outcome.profile.knowledge_map.get(req.concept_id),
             }
+        children = await workflow.reconcile_user(
+            req.user_id,
+            session_id=event.session_id,
+            course=course,
+        )
+        runner = getattr(request.app.state, "learning_runner", "default")
+        if runner == "default":
+            from tutor.services.jobs import get_job_runner
+
+            runner = get_job_runner()
+        if runner is not None and children:
+            await runner.resume_pending()
     except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "legacy learning event failed exception_type={}",
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {**saved.to_dict(), **(profile_update or {})}
+    return {**appended.event.to_dict(), **profile_update}
 
 
 @router.get("/learning-events/{user_id}")

@@ -14,7 +14,7 @@ system:
     - `true_false` 判断
     - `fill_blank` 填空
     - `short_answer` 简答
-    - `code` 代码题（answer 是参考代码）
+    - `code` Python 代码题（必须提供服务端判题所需的 code_spec）
 
     ## 输出 Schema（JSON）
     ```json
@@ -29,8 +29,10 @@ system:
           "question": "...",
           "options": [{"label": "A", "text": "..."}, ...],
           "answer": "A",
+          "accepted_answers": [],
           "explanation": "为什么选 A（1-2 句话）",
-          "estimated_seconds": 60
+          "estimated_seconds": 60,
+          "code_spec": null
         }
       ]
     }
@@ -43,8 +45,15 @@ system:
       - multiple_choice → ["A", "C"]
       - true_false → true / false
       - fill_blank → "具体词或短语"
-      - short_answer → "要点"
-      - code → "```python\n...\n```"
+      - short_answer → "要点"，并且必须输出 `accepted_answers`
+        - 有客观、封闭标准答案的简答题：`accepted_answers` 必须是非空字符串数组，列出可自动判分的等价别名；不要加入仅部分正确或含义不同的表述
+        - “用自己的话”、分析、反思、举例等开放题：`answer` 写 "(开放式回答)"，`accepted_answers` 必须是空数组，交由人工评阅
+      - 其他题型的 `accepted_answers` 使用空数组
+      - code → answer 可保存参考实现，并且 code_spec 必须为：
+        {"language":"python","starter_code":"def solve(...):\n    pass","tests":[{"name":"基础用例","call":"solve(...) ","expected_json":可JSON序列化值}],"time_limit_seconds":5}
+    - code_spec.tests 的 call 必须只调用学生需要实现的函数，不依赖网络、文件或第三方包
+    - expected_json 必须是标准 JSON：null、布尔、有限数字、字符串、数组或仅含字符串键的对象；禁止 NaN、Infinity、集合、元组和自定义对象
+    - 不得把测试代码嵌入 starter_code，也不得在 starter_code 中泄露 expected_json
     - 选项设计要有干扰性，避免"明显错误"选项
     - 难题的难度合理（即使专家也需要思考）
 user:

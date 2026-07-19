@@ -19,6 +19,8 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -27,16 +29,8 @@ from fastapi.testclient import TestClient
 # Load the resources router bypassing ``tutor.api.__init__`` (which
 # triggers the full app, including unrelated modules that fail to
 # import in the test environment).
-_RESOURCES_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "tutor"
-    / "api"
-    / "routers"
-    / "resources.py"
-)
-_spec = importlib.util.spec_from_file_location(
-    "_resources_router_under_test", _RESOURCES_PATH
-)
+_RESOURCES_PATH = Path(__file__).resolve().parents[2] / "tutor" / "api" / "routers" / "resources.py"
+_spec = importlib.util.spec_from_file_location("_resources_router_under_test", _RESOURCES_PATH)
 _resources_module = importlib.util.module_from_spec(_spec)
 sys.modules["_resources_router_under_test"] = _resources_module
 _spec.loader.exec_module(_resources_module)
@@ -45,10 +39,135 @@ resources_router = _resources_module.router
 _resources_module_pkg = _resources_module
 
 
-def _make_client() -> TestClient:
+def _make_client(*, multi_user_enabled: bool = True) -> TestClient:
     app = FastAPI()
+    app.state.settings = SimpleNamespace(multi_user_enabled=multi_user_enabled)
     app.include_router(resources_router, prefix="/api/v1")
     return TestClient(app)
+
+
+def test_retry_endpoint_enqueues_video_repair_and_preserves_visible_failure(
+    tmp_path: Path,
+) -> None:
+    from tutor.services.jobs.schema import Job, JobStatus
+    from tutor.services.jobs.store import JobStore
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    jobs = JobStore(tmp_path / "jobs.db")
+    packages = ResourcePackageStore(tmp_path / "packages.db")
+
+    async def seed() -> None:
+        await jobs.init()
+        await packages.init()
+        parent = Job(
+            job_id="repair-parent",
+            user_id="owner",
+            session_id="session",
+            status=JobStatus.SUCCEEDED,
+        )
+        await jobs.save(parent)
+        resource = Resource(
+            resource_id="repair-video",
+            type=ResourceType.VIDEO,
+            title="video",
+            format_specific={
+                "manim_code": "FAILED ORIGINAL SOURCE",
+                "scene_class": "MainScene",
+                "render_status": "failed",
+                "render_error_code": "process_exit",
+                "render_error": "VISIBLE ORIGINAL FAILURE",
+                "render_failure": {
+                    "error_code": "provider-token=SECRET_CODE " + ("e" * 500),
+                    "summary": "api_key=SECRET_SUMMARY C:\\private\\scene.py",
+                    "traceback_tail": [
+                        "provider-token=SECRET_TRACE C:\\private\\worker.py"
+                    ],
+                    "log_artifact_key": "C:\\private\\operator.log",
+                },
+                "source_revision": 3,
+                "repair_history": [
+                    {
+                        "job_id": "legacy",
+                        "failed_revision": 2,
+                        "status": "failed",
+                        "summary": (
+                            "api_key=SECRET_VALUE C:\\private\\scene.py "
+                            + ("z" * 1000)
+                        ),
+                        "traceback": "UNBOUNDED PRIVATE TRACE " + ("q" * 1000),
+                        "log_artifact_key": "C:\\private\\raw.log",
+                    }
+                ],
+            },
+        )
+        package = ResourcePackage(
+            package_id="repair-package",
+            topic="topic",
+            resources=[resource],
+        )
+        package.associate_originating_job(parent.job_id)
+        await packages.save(package, user_id="owner")
+
+    import asyncio
+
+    asyncio.run(seed())
+    runner = SimpleNamespace(store=jobs, resume_pending=AsyncMock(return_value=1))
+    app = FastAPI()
+    app.state.settings = SimpleNamespace(multi_user_enabled=True)
+    app.state.resource_package_store = packages
+    app.state.learning_runner = runner
+    app.include_router(resources_router, prefix="/api/v1")
+    client = TestClient(app)
+    url = (
+        "/api/v1/resources/packages/owner/repair-package/resources/"
+        "repair-video/retry-video"
+    )
+
+    first = client.post(url)
+    second = client.post(url)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["child"]["task_kind"] == "video_repair_render"
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert first.json()["resource"]["format_specific"]["render_status"] == "failed"
+    assert "repair_status" not in first.json()["resource"]["format_specific"]
+    assert "repair_job_id" not in first.json()["resource"]["format_specific"]
+    public_failure = first.json()["resource"]["format_specific"]["render_failure"]
+    assert len(public_failure["error_code"]) <= 120
+    assert "SECRET" not in str(public_failure)
+    assert "C:\\private" not in str(public_failure)
+    assert "log_artifact_key" not in public_failure
+    public_history = first.json()["resource"]["format_specific"]["repair_history"]
+    assert len(public_history[0]["summary"]) <= 200
+    assert "SECRET_VALUE" not in str(public_history)
+    assert "C:\\private" not in str(public_history)
+    assert "UNBOUNDED" not in str(public_history)
+    assert "log_artifact_key" not in public_history[0]
+
+    async def verify() -> None:
+        children = await jobs.get_children("repair-parent")
+        resource = await packages.get_resource("repair-video")
+        assert len(children) == 1
+        assert children[0].metadata == {
+            "package_id": "repair-package",
+            "resource_id": "repair-video",
+            "user_id": "owner",
+            "failed_revision": 3,
+            "expected_repair_job_id": None,
+        }
+        assert resource is not None
+        assert resource.format_specific["manim_code"] == "FAILED ORIGINAL SOURCE"
+        assert resource.format_specific["render_error"] == "VISIBLE ORIGINAL FAILURE"
+        assert resource.format_specific["render_status"] == "failed"
+        assert "repair_status" not in resource.format_specific
+        assert "repair_job_id" not in resource.format_specific
+        await jobs.close()
+        await packages.close()
+
+    asyncio.run(verify())
+    runner.resume_pending.assert_awaited_once()
 
 
 @pytest.fixture
@@ -93,9 +212,7 @@ async def test_artifact_endpoint_serves_png_inside_data_dir(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     # Build a sandbox artifact: PNG file inside data_dir/code_runs/run_X/figure_1.png
     art_dir = data_dir / "code_runs" / "run_X"
@@ -158,9 +275,7 @@ async def test_artifact_endpoint_404_when_artifact_not_in_manifest(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     await isolated_store.init()
 
@@ -201,9 +316,7 @@ async def test_artifact_endpoint_403_for_path_outside_data_dir(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     await isolated_store.init()
 
@@ -233,17 +346,13 @@ async def test_artifact_endpoint_403_for_path_outside_data_dir(
     assert loaded_pkg is not None, "save() did not persist the package"
     loaded_res = await isolated_store.get_resource(resource.resource_id)
     assert loaded_res is not None, "save() did not persist the resource"
-    assert loaded_res.format_specific.get("artifacts"), (
-        "format_specific.artifacts was not round-tripped"
-    )
+    assert loaded_res.format_specific.get("artifacts"), "format_specific.artifacts was not round-tripped"
 
     client = _make_client()
     resp = client.get(
         f"/api/v1/resources/packages/u-test/{pkg.package_id}/resources/{resource.resource_id}/artifacts/passwd"
     )
-    assert resp.status_code == 403, (
-        f"expected 403 for traversal; got {resp.status_code}: {resp.text}"
-    )
+    assert resp.status_code == 403, f"expected 403 for traversal; got {resp.status_code}: {resp.text}"
 
 
 @pytest.mark.asyncio
@@ -271,9 +380,7 @@ async def test_artifact_endpoint_works_without_package_id(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     art_dir = data_dir / "code_runs" / "run_X"
     art_dir.mkdir(parents=True)
@@ -330,9 +437,7 @@ async def test_artifact_endpoint_package_less_404_wrong_user(
     data_dir = tmp_path / "data"
     data_dir.mkdir(exist_ok=True)
     get_settings.cache_clear()
-    monkeypatch.setattr(
-        get_settings(), "data_dir", data_dir, raising=False
-    )
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
 
     art_dir = data_dir / "code_runs" / "run_X"
     art_dir.mkdir(parents=True)
@@ -356,10 +461,314 @@ async def test_artifact_endpoint_package_less_404_wrong_user(
     await isolated_store.save(pkg, user_id="u-test")
 
     client = _make_client()
-    resp = client.get(
-        f"/api/v1/resources/u-WRONG/resources/{resource.resource_id}/artifacts/figure_1.png"
-    )
+    resp = client.get(f"/api/v1/resources/u-WRONG/resources/{resource.resource_id}/artifacts/figure_1.png")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_downloadable_render_log_is_complete_sanitized_utf8(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_store,
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.manim_render.service import ManimRenderService
+    from tutor.services.resource_package.schema import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+    )
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    ordinary_lines = [f"progress {index:03d} 正常 Ω" for index in range(150)]
+    sensitive_lines = [
+        'File "C:\\Program Files\\Tutor Bot\\scene.py", line 2',
+        'File "\\\\render-host\\private share\\scene.py", line 3',
+        'File "/srv/private project/scene.py", line 4',
+        'File "file:///home/alice/private scene.py", line 5',
+        "api_key=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+        "provider-token=private-value",
+        "ValueError: 颜色无效 Ω",
+    ]
+    raw_stderr = "\n".join([*ordinary_lines, *sensitive_lines])
+    artifact_key = ManimRenderService._write_log_artifact(
+        "public-log-child",
+        attempt_label="attempt-01",
+        stdout="stdout 开始 Ω",
+        stderr=raw_stderr,
+    )
+
+    await isolated_store.init()
+    resource = Resource(
+        resource_id="public-log-video",
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "artifacts": [
+                {
+                    "name": "attempt-01.log",
+                    "kind": "render_log",
+                    "artifact_key": artifact_key,
+                }
+            ],
+        },
+    )
+    package = ResourcePackage(
+        package_id="public-log-package",
+        topic="topic",
+        resources=[resource],
+    )
+    await isolated_store.save(package, user_id="u-test")
+
+    response = _make_client().get(
+        "/api/v1/resources/packages/u-test/public-log-package/resources/"
+        "public-log-video/artifacts/attempt-01.log"
+    )
+
+    assert response.status_code == 200, response.text
+    public_log = response.content.decode("utf-8")
+    assert ordinary_lines[0] in public_log
+    assert ordinary_lines[-1] in public_log
+    assert "stdout 开始 Ω" in public_log
+    assert "ValueError: 颜色无效 Ω" in public_log
+    for forbidden in (
+        "C:\\Program Files",
+        "render-host",
+        "/srv/private project",
+        "file:///home/alice",
+        "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+        "private-value",
+    ):
+        assert forbidden not in public_log
+
+    operator_log = (
+        data_dir
+        / "operator_logs"
+        / "manim"
+        / "public-log-child"
+        / "attempt-01.log"
+    )
+    assert operator_log.read_text(encoding="utf-8").endswith(raw_stderr)
+
+
+@pytest.mark.asyncio
+async def test_operator_render_log_cannot_be_served_from_tampered_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_store,
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import (
+        Resource,
+        ResourcePackage,
+        ResourceType,
+    )
+
+    data_dir = tmp_path / "data"
+    operator_log = data_dir / "operator_logs" / "manim" / "child" / "raw.log"
+    operator_log.parent.mkdir(parents=True)
+    operator_log.write_text("provider-token=private-value", encoding="utf-8")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        resource_id="operator-log-video",
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "artifacts": [
+                {
+                    "name": "raw.log",
+                    "kind": "render_log",
+                    "artifact_key": "operator_logs/manim/child/raw.log",
+                }
+            ]
+        },
+    )
+    package = ResourcePackage(
+        package_id="operator-log-package",
+        topic="topic",
+        resources=[resource],
+    )
+    await isolated_store.save(package, user_id="u-test")
+
+    response = _make_client().get(
+        "/api/v1/resources/packages/u-test/operator-log-package/resources/"
+        "operator-log-video/artifacts/raw.log"
+    )
+
+    assert response.status_code == 403
+    assert "private-value" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_local_mode_serves_historical_owner_artifacts_from_both_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+
+    data_dir = tmp_path / "data"
+    artifact = data_dir / "legacy" / "figure.png"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"legacy")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        type=ResourceType.CODE,
+        title="legacy",
+        format_specific={
+            "artifacts": [{"name": "figure.png", "path": str(artifact), "kind": "png"}]
+        },
+    )
+    package = ResourcePackage(topic="legacy", resources=[resource])
+    await isolated_store.save(package, user_id="historical-owner")
+    client = _make_client(multi_user_enabled=False)
+
+    scoped = client.get(
+        f"/api/v1/resources/packages/stale-browser/{package.package_id}/resources/"
+        f"{resource.resource_id}/artifacts/figure.png"
+    )
+    package_less = client.get(
+        f"/api/v1/resources/stale-browser/resources/{resource.resource_id}/artifacts/figure.png"
+    )
+
+    assert scoped.status_code == 200, scoped.text
+    assert package_less.status_code == 200, package_less.text
+    assert scoped.content == package_less.content == b"legacy"
+
+
+@pytest.mark.asyncio
+async def test_multi_user_mode_denies_historical_owner_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+
+    data_dir = tmp_path / "data"
+    artifact = data_dir / "legacy" / "figure.png"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"legacy")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        type=ResourceType.CODE,
+        title="legacy",
+        format_specific={"artifacts": [{"name": "figure.png", "path": str(artifact)}]},
+    )
+    package = ResourcePackage(topic="legacy", resources=[resource])
+    await isolated_store.save(package, user_id="owner-a")
+    attacker_package = ResourcePackage(topic="attacker", resources=[])
+    await isolated_store.save(attacker_package, user_id="owner-b")
+    client = _make_client(multi_user_enabled=True)
+
+    scoped = client.get(
+        f"/api/v1/resources/packages/owner-b/{package.package_id}/resources/"
+        f"{resource.resource_id}/artifacts/figure.png"
+    )
+    package_less = client.get(
+        f"/api/v1/resources/owner-b/resources/{resource.resource_id}/artifacts/figure.png"
+    )
+    mismatched_join = client.get(
+        f"/api/v1/resources/packages/owner-b/{attacker_package.package_id}/resources/"
+        f"{resource.resource_id}/artifacts/figure.png"
+    )
+
+    assert scoped.status_code == 404
+    assert package_less.status_code == 404
+    assert mismatched_join.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_legacy_url_normalizes_local_but_preserves_external(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+
+    data_dir = tmp_path / "data"
+    local = data_dir / "code_runs" / "run" / "figure.png"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"local")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        type=ResourceType.CODE,
+        title="urls",
+        format_specific={
+            "artifacts": [
+                {"name": "figure.png", "url": "code_runs/run/figure.png"},
+                {"name": "external.png", "url": "https://cdn.example.com/external.png"},
+            ]
+        },
+    )
+    package = ResourcePackage(topic="urls", resources=[resource])
+    await isolated_store.save(package, user_id="owner")
+
+    loaded = await isolated_store.get_resource(resource.resource_id)
+    assert loaded is not None
+    local_entry, external_entry = loaded.format_specific["artifacts"]
+    assert local_entry["artifact_key"] == "code_runs/run/figure.png"
+    assert "url" not in local_entry
+    assert external_entry["url"] == "https://cdn.example.com/external.png"
+    assert "artifact_key" not in external_entry
+
+    client = _make_client()
+    local_response = client.get(
+        f"/api/v1/resources/owner/resources/{resource.resource_id}/artifacts/figure.png"
+    )
+    external_response = client.get(
+        f"/api/v1/resources/owner/resources/{resource.resource_id}/artifacts/external.png"
+    )
+    assert local_response.status_code == 200
+    assert local_response.content == b"local"
+    assert external_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_ppt_download_local_mode_accepts_historical_owner_but_multi_denies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_store
+) -> None:
+    from tutor.services.config.settings import get_settings
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+
+    data_dir = tmp_path / "data"
+    pptx = data_dir / "ppt" / "legacy-package" / "deck.pptx"
+    pptx.parent.mkdir(parents=True)
+    pptx.write_bytes(b"pptx")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    await isolated_store.init()
+    resource = Resource(
+        resource_id="ppt-download-resource",
+        type=ResourceType.PPT,
+        title="Legacy deck",
+        format_specific={"pptx_path": str(pptx), "slide_count": 1},
+    )
+    package = ResourcePackage(
+        package_id="legacy-package",
+        topic="legacy",
+        resources=[resource],
+    )
+    await isolated_store.save(package, user_id="historical-owner")
+    path = (
+        f"/api/v1/resources/packages/stale-browser/{package.package_id}/resources/"
+        f"{resource.resource_id}/download"
+    )
+
+    local_response = _make_client(multi_user_enabled=False).get(path)
+    multi_response = _make_client(multi_user_enabled=True).get(path)
+
+    assert local_response.status_code == 200, local_response.text
+    assert local_response.content == b"pptx"
+    assert multi_response.status_code == 404
 
 
 if __name__ == "__main__":

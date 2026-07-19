@@ -23,16 +23,18 @@ and the path is stored in ``Resource.format_specific["pptx_path"]``.
 from __future__ import annotations
 
 import re
+import threading
+import uuid
+from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from loguru import logger
 from pptx import Presentation
 from pptx.util import Inches, Pt
 
 from tutor.services.config.settings import get_settings
-
 
 # ---------------------------------------------------------------------------
 # Markdown slice
@@ -49,6 +51,15 @@ class Slide:
     def __post_init__(self) -> None:
         if self.bullets is None:
             self.bullets = []
+
+
+class PPTGenerationCancelledError(RuntimeError):
+    """Cooperative cancellation observed by the synchronous PPT worker."""
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise PPTGenerationCancelledError("PPT generation cancelled")
 
 
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
@@ -183,12 +194,19 @@ def _set_bullets(slide, bullets: Iterable[str]) -> None:
             run.font.size = Pt(20)
 
 
-def render_slides(slides: list[Slide], output_path: Path, *, title: str = "") -> Path:
+def render_slides(
+    slides: list[Slide],
+    output_path: Path,
+    *,
+    title: str = "",
+    cancel_event: threading.Event | None = None,
+) -> Path:
     """Write a :class:`Presentation` to ``output_path``.
 
     Uses the default python-pptx title-and-content layout for body
     slides. Falls back gracefully when text is empty.
     """
+    _raise_if_cancelled(cancel_event)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prs = Presentation()
     prs.slide_width = Inches(13.333)
@@ -198,21 +216,20 @@ def render_slides(slides: list[Slide], output_path: Path, *, title: str = "") ->
     bullet_layout = prs.slide_layouts[1]  # Title and Content
 
     for i, s in enumerate(slides):
+        _raise_if_cancelled(cancel_event)
         layout = bullet_layout if (i > 0 or s.bullets) else title_layout
         slide = prs.slides.add_slide(layout)
         # Title placeholder
-        try:
+        with suppress(Exception):
             slide.shapes.title.text = s.title or title or "未命名"
-        except Exception:
-            pass
         # Body bullets (skip for cover slide)
         if s.bullets and i > 0:
             _set_bullets(slide, s.bullets)
-        elif not s.bullets and i == 0:
+        elif not s.bullets and i == 0 and len(slide.placeholders) > 1:
             # Subtitle hint on the cover
-            if len(slide.placeholders) > 1:
-                slide.placeholders[1].text = title or ""
+            slide.placeholders[1].text = title or ""
 
+    _raise_if_cancelled(cancel_event)
     prs.save(str(output_path))
     logger.info(f"PPT written to {output_path} ({len(slides)} slides)")
     return output_path
@@ -241,12 +258,46 @@ class PPTGenerationService:
         package_id: str,
         resource_id: str,
         title: str | None = None,
+        cancel_event: threading.Event | None = None,
+        publish_lock: threading.Lock | None = None,
     ) -> Path:
+        lock = publish_lock or threading.Lock()
         slides = slice_markdown_to_slides(topic, markdown)
         out_dir = self.output_dir / package_id
         out_path = out_dir / f"{resource_id}.pptx"
-        render_slides(slides, out_path, title=title or topic)
-        return out_path
+        temp_path = self.output_dir / ".tmp" / f"{resource_id}-{uuid.uuid4().hex}.pptx"
+        try:
+            _raise_if_cancelled(cancel_event)
+            render_slides(
+                slides,
+                temp_path,
+                title=title or topic,
+                cancel_event=cancel_event,
+            )
+            with lock:
+                _raise_if_cancelled(cancel_event)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                temp_path.replace(out_path)
+            return out_path
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    def cleanup_cancelled(
+        self,
+        *,
+        package_id: str,
+        resource_id: str,
+        publish_lock: threading.Lock,
+    ) -> None:
+        """Remove artifacts owned by one cancelled, uniquely identified build."""
+
+        with publish_lock:
+            (self.output_dir / package_id / f"{resource_id}.pptx").unlink(
+                missing_ok=True
+            )
+            temp_dir = self.output_dir / ".tmp"
+            for temp_path in temp_dir.glob(f"{resource_id}-*.pptx"):
+                temp_path.unlink(missing_ok=True)
 
 
 # Singleton accessor
@@ -261,6 +312,7 @@ def get_ppt_service() -> PPTGenerationService:
 
 
 __all__ = [
+    "PPTGenerationCancelledError",
     "PPTGenerationService",
     "Slide",
     "get_ppt_service",

@@ -10,32 +10,31 @@ the full package.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 from httpx import ASGITransport
-
 from tutor.api.main import create_app
-from tutor.services.config.settings import reset_settings_cache
+from tutor.services.config.settings import get_settings, reset_settings_cache
 from tutor.services.jobs import (
     Job,
-    JobStatus,
-    JobSubmit,
-    get_job_runner,
     get_job_store,
     reset_job_runner,
     reset_job_store,
+    shutdown_job_runner,
 )
 from tutor.services.jobs.contracts import JobResultContract
 from tutor.services.jobs.schema import JobStatus as SchemaJobStatus
 
 
-def _client() -> httpx.AsyncClient:
+def _client(*, multi_user_enabled: bool = True) -> httpx.AsyncClient:
     reset_settings_cache()
     reset_job_store()
     reset_job_runner()
-    app = create_app()
+    settings = get_settings()
+    settings.multi_user_enabled = multi_user_enabled
+    app = create_app(settings)
     return httpx.AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -51,6 +50,9 @@ async def _seed_parent_job(
     contract_status: str,
     artifacts: list[dict],
     assistant_message: str = "部分完成",
+    row_status: SchemaJobStatus = SchemaJobStatus.PARTIAL,
+    session_id: str | None = None,
+    web_search_enabled: bool = False,
 ) -> str:
     """Insert a job row directly, bypassing the runner's background task.
 
@@ -59,7 +61,7 @@ async def _seed_parent_job(
     deterministic.
     """
     job_id = f"job_{uuid.uuid4().hex[:12]}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     contract = JobResultContract(
         job_id=job_id,
         capability=capability,
@@ -70,9 +72,9 @@ async def _seed_parent_job(
     job = Job(
         job_id=job_id,
         user_id=user_id,
-        session_id=f"ses_{uuid.uuid4().hex[:8]}",
+        session_id=session_id or f"ses_{uuid.uuid4().hex[:8]}",
         capability=capability,
-        status=SchemaJobStatus.PARTIAL,
+        status=row_status,
         message="hi",
         language="zh",
         metadata=metadata,
@@ -80,9 +82,38 @@ async def _seed_parent_job(
         started_at=now,
         finished_at=now,
         result=contract.model_dump(mode="json"),
+        web_search_enabled=web_search_enabled,
     )
     await store.save(job)
     return job_id
+
+
+@pytest.mark.asyncio
+async def test_rest_retry_inherits_parent_web_search_snapshot(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
+    async with _client() as client:
+        store = get_job_store()
+        await store.init()
+        parent_id = await _seed_parent_job(
+            store,
+            user_id="u1",
+            capability="resource_generation",
+            metadata={"selected_resource_types": ["video"]},
+            contract_status="partial",
+            artifacts=[{"resource_type": "video", "status": "failed"}],
+            session_id="missing-conversation-row",
+            web_search_enabled=True,
+        )
+
+        response = await client.post(
+            f"/api/v1/jobs/u1/{parent_id}/retry",
+            json={"resource_types": ["video"]},
+        )
+
+        assert response.status_code == 200, response.text
+        child = await store.get(response.json()["job_id"])
+        assert child is not None
+        assert child.web_search_enabled is True
 
 
 @pytest.mark.asyncio
@@ -208,3 +239,87 @@ async def test_retry_preserves_parent_metadata(tmp_path, monkeypatch) -> None:
         reset_job_store()
         reset_job_runner()
 
+
+@pytest.mark.asyncio
+async def test_local_mode_retries_missing_artifact_from_succeeded_historical_job(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
+    store = None
+    try:
+        async with _client(multi_user_enabled=False) as client:
+            store = get_job_store()
+            await store.init()
+            parent_id = await _seed_parent_job(
+                store,
+                user_id="historical-owner",
+                capability="resource_generation",
+                metadata={
+                    "plan_id": "plan-success",
+                    "selected_resource_types": ["code"],
+                    "topic": "Recovery",
+                },
+                contract_status="succeeded",
+                artifacts=[{"resource_type": "code", "status": "succeeded"}],
+                row_status=SchemaJobStatus.SUCCEEDED,
+                session_id="recovery-session",
+            )
+
+            response = await client.post(
+                f"/api/v1/jobs/stale-browser/{parent_id}/retry",
+                json={"resource_types": ["code"]},
+            )
+
+            assert response.status_code == 200, response.text
+            assert response.json()["preserved_artifacts"] == []
+            child = await store.get(response.json()["job_id"])
+            assert child is not None
+            assert child.user_id == "local-user"
+            assert child.session_id == "recovery-session"
+    finally:
+        await shutdown_job_runner()
+        if store is not None:
+            await store.close()
+        reset_job_store()
+
+
+@pytest.mark.asyncio
+async def test_local_mode_retries_failed_historical_job_but_multi_user_denies(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("TUTOR_DATA_DIR", str(tmp_path / "data"))
+    async with _client(multi_user_enabled=False) as client:
+        store = get_job_store()
+        await store.init()
+        parent_id = await _seed_parent_job(
+            store,
+            user_id="historical-owner",
+            capability="resource_generation",
+            metadata={"selected_resource_types": ["video"], "topic": "Recovery"},
+            contract_status="failed",
+            artifacts=[{"resource_type": "video", "status": "failed"}],
+            row_status=SchemaJobStatus.FAILED,
+        )
+        response = await client.post(
+            f"/api/v1/jobs/stale-browser/{parent_id}/retry",
+            json={"resource_types": ["video"]},
+        )
+        assert response.status_code == 200, response.text
+
+    async with _client(multi_user_enabled=True) as client:
+        store = get_job_store()
+        await store.init()
+        parent_id = await _seed_parent_job(
+            store,
+            user_id="owner-a",
+            capability="resource_generation",
+            metadata={"selected_resource_types": ["video"], "topic": "Recovery"},
+            contract_status="failed",
+            artifacts=[{"resource_type": "video", "status": "failed"}],
+            row_status=SchemaJobStatus.FAILED,
+        )
+        response = await client.post(
+            f"/api/v1/jobs/owner-b/{parent_id}/retry",
+            json={"resource_types": ["video"]},
+        )
+        assert response.status_code == 404

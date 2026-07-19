@@ -15,9 +15,9 @@ import re
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -28,6 +28,9 @@ class StaticGuardResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     cleaned_code: str = ""
+    external_assets: tuple[str, ...] = ()
+    error_code: str = ""
+    summary: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -35,6 +38,9 @@ class StaticGuardResult:
             "errors": list(self.errors),
             "warnings": list(self.warnings),
             "cleaned_code_chars": len(self.cleaned_code),
+            "external_assets": list(self.external_assets),
+            "error_code": self.error_code,
+            "summary": self.summary,
         }
 
 
@@ -59,18 +65,27 @@ _CODE_TRANSFORMS = (
 class StaticGuard:
     """Run pre-render static checks on Manim Python code."""
 
-    def check(self, code: str) -> StaticGuardResult:
+    def check(
+        self,
+        code: str,
+        *,
+        workdir: Path | None = None,
+    ) -> StaticGuardResult:
         """Run all checks against ``code`` and return a verdict."""
         cleaned = self._clean(code)
         warnings: list[str] = []
 
-        # Stage 1: AST parse (cheap, no subprocess)
-        ast_errors = self._ast_parse(cleaned)
-        if ast_errors:
+        # Stage 1: parse once. The same tree drives safety and asset checks.
+        try:
+            tree = ast.parse(cleaned)
+        except SyntaxError as exc:
+            msg = f"line {exc.lineno}: {exc.msg}"
             return StaticGuardResult(
                 passed=False,
-                errors=ast_errors,
+                errors=[f"AST parse failed: {msg}"],
                 cleaned_code=cleaned,
+                error_code="syntax_error",
+                summary="Manim source contains invalid Python syntax",
             )
 
         # Stage 2: py_compile (catches things AST misses, e.g. undefined names)
@@ -80,6 +95,8 @@ class StaticGuard:
                 passed=False,
                 errors=compile_errors,
                 cleaned_code=cleaned,
+                error_code="compile_error",
+                summary="Manim source could not be compiled",
             )
 
         # Stage 3: Light sanity checks
@@ -87,19 +104,50 @@ class StaticGuard:
         warnings.extend(sanity_warnings)
 
         # Stage 4: Dangerous call detection (hard error, C3)
-        dangerous = self._check_dangerous_calls(cleaned)
+        dangerous = self._check_dangerous_calls(tree, cleaned)
         if dangerous:
             return StaticGuardResult(
                 passed=False,
                 errors=dangerous,
                 warnings=warnings,
                 cleaned_code=cleaned,
+                error_code="dangerous_call",
+                summary="Manim source contains a disallowed operation",
+            )
+
+        # Stage 5: external asset ownership/containment preflight.
+        external_assets, dynamic_assets, unavailable_assets = (
+            self._inspect_external_assets(tree, workdir=workdir)
+        )
+        if dynamic_assets:
+            return StaticGuardResult(
+                passed=False,
+                errors=["External Manim asset paths must be string literals"],
+                warnings=warnings,
+                cleaned_code=cleaned,
+                external_assets=external_assets,
+                error_code="dynamic_external_asset",
+                summary="Manim source uses a dynamic external asset path",
+            )
+        if unavailable_assets:
+            return StaticGuardResult(
+                passed=False,
+                errors=[
+                    f"{len(unavailable_assets)} external Manim asset reference(s) "
+                    "are missing or outside the render package"
+                ],
+                warnings=warnings,
+                cleaned_code=cleaned,
+                external_assets=external_assets,
+                error_code="missing_external_asset",
+                summary="Manim source references unavailable external assets",
             )
 
         return StaticGuardResult(
             passed=True,
             warnings=warnings,
             cleaned_code=cleaned,
+            external_assets=external_assets,
         )
 
     # ------------------------------------------------------------------
@@ -107,7 +155,14 @@ class StaticGuard:
     # ------------------------------------------------------------------
 
     def _clean(self, code: str) -> str:
-        out = code
+        out = code.replace("\r\n", "\n").replace("\r", "\n").strip()
+        fenced = re.fullmatch(
+            r"```(?:python|py)?\s*\n(?P<body>.*)\n```",
+            out,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fenced:
+            out = fenced.group("body")
         for pattern, repl in _CODE_TRANSFORMS:
             out = pattern.sub(repl, out)
         return out.strip() + "\n"
@@ -135,6 +190,8 @@ class StaticGuard:
                 [sys.executable, "-m", "py_compile", str(tmp_path)],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
             if proc.returncode == 0:
@@ -160,10 +217,8 @@ class StaticGuard:
         except Exception as exc:  # noqa: BLE001
             return [f"py_compile execution error: {exc}"]
         finally:
-            try:
+            with suppress(OSError):
                 tmp_path.unlink()
-            except OSError:
-                pass
 
     def _sanity_checks(self, code: str) -> list[str]:
         """Light heuristics — warn (don't fail) on suspicious patterns.
@@ -186,7 +241,7 @@ class StaticGuard:
 
     # --- 2026-06-21 plan (C3): expanded checks ------------------------
 
-    def _check_dangerous_calls(self, code: str) -> list[str]:
+    def _check_dangerous_calls(self, tree: ast.AST, code: str) -> list[str]:
         """Scan for Python calls that are unsafe in a sandboxed
         animation script.
 
@@ -201,7 +256,7 @@ class StaticGuard:
         import re as _re
 
         # Patterns: (regex, human_label)
-        PATTERNS: list[tuple[str, str]] = [
+        patterns: list[tuple[str, str]] = [
             (r"\beval\s*\(", "eval() is not allowed in sandboxed code"),
             (r"\bexec\s*\(", "exec() is not allowed in sandboxed code"),
             (r"\b__import__\s*\(", "__import__() is not allowed"),
@@ -210,12 +265,92 @@ class StaticGuard:
             (r"\bopen\s*\(", "open() file I/O is not allowed in sandboxed code"),
         ]
         errors: list[str] = []
-        for regex, label in PATTERNS:
+        for regex, label in patterns:
             for m in _re.finditer(regex, code):
                 line_no = code[: m.start()].count("\n") + 1
                 snippet = code[m.start(): m.start() + 40].replace("\n", "\\n")
                 errors.append(f"line {line_no}: {label} ({snippet})")
         return errors
+
+    @staticmethod
+    def _call_name(node: ast.AST) -> str:
+        """Return a dotted ordinary call name (for example ``manim.ImageMobject``)."""
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            prefix = StaticGuard._call_name(node.value)
+            return f"{prefix}.{node.attr}" if prefix else node.attr
+        return ""
+
+    def _inspect_external_assets(
+        self,
+        tree: ast.AST,
+        *,
+        workdir: Path | None,
+    ) -> tuple[tuple[str, ...], bool, tuple[str, ...]]:
+        """Collect literal Manim assets and reject dynamic/unsafe references."""
+        asset_arguments = {
+            "SVGMobject": (0, {"file_name", "filename"}),
+            "ImageMobject": (
+                0,
+                {"filename_or_array", "image_data_or_file", "file_name"},
+            ),
+            "add_sound": (0, {"sound_file", "file_name", "filename"}),
+        }
+        ordered: list[str] = []
+        seen: set[str] = set()
+        dynamic = False
+        unavailable: list[str] = []
+        root = Path(workdir).resolve() if workdir is not None else None
+
+        calls = sorted(
+            (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        for node in calls:
+            call_name = self._call_name(node.func)
+            short_name = call_name.rsplit(".", 1)[-1]
+            specification = asset_arguments.get(short_name)
+            if specification is None:
+                continue
+            positional_index, keyword_names = specification
+            value_node = next(
+                (
+                    keyword.value
+                    for keyword in node.keywords
+                    if keyword.arg in keyword_names
+                ),
+                None,
+            )
+            if value_node is None and len(node.args) > positional_index:
+                value_node = node.args[positional_index]
+            if not (
+                isinstance(value_node, ast.Constant)
+                and isinstance(value_node.value, str)
+            ):
+                dynamic = True
+                continue
+            reference = value_node.value
+            if reference not in seen:
+                seen.add(reference)
+                ordered.append(reference)
+            if (
+                root is None or not self._asset_is_available(reference, root)
+            ) and reference not in unavailable:
+                unavailable.append(reference)
+        return tuple(ordered), dynamic, tuple(unavailable)
+
+    @staticmethod
+    def _asset_is_available(reference: str, root: Path) -> bool:
+        candidate = Path(reference)
+        if candidate.is_absolute():
+            return False
+        resolved = (root / candidate).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return False
+        return resolved.is_file()
 
     @staticmethod
     def _count_animations(code: str) -> int:
@@ -231,24 +366,6 @@ class StaticGuard:
                 code,
             )
         )
-        # Animation count (warn only — short animations can be
-        # pedagogically valid)
-        anim_count = self._count_animations(code)
-        if anim_count < 1:
-            warnings.append("No play/animate calls found — video may be empty")
-        elif anim_count > 50:
-            warnings.append(
-                f"High animation count ({anim_count}) — may time out or "
-                "produce a very long video"
-            )
-        # Code length gating
-        chars = len(code)
-        if chars > 20_000:
-            warnings.append(
-                f"Code length {chars} > 20k chars — LLM may have "
-                "generated a data dump rather than a scene"
-            )
-        return warnings
 
 
 __all__ = ["StaticGuard", "StaticGuardResult"]

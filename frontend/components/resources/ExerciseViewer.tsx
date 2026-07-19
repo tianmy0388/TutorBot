@@ -22,11 +22,11 @@ import {
   CheckCircle2,
   AlertCircle,
 } from "lucide-react";
-import { recordLearningEvent } from "@/lib/api";
-import { refreshLearningState } from "@/lib/learning-state";
-import { useTutorStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import type { Resource } from "@/lib/types";
+import { useTutorStore } from "@/lib/store";
+import { useExerciseResponses } from "@/hooks/useExerciseResponses";
+import type { CodeExerciseQuestion, ExerciseSubmission, PublicCodeSpec, Resource } from "@/lib/types";
+import { CodeExerciseEditor } from "./CodeExerciseEditor";
 
 interface ParsedQuestion {
   id: string;
@@ -35,8 +35,36 @@ interface ParsedQuestion {
   knowledge_point: string;
   question: string;
   options: Array<{ label: string; text: string }>;
-  answer: string | string[] | boolean;
   explanation: string;
+  code_spec: PublicCodeSpec | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cleanOptionText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function parseOptions(value: unknown): Array<{ label: string; text: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((option, index) => {
+    if (!isRecord(option)) return [];
+    const text = cleanOptionText(option.text);
+    const label = cleanOptionText(option.label);
+    if (
+      !text ||
+      text === "[TRUNCATED]" ||
+      label === "[TRUNCATED]"
+    ) {
+      return [];
+    }
+    return [{
+      label: label || String.fromCharCode(65 + index),
+      text,
+    }];
+  });
 }
 
 function parseQuestions(resource: Resource): ParsedQuestion[] {
@@ -47,14 +75,12 @@ function parseQuestions(resource: Resource): ParsedQuestion[] {
     difficulty: Number(q.difficulty || 2),
     knowledge_point: String(q.knowledge_point || ""),
     question: String(q.question || ""),
-    options: Array.isArray(q.options)
-      ? q.options.map((o: any) => ({
-          label: String(o.label || ""),
-          text: String(o.text || ""),
-        }))
-      : [],
-    answer: q.answer,
+    options: parseOptions(q.options),
     explanation: String(q.explanation || ""),
+    code_spec:
+      q.code_spec && typeof q.code_spec === "object"
+        ? (q.code_spec as PublicCodeSpec)
+        : null,
   }));
 }
 
@@ -64,16 +90,27 @@ const TYPE_LABELS: Record<string, string> = {
   true_false: "判断",
   fill_blank: "填空",
   short_answer: "简答",
+  code: "代码",
 };
 
 export function ExerciseViewer({ resource }: { resource: Resource }) {
-  const questions = parseQuestions(resource);
-  const userId = useTutorStore((s) => s.userId);
-  const latestPackage = useTutorStore((s) => s.latestPackage);
-  const currentCourse = useTutorStore((s) => s.currentCourse);
-  const [answers, setAnswers] = useState<Record<string, any>>({});
-  const [submitted, setSubmitted] = useState<Record<string, boolean>>({});
+  const questions = useMemo(() => parseQuestions(resource), [resource]);
+  const localQuestions = useMemo(
+    () => questions.filter((question) => question.type !== "code"),
+    [questions],
+  );
+  const userId = useTutorStore((state) => state.userId);
+  const sessionId = useTutorStore((state) => state.sessionId);
+  const latestPackage = useTutorStore((state) => state.latestPackage);
+  const packageId = resolveDurablePackageId(resource, latestPackage);
   const [filter, setFilter] = useState<string>("all");
+  const questionIds = useMemo(() => localQuestions.map((question) => question.id), [localQuestions]);
+  const responses = useExerciseResponses({
+    userId,
+    packageId,
+    resourceId: resource.resource_id,
+    sessionId,
+  }, questionIds);
 
   const filteredQuestions = useMemo(() => {
     if (filter === "all") return questions;
@@ -84,14 +121,15 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
   const stats = useMemo(() => {
     let correct = 0;
     let answered = 0;
-    questions.forEach((q) => {
-      if (submitted[q.id]) {
+    localQuestions.forEach((q) => {
+      const submission = responses.submissions[q.id];
+      if (submission) {
         answered += 1;
-        if (isCorrect(q, answers[q.id])) correct += 1;
+        if (submission.correct === true) correct += 1;
       }
     });
-    return { correct, answered, total: questions.length };
-  }, [questions, answers, submitted]);
+    return { correct, answered, total: localQuestions.length };
+  }, [localQuestions, responses.submissions]);
 
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = { all: questions.length };
@@ -109,87 +147,28 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
     );
   }
 
-  const setAnswer = (qid: string, value: any) => {
-    setAnswers((s) => ({ ...s, [qid]: value }));
-  };
-
-  const submit = (qid: string) => {
-    const q = questions.find((item) => item.id === qid);
-    const ok = q ? isCorrect(q, answers[q.id]) : undefined;
-    setSubmitted((s) => ({ ...s, [qid]: true }));
-    if (q) {
-      void recordLearningEvent({
-        user_id: userId || "anonymous",
-        event_type: "exercise_attempted",
-        target_id: `${resource.resource_id}:${q.id}`,
-        concept_id: q.knowledge_point || resource.topic || "",
-        score: ok === undefined ? null : ok ? 1 : 0,
-        correct: ok,
-        metadata: {
-          resource_id: resource.resource_id,
-          resource_title: resource.title,
-          package_id: latestPackage?.package_id || "",
-          question_type: q.type,
-          difficulty: q.difficulty,
-        },
-      })
-        .then(() => refreshLearningState(userId || "anonymous", currentCourse))
-        .catch(() => undefined);
-    }
-  };
-
-  const reset = (qid: string) => {
-    setAnswers((s) => {
-      const c = { ...s };
-      delete c[qid];
-      return c;
-    });
-    setSubmitted((sub) => {
-      const c = { ...sub };
-      delete c[qid];
-      return c;
-    });
-  };
-
   const submitAll = () => {
-    const next: Record<string, boolean> = {};
-    questions.forEach((q) => {
-      if (answers[q.id] !== undefined) next[q.id] = true;
+    localQuestions.forEach((q) => {
+      if (responses.drafts[q.id] !== undefined && !responses.submissions[q.id]) {
+        void responses.submit(q.id);
+      }
     });
-    setSubmitted(next);
-    const attempted = questions.filter((q) => answers[q.id] !== undefined);
-    if (attempted.length > 0) {
-      const correct = attempted.filter((q) => isCorrect(q, answers[q.id])).length;
-      void recordLearningEvent({
-        user_id: userId || "anonymous",
-        event_type: "exercise_completed",
-        target_id: resource.resource_id,
-        concept_id: resource.topic || "",
-        score: correct / attempted.length,
-        correct: correct === attempted.length,
-        metadata: {
-          resource_title: resource.title,
-          package_id: latestPackage?.package_id || "",
-          attempted: attempted.length,
-          total: questions.length,
-          correct,
-          weak_concepts: attempted
-            .filter((q) => !isCorrect(q, answers[q.id]))
-            .map((q) => q.knowledge_point)
-            .filter(Boolean),
-        },
-      })
-        .then(() => refreshLearningState(userId || "anonymous", currentCourse))
-        .catch(() => undefined);
-    }
   };
 
   const resetAll = () => {
-    setAnswers({});
-    setSubmitted({});
+    localQuestions.forEach((q) => responses.resetDraft(q.id));
   };
 
   const allSubmitted = stats.answered === stats.total && stats.total > 0;
+  const hasSubmitting = localQuestions.some((question) => responses.submitting[question.id]);
+  const hasDrafts = localQuestions.some(
+    (question) => responses.drafts[question.id] !== undefined,
+  );
+  const hasSubmittableDrafts = localQuestions.some(
+    (question) =>
+      responses.drafts[question.id] !== undefined &&
+      !responses.submissions[question.id],
+  );
 
   return (
     <div className="space-y-4">
@@ -213,10 +192,10 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
           <div className="flex gap-2">
             <button
               onClick={submitAll}
-              disabled={stats.answered === stats.total}
+              disabled={!hasSubmittableDrafts || hasSubmitting}
               className={cn(
                 "btn-ghost text-xs px-3 py-1.5",
-                stats.answered === stats.total && "opacity-50 cursor-not-allowed",
+                (!hasSubmittableDrafts || hasSubmitting) && "opacity-50 cursor-not-allowed",
               )}
             >
               <Send className="w-3 h-3" />
@@ -224,10 +203,10 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
             </button>
             <button
               onClick={resetAll}
-              disabled={stats.answered === 0}
+              disabled={!hasDrafts}
               className={cn(
                 "btn-ghost text-xs px-3 py-1.5",
-                stats.answered === 0 && "opacity-50 cursor-not-allowed",
+                !hasDrafts && "opacity-50 cursor-not-allowed",
               )}
             >
               <RotateCcw className="w-3 h-3" />
@@ -270,20 +249,20 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
           className={cn(
             "p-3 rounded-lg flex items-center gap-3 border",
             stats.correct === stats.total
-              ? "bg-green-950/30 border-green-700/40"
+              ? "bg-green-50 border-green-200 dark:bg-bg-subtle dark:border-border"
               : stats.correct / stats.total >= 0.6
-              ? "bg-yellow-950/30 border-yellow-700/40"
-              : "bg-red-950/30 border-red-700/40",
+              ? "bg-yellow-50 border-yellow-200 dark:bg-bg-subtle dark:border-border"
+              : "bg-red-50 border-red-200 dark:bg-bg-subtle dark:border-border",
           )}
         >
           {stats.correct === stats.total ? (
-            <CheckCircle2 className="w-6 h-6 text-green-400 shrink-0" />
+            <CheckCircle2 className="w-6 h-6 text-green-700 shrink-0 dark:text-fg" />
           ) : (
-            <AlertCircle className="w-6 h-6 text-yellow-400 shrink-0" />
+            <AlertCircle className="w-6 h-6 text-yellow-700 shrink-0 dark:text-fg-muted" />
           )}
           <div className="flex-1 text-sm">
             {stats.correct === stats.total
-              ? "🎉 全对！太棒了！"
+              ? "全部答对，做得很好。"
               : stats.correct / stats.total >= 0.6
               ? `还不错，正确率 ${((stats.correct / stats.total) * 100).toFixed(0)}%`
               : `需要更多练习，正确率仅 ${((stats.correct / stats.total) * 100).toFixed(0)}%`}
@@ -294,8 +273,22 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
       {/* Questions */}
       <div className="space-y-4">
         {filteredQuestions.map((q, idx) => {
-          const isSub = !!submitted[q.id];
-          const correct = isSub && isCorrect(q, answers[q.id]);
+          if (q.type === "code") {
+            return (
+              <CodeQuestionCard
+                key={q.id}
+                index={questions.indexOf(q) + 1}
+                question={q}
+                packageId={packageId}
+                resourceId={resource.resource_id}
+                userId={userId}
+                sessionId={sessionId}
+              />
+            );
+          }
+          const submission = responses.submissions[q.id];
+          const isSub = !!submission;
+          const correct = submission?.correct === true;
           return (
             <QuestionCard
               key={q.id}
@@ -303,40 +296,19 @@ export function ExerciseViewer({ resource }: { resource: Resource }) {
               question={q}
               isSub={isSub}
               correct={correct}
-              answer={answers[q.id]}
-              setAnswer={(v) => setAnswer(q.id, v)}
-              submit={() => submit(q.id)}
-              reset={() => reset(q.id)}
+              submitting={responses.submitting[q.id] === true}
+              submitError={responses.submitErrors[q.id]}
+              submission={submission}
+              answer={responses.drafts[q.id]}
+              setAnswer={(v) => responses.setDraft(q.id, v)}
+              submit={() => { void responses.submit(q.id); }}
+              reset={() => responses.resetDraft(q.id)}
             />
           );
         })}
       </div>
     </div>
   );
-}
-
-function isCorrect(q: ParsedQuestion, ans: any): boolean {
-  if (ans === undefined || ans === null) return false;
-  if (q.type === "fill_blank") {
-    // 2026-06-21 plan (B4): per-blank comparison with
-    // trim + case-insensitive + numeric-tolerance
-    const expected = Array.isArray(q.answer) ? q.answer : [q.answer];
-    const given = Array.isArray(ans) ? ans : [ans];
-    if (expected.length !== given.length) return false;
-    return expected.every((exp: unknown, i: number) =>
-      _normalizeFillBlank(String(exp), String(given[i] ?? ""))
-    );
-  }
-  if (Array.isArray(q.answer)) {
-    if (!Array.isArray(ans)) return false;
-    const setA = new Set<string>(q.answer.map(String));
-    const setB = new Set<string>(ans.map(String));
-    return setA.size === setB.size && [...setA].every((x) => setB.has(x));
-  }
-  if (typeof q.answer === "boolean") {
-    return ans === q.answer;
-  }
-  return String(ans).trim().toLowerCase() === String(q.answer).trim().toLowerCase();
 }
 
 /**
@@ -383,6 +355,9 @@ function QuestionCard({
   question: q,
   isSub,
   correct,
+  submitting,
+  submitError,
+  submission,
   answer,
   setAnswer,
   submit,
@@ -392,6 +367,9 @@ function QuestionCard({
   question: ParsedQuestion;
   isSub: boolean;
   correct: boolean;
+  submitting: boolean;
+  submitError?: string;
+  submission?: ExerciseSubmission;
   answer: any;
   setAnswer: (v: any) => void;
   submit: () => void;
@@ -403,8 +381,8 @@ function QuestionCard({
         "p-4 rounded-lg border bg-bg-card",
         isSub
           ? correct
-            ? "border-green-700/50 bg-green-950/20"
-            : "border-red-700/50 bg-red-950/20"
+            ? "border-green-300 bg-green-50 dark:border-border dark:bg-bg-subtle"
+            : "border-red-300 bg-red-50 dark:border-border dark:bg-bg-subtle"
           : "border-fg/10",
       )}
     >
@@ -419,7 +397,7 @@ function QuestionCard({
           </span>
         </span>
         {isSub && (
-          <span className={correct ? "text-green-400 flex items-center gap-1" : "text-red-400 flex items-center gap-1"}>
+          <span className={correct ? "text-green-700 dark:text-fg flex items-center gap-1" : "text-red-700 dark:text-fg flex items-center gap-1"}>
             {correct ? <Check className="w-3 h-3" /> : <X className="w-3 h-3" />}
             {correct ? "正确" : "错误"}
           </span>
@@ -428,19 +406,19 @@ function QuestionCard({
       <p className="text-sm text-fg mb-3 leading-relaxed">{q.question}</p>
       {q.type === "single_choice" && q.options.length > 0 && (
         <div className="space-y-2">
-          {q.options.map((opt) => {
+          {q.options.map((opt, index) => {
             const checked = answer === opt.label;
-            const isAnswer = String(q.answer) === opt.label;
+            const isAnswer = String(submission?.answer) === opt.label;
             return (
               <label
-                key={opt.label}
+                key={JSON.stringify([q.id, opt.label || "option", index])}
                 className={cn(
                   "flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors",
                   checked
                     ? "border-brand-500 bg-brand-50 dark:bg-bg-subtle"
                     : "border-fg/10 hover:border-fg/20",
-                  isSub && isAnswer && "border-green-500 bg-green-950/30",
-                  isSub && checked && !isAnswer && "border-red-500 bg-red-950/30",
+                  isSub && isAnswer && "border-green-500 bg-green-50 dark:border-border dark:bg-bg-subtle",
+                  isSub && checked && !isAnswer && "border-red-500 bg-red-50 dark:border-border dark:bg-bg-subtle",
                   isSub && "cursor-default",
                 )}
               >
@@ -466,22 +444,23 @@ function QuestionCard({
       )}
       {q.type === "multiple_choice" && q.options.length > 0 && (
         <div className="space-y-2">
-          {q.options.map((opt) => {
+          {q.options.map((opt, index) => {
             const current = Array.isArray(answer) ? answer : [];
             const checked = current.includes(opt.label);
-            const isAnswer = Array.isArray(q.answer)
-              ? (q.answer as string[]).includes(opt.label)
-              : String(q.answer) === opt.label;
+            const canonical = submission?.answer;
+            const isAnswer = Array.isArray(canonical)
+              ? canonical.includes(opt.label)
+              : String(canonical) === opt.label;
             return (
               <label
-                key={opt.label}
+                key={JSON.stringify([q.id, opt.label || "option", index])}
                 className={cn(
                   "flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors",
                   checked
                     ? "border-brand-500 bg-brand-50 dark:bg-bg-subtle"
                     : "border-fg/10 hover:border-fg/20",
-                  isSub && isAnswer && "border-green-500 bg-green-950/30",
-                  isSub && checked && !isAnswer && "border-red-500 bg-red-950/30",
+                  isSub && isAnswer && "border-green-500 bg-green-50 dark:border-border dark:bg-bg-subtle",
+                  isSub && checked && !isAnswer && "border-red-500 bg-red-50 dark:border-border dark:bg-bg-subtle",
                   isSub && "cursor-default",
                 )}
               >
@@ -513,7 +492,7 @@ function QuestionCard({
         <div className="flex gap-2">
           {[true, false].map((v) => {
             const checked = answer === v;
-            const isAnswer = q.answer === v;
+            const isAnswer = submission?.answer === v;
             return (
               <button
                 key={String(v)}
@@ -524,8 +503,8 @@ function QuestionCard({
                   checked
                     ? "border-brand-500 bg-brand-50 dark:bg-bg-subtle"
                     : "border-fg/10 hover:border-fg/20",
-                  isSub && isAnswer && "border-green-500 bg-green-950/30",
-                  isSub && checked && !isAnswer && "border-red-500 bg-red-950/30",
+                  isSub && isAnswer && "border-green-500 bg-green-50 dark:border-border dark:bg-bg-subtle",
+                  isSub && checked && !isAnswer && "border-red-500 bg-red-50 dark:border-border dark:bg-bg-subtle",
                 )}
               >
                 {v ? "✓ 正确" : "✗ 错误"}
@@ -549,6 +528,7 @@ function QuestionCard({
           question={q}
           answer={answer}
           isSub={isSub}
+          submission={submission}
           setAnswer={setAnswer}
         />
       )}
@@ -556,14 +536,14 @@ function QuestionCard({
         {!isSub ? (
           <button
             onClick={submit}
-            disabled={answer === undefined}
+            disabled={answer === undefined || submitting}
             className={cn(
               "btn-primary text-xs px-3 py-1.5",
-              answer === undefined && "opacity-50 cursor-not-allowed",
+              (answer === undefined || submitting) && "opacity-50 cursor-not-allowed",
             )}
           >
             <Check className="w-3 h-3" />
-            提交
+            {submitting ? "提交中…" : "提交"}
           </button>
         ) : (
           <button onClick={reset} className="btn-ghost text-xs px-3 py-1.5">
@@ -571,10 +551,13 @@ function QuestionCard({
             重做
           </button>
         )}
-        {isSub && q.explanation && (
+        {!isSub && submitError && (
+          <span className="text-xs text-red-700 leading-relaxed dark:text-fg-muted">{submitError}</span>
+        )}
+        {isSub && submission?.explanation && (
           <div className="text-xs text-fg-muted ml-2 flex-1 leading-relaxed">
             <span className="font-semibold text-brand-700 dark:text-fg">解析：</span>
-            {q.explanation}
+            {submission.explanation}
           </div>
         )}
       </div>
@@ -591,22 +574,35 @@ function FillBlankInput({
   question: q,
   answer,
   isSub,
+  submission,
   setAnswer,
 }: {
   question: ParsedQuestion;
   answer: string[];
   isSub: boolean;
+  submission?: ExerciseSubmission;
   setAnswer: (v: string[]) => void;
 }) {
   const segments = useMemo(() => _splitBlanks(q.question), [q.question]);
-  const expected = Array.isArray(q.answer) ? q.answer : [q.answer];
+  // Per-slot canonical answers come from the submission — the public resource
+  // projection strips them. Old submissions without one render neutrally.
+  const expected = useMemo<Array<string | string[]>>(() => {
+    const canonical = submission?.answer;
+    if (Array.isArray(canonical)) return canonical;
+    return canonical == null ? [] : [String(canonical)];
+  }, [submission]);
+  // The draft is cleared on submit, so post-submit slots echo the submitted
+  // values; pre-submit they follow the draft as before.
+  const displayed = isSub && Array.isArray(submission?.answer_json)
+    ? (submission.answer_json as string[])
+    : answer;
 
   if (segments.length === 1 && !segments[0].blankKey) {
     // No blank markers found — render a single input.
     return (
       <input
         type="text"
-        value={Array.isArray(answer) ? (answer[0] ?? "") : (answer ?? "")}
+        value={Array.isArray(displayed) ? (displayed[0] ?? "") : (displayed ?? "")}
         disabled={isSub}
         onChange={(e) => setAnswer([e.target.value])}
         className="w-full bg-bg-panel border border-fg/10 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-brand-500"
@@ -622,10 +618,12 @@ function FillBlankInput({
           return seg.text ? <span key={i}>{seg.text} </span> : null;
         }
         const blankIdx = parseInt(seg.blankKey.replace("blank_", ""), 10);
-        const userVal = (Array.isArray(answer) ? answer[blankIdx] : "") ?? "";
-        const exp = String(expected[blankIdx] ?? "");
-        const slotCorrect = isSub
-          ? _normalizeFillBlank(exp, String(userVal))
+        const userVal = (Array.isArray(displayed) ? displayed[blankIdx] : "") ?? "";
+        const entry = expected[blankIdx];
+        const variants = Array.isArray(entry) ? entry : entry == null ? [] : [entry];
+        const exp = variants.length ? String(variants[0]) : "";
+        const slotCorrect = isSub && variants.length
+          ? variants.some((variant) => _normalizeFillBlank(String(variant), String(userVal)))
           : null;
         return (
           <span key={seg.blankKey} className="inline-flex items-center gap-1 mx-0.5 align-baseline">
@@ -645,13 +643,15 @@ function FillBlankInput({
               <span
                 className={cn(
                   "px-2 py-0.5 rounded text-sm font-mono border",
-                  slotCorrect
-                    ? "bg-green-950/20 border-green-700/50 text-green-300"
-                    : "bg-red-950/20 border-red-700/50 text-red-300",
+                  slotCorrect === null
+                    ? "border-fg/10"
+                    : slotCorrect
+                    ? "bg-green-50 border-green-300 text-green-800 dark:bg-bg-subtle dark:border-border dark:text-fg"
+                    : "bg-red-50 border-red-300 text-red-800 dark:bg-bg-subtle dark:border-border dark:text-fg",
                 )}
               >
                 {userVal || "(空)"}
-                {slotCorrect ? (
+                {slotCorrect === null ? null : slotCorrect ? (
                   <Check className="w-3 h-3 inline ml-1" />
                 ) : (
                   <X className="w-3 h-3 inline ml-1" />
@@ -659,7 +659,7 @@ function FillBlankInput({
               </span>
             )}
             {isSub && slotCorrect === false && exp && (
-              <span className="text-[10px] text-green-400">({exp})</span>
+              <span className="text-[10px] text-green-700 dark:text-fg-muted">({exp})</span>
             )}
             {segments[i + 1]?.text ? (
               <span>{segments[i + 1].text}</span>
@@ -667,6 +667,83 @@ function FillBlankInput({
           </span>
         );
       })}
+    </div>
+  );
+}
+function resolveDurablePackageId(
+  resource: Resource,
+  latestPackage: { package_id: string; resources: Resource[] } | null,
+) {
+  if (resource.metadata?.package_persisted === false) return null;
+  const metadataId =
+    typeof resource.metadata?.package_id === "string"
+      ? resource.metadata.package_id
+      : "";
+  if (
+    resource.metadata?.package_persisted === true &&
+    metadataId &&
+    !isPendingPackage(metadataId)
+  ) {
+    return metadataId;
+  }
+  if (
+    latestPackage &&
+    !isPendingPackage(latestPackage.package_id) &&
+    latestPackage.resources.some(
+      (item) =>
+        item.resource_id === resource.resource_id &&
+        item.metadata?.package_persisted === true,
+    )
+  ) {
+    return latestPackage.package_id;
+  }
+  return null;
+}
+
+function isPendingPackage(packageId: string) {
+  return packageId.startsWith("pending-") || packageId.startsWith("partial-");
+}
+
+function CodeQuestionCard({
+  index,
+  question,
+  packageId,
+  resourceId,
+  userId,
+  sessionId,
+}: {
+  index: number;
+  question: ParsedQuestion;
+  packageId: string | null;
+  resourceId: string;
+  userId: string;
+  sessionId: string;
+}) {
+  const codeQuestion: CodeExerciseQuestion = {
+    id: question.id,
+    type: "code",
+    difficulty: question.difficulty,
+    knowledge_point: question.knowledge_point,
+    question: question.question,
+    options: question.options,
+    explanation: question.explanation,
+    code_spec: question.code_spec,
+  };
+  return (
+    <div className="rounded-lg border border-fg/10 bg-bg-card p-4">
+      <div className="mb-2 flex items-center gap-2 text-xs text-fg-muted">
+        <span className="font-mono text-fg-subtle">#{index}</span>
+        <span>难度 {"★".repeat(question.difficulty)}</span>
+        <span className="rounded border border-fg/10 bg-bg-panel px-1.5 py-0.5 text-[10px]">代码</span>
+      </div>
+      <p className="text-sm leading-relaxed text-fg">{question.question}</p>
+      <CodeExerciseEditor
+        question={codeQuestion}
+        packageId={packageId}
+        resourceId={resourceId}
+        userId={userId}
+        sessionId={sessionId}
+      />
     </div>
   );
 }

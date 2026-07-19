@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.services.llm.base import LLMResponse
 from tutor.services.manim_render.code_retry import CodeRetry
 from tutor.services.manim_render.executor import ManimExecutor, ManimRenderResult, RenderStatus
 from tutor.services.manim_render.service import ManimRenderService
 from tutor.services.manim_render.static_guard import StaticGuard
-
 
 VALID_CODE = '''from manim import *
 
@@ -27,7 +27,7 @@ class HelloScene(Scene):
 
 
 requires_manim = pytest.mark.skipif(
-    shutil.which("manim") is None,
+    shutil.which("manim") is None and importlib.util.find_spec("manim") is None,
     reason="manim not installed",
 )
 
@@ -128,6 +128,27 @@ async def test_render_happy_path(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_render_serializes_a_portable_artifact_key(tmp_path, monkeypatch):
+    from tutor.services.config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "data_dir", tmp_path, raising=False)
+    executor = _mock_executor_success(tmp_path)
+    svc = ManimRenderService(
+        static_guard=StaticGuard(),
+        executor=executor,
+        code_retry=CodeRetry(llm=_mock_llm_no_op(), max_attempts=1),
+        public_dir=tmp_path / "manim_videos",
+    )
+
+    result = await svc.render(code=VALID_CODE, scene_class="HelloScene")
+
+    serialized = result.to_dict()
+    digest = hashlib.sha256(b"FAKE_MP4_DATA").hexdigest()
+    assert serialized["artifact_key"] == f"manim_videos/{digest}.mp4"
+    assert "video_path" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_render_static_guard_failure_short_circuits(tmp_path):
     """Bad code → never calls executor."""
     executor = _mock_executor_success(tmp_path)
@@ -145,66 +166,39 @@ async def test_render_static_guard_failure_short_circuits(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_render_retries_on_failure_then_succeeds(tmp_path):
-    """First render fails, retry applies patch, second render succeeds."""
-    # Build a real CodeRetry with mock LLM that produces a no-op patch
-    # (the test patches the render fn to succeed on second call)
-    from tutor.services.llm.base import LLMResponse
-    from unittest.mock import MagicMock
+async def test_initial_render_does_not_call_llm_patch_retry(tmp_path):
+    """A runtime failure is terminal until the user requests regeneration."""
+    executor = _mock_executor_failure()
+    executor.temp_dir = tmp_path / "render-workdir"
 
-    llm = MagicMock()
-    llm.model = "mock"
-    llm.default_temperature = 0.5
-    llm.default_max_tokens = 2048
+    class RecordingLLM:
+        model = "mock"
+        default_temperature = 0.5
+        default_max_tokens = 2048
 
-    llm_responses = iter(
-        [
-            # First call: provide a patch
-            '{"patches": [{"search": "Hello", "replace": "Hi", "explanation": "shorten"}]}',
-        ]
-    )
+        def __init__(self):
+            self.calls = []
 
-    async def call(req):
-        return LLMResponse(content=next(llm_responses), model="mock")
-
-    llm.call = call
-    code_retry = CodeRetry(llm=llm, max_attempts=3)
-
-    # Build an executor that fails first, succeeds second
-    executor = MagicMock(spec=ManimExecutor)
-    fake_video = tmp_path / "ok.mp4"
-    fake_video.write_bytes(b"X")
-    executor.is_available.return_value = True
-    call_count = [0]
-
-    def render_fn(code, scene_class, **kw):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return ManimRenderResult(
-                status=RenderStatus.FAILED,
-                stderr="render error 1",
-                error_message="failed",
+        async def call(self, request):
+            self.calls.append(request)
+            return LLMResponse(
+                content='{"patches": [{"search": "Hello", "replace": "Hi"}]}',
+                model="mock",
             )
-        return ManimRenderResult(
-            status=RenderStatus.SUCCESS,
-            video_path=fake_video,
-            exit_code=0,
-            duration_seconds=5.0,
-        )
 
-    executor.render.side_effect = render_fn
-
-    svc = ManimRenderService(
+    llm = RecordingLLM()
+    service = ManimRenderService(
         static_guard=StaticGuard(),
         executor=executor,
-        code_retry=code_retry,
+        code_retry=CodeRetry(llm=llm, max_attempts=4),
         public_dir=tmp_path / "public",
     )
 
-    result = await svc.render(code=VALID_CODE, scene_class="HelloScene")
-    assert result.success is True
-    assert result.attempts == 2  # first fail + retry success
-    assert "Hi" in result.code  # patch was applied
+    result = await service.render(code=VALID_CODE, scene_class="HelloScene")
+
+    assert result.success is False
+    assert executor.render.call_count == 1
+    assert llm.calls == []
 
 
 @pytest.mark.asyncio
@@ -226,6 +220,218 @@ async def test_render_manim_not_available(tmp_path):
         assert result.success is False
 
 
+@pytest.mark.asyncio
+async def test_render_failure_keeps_last_120_lines_and_complete_log_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    from tutor.services.artifacts import resolve_artifact_key
+    from tutor.services.config.settings import get_settings
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(get_settings(), "data_dir", data_dir, raising=False)
+    lines = [f"trace line {index:03d}" for index in range(150)]
+    stderr = "\n".join(lines)
+    executor = MagicMock(spec=ManimExecutor)
+    executor.is_available.return_value = True
+    executor.temp_dir = tmp_path / "render-workdir"
+    executor.temp_dir.mkdir()
+    executor.render.return_value = ManimRenderResult(
+        status=RenderStatus.FAILED,
+        stdout="complete stdout Ω",
+        stderr=stderr,
+        exit_code=1,
+        error_message="unsafe C:\\private\\render.py detail",
+    )
+    svc = ManimRenderService(
+        static_guard=StaticGuard(),
+        executor=executor,
+        code_retry=CodeRetry(llm=_mock_llm_no_op(), max_attempts=1),
+        public_dir=data_dir / "manim_videos",
+    )
+
+    result = await svc.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="child-video-failure",
+    )
+
+    assert result.success is False
+    assert result.failure.error_code == "process_exit"
+    assert result.failure.traceback_tail == tuple(lines[-120:])
+    assert len(result.failure.summary) <= 200
+    assert "C:\\private" not in result.failure.summary
+    assert result.failure.log_artifact_key
+    log_path = resolve_artifact_key(result.failure.log_artifact_key, data_dir)
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "complete stdout Ω" in log_text
+    assert lines[0] in log_text
+    assert lines[-1] in log_text
+    assert result.to_dict()["failure"]["traceback_tail"] == lines[-120:]
+
+
+@pytest.mark.asyncio
+async def test_publish_is_content_addressed_and_never_overwrites_prior_video(tmp_path):
+    first_source = tmp_path / "first" / "MainScene.mp4"
+    second_source = tmp_path / "second" / "MainScene.mp4"
+    first_source.parent.mkdir()
+    second_source.parent.mkdir()
+    first_source.write_bytes(b"first-user-video")
+    second_source.write_bytes(b"second-user-video")
+    executor = MagicMock(spec=ManimExecutor)
+    executor.is_available.return_value = True
+    executor.temp_dir = tmp_path / "work"
+    executor.render.side_effect = [
+        ManimRenderResult(status=RenderStatus.SUCCESS, video_path=first_source),
+        ManimRenderResult(status=RenderStatus.SUCCESS, video_path=second_source),
+    ]
+    service = ManimRenderService(
+        executor=executor,
+        public_dir=tmp_path / "public",
+    )
+
+    first = await service.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="owner-a-resource-a",
+    )
+    first_bytes = first.video_path.read_bytes()
+    second = await service.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="owner-b-resource-b",
+    )
+
+    assert first.success is True and second.success is True
+    assert first.video_path != second.video_path
+    assert first.public_url != second.public_url
+    assert first.video_path.read_bytes() == first_bytes == b"first-user-video"
+    assert second.video_path.read_bytes() == b"second-user-video"
+
+
+@pytest.mark.asyncio
+async def test_publish_replaces_corrupt_existing_digest_destination(tmp_path):
+    source = tmp_path / "source" / "MainScene.mp4"
+    source.parent.mkdir()
+    source_bytes = b"correct-content-addressed-video"
+    source.write_bytes(source_bytes)
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    public_dir = tmp_path / "public"
+    public_dir.mkdir()
+    destination = public_dir / f"{digest}.mp4"
+    destination.write_bytes(b"corrupt-stale-video")
+    executor = MagicMock(spec=ManimExecutor)
+    executor.is_available.return_value = True
+    executor.temp_dir = tmp_path / "work"
+    executor.render.return_value = ManimRenderResult(
+        status=RenderStatus.SUCCESS,
+        video_path=source,
+    )
+    service = ManimRenderService(executor=executor, public_dir=public_dir)
+
+    result = await service.render(code=VALID_CODE, scene_class="HelloScene")
+
+    assert result.success is True
+    assert result.video_path == destination
+    assert result.video_path.read_bytes() == source_bytes
+    assert hashlib.sha256(result.video_path.read_bytes()).hexdigest() == digest
+
+
+@pytest.mark.asyncio
+async def test_publish_copy_failure_returns_structured_terminal_failure(
+    tmp_path,
+    monkeypatch,
+):
+    executor = _mock_executor_success(tmp_path)
+    service = ManimRenderService(
+        executor=executor,
+        public_dir=tmp_path / "public",
+    )
+
+    def fail_copy(*args, **kwargs):
+        raise OSError("provider-token=private-value C:\\private\\video.mp4")
+
+    monkeypatch.setattr("tutor.services.manim_render.service.shutil.copy2", fail_copy)
+    result = await service.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="publish-failure-child",
+    )
+
+    assert result.success is False
+    assert result.video_path is None
+    assert result.public_url == ""
+    assert result.failure.error_code == "publish_failed"
+    assert result.failure.log_artifact_key
+    assert "private-value" not in str(result.to_dict())
+    assert "C:\\private" not in str(result.to_dict())
+
+
+@pytest.mark.asyncio
+async def test_empty_publish_result_is_failure_not_ready(tmp_path, monkeypatch):
+    executor = _mock_executor_success(tmp_path)
+    service = ManimRenderService(executor=executor, public_dir=tmp_path / "public")
+    monkeypatch.setattr(service, "_publish", lambda *args: (None, ""))
+
+    result = await service.render(code=VALID_CODE, scene_class="HelloScene")
+
+    assert result.success is False
+    assert result.failure.error_code == "publish_failed"
+    assert result.video_path is None
+
+
+@pytest.mark.asyncio
+async def test_executor_exception_returns_bounded_structured_failure(tmp_path):
+    executor = MagicMock(spec=ManimExecutor)
+    executor.is_available.return_value = True
+    executor.temp_dir = tmp_path / "work"
+    executor.render.side_effect = RuntimeError(
+        "provider-token=private-value at C:\\private\\scene.py"
+    )
+    service = ManimRenderService(executor=executor, public_dir=tmp_path / "public")
+
+    result = await service.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="executor-exception-child",
+    )
+
+    assert result.success is False
+    assert result.attempts == 1
+    assert result.final_render is None
+    assert result.failure.error_code == "executor_exception"
+    assert result.failure.log_artifact_key
+    assert len(result.failure.summary) <= 200
+    assert "private-value" not in str(result.to_dict())
+    assert "C:\\private" not in str(result.to_dict())
+
+
+@pytest.mark.asyncio
+async def test_missing_render_history_returns_failure_instead_of_index_error(
+    tmp_path,
+    monkeypatch,
+):
+    executor = _mock_executor_failure()
+    executor.temp_dir = tmp_path / "work"
+    service = ManimRenderService(executor=executor, public_dir=tmp_path / "public")
+
+    async def render_without_history(code):
+        return False, "executor returned no result"
+
+    monkeypatch.setattr(
+        service,
+        "_make_render_fn",
+        lambda *args: (render_without_history, []),
+    )
+    result = await service.render(code=VALID_CODE, scene_class="HelloScene")
+
+    assert result.success is False
+    assert result.final_render is None
+    assert result.failure.error_code == "missing_render_result"
+    assert result.failure.log_artifact_key
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -234,7 +440,6 @@ async def test_render_manim_not_available(tmp_path):
 def _mock_llm_no_op():
     """LLM that returns empty patches (forces retry to give up early)."""
     from unittest.mock import MagicMock
-    from tutor.services.llm.base import LLMResponse
 
     llm = MagicMock()
     llm.model = "mock"
@@ -257,7 +462,6 @@ def _mock_llm_no_op():
 @pytest.mark.asyncio
 async def test_real_render_full_pipeline(tmp_path):
     """Run the entire pipeline against real manim."""
-    from tutor.services.config.settings import Settings, get_settings
     import os
 
     os.environ["TUTOR_MANIM_OUTPUT_DIR"] = str(tmp_path / "manim_out")

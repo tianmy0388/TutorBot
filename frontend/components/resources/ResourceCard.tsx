@@ -24,8 +24,8 @@ import {
   Inbox,
   Tag,
 } from "lucide-react";
-import { useEffect, useRef } from "react";
-import { recordLearningEvent } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { recordLearningEvent, retryJob } from "@/lib/api";
 import { useTutorStore } from "@/lib/store";
 import type { Resource } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -100,19 +100,49 @@ export function ResourceCard({
 }: ResourceCardProps) {
   const meta = TYPE_META[resource.type];
   const Icon = meta.icon;
+  const userId = useTutorStore((s) => s.userId);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState("");
+  const artifactMissing = resource.metadata?.artifact_missing === true;
+  const recoveryContract = resource.metadata?.recovery_contract as
+    | { job_id?: unknown; resource_types?: unknown }
+    | undefined;
+  const canRetry =
+    artifactMissing &&
+    typeof recoveryContract?.job_id === "string" &&
+    Array.isArray(recoveryContract.resource_types);
+
+  const regenerate = async () => {
+    if (!canRetry || retrying) return;
+    setRetrying(true);
+    setRetryError("");
+    try {
+      await retryJob(
+        userId,
+        recoveryContract.job_id as string,
+        (recoveryContract.resource_types as unknown[]).map(String),
+      );
+    } catch (error) {
+      setRetryError(error instanceof Error ? error.message : "重新生成失败");
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "w-full text-left p-3 rounded-lg border transition-all",
-        meta.bgClass,
-        selected
-          ? "ring-2 ring-brand-400 border-brand-500/60 shadow-md"
-          : "border-fg/5 hover:border-fg/20 hover:shadow-sm",
-        onClick && "cursor-pointer",
-      )}
-    >
-      <div className="flex items-start gap-2">
+    <div className={cn("rounded-lg border", meta.bgClass)}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(
+          "w-full text-left p-3 rounded-lg transition-all",
+          selected
+            ? "ring-2 ring-brand-400 shadow-md dark:ring-fg-muted"
+            : "hover:bg-white/[0.02] hover:shadow-sm",
+          onClick && "cursor-pointer",
+        )}
+      >
+        <div className="flex items-start gap-2">
         <Icon className={cn("w-4 h-4 mt-0.5 shrink-0", meta.color)} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
@@ -133,8 +163,28 @@ export function ResourceCard({
             </div>
           )}
         </div>
-      </div>
-    </button>
+        </div>
+      </button>
+      {artifactMissing && (
+        <div className="mx-3 mb-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-border dark:bg-bg-subtle dark:text-fg">
+          <div className="font-medium">资源文件缺失</div>
+          {canRetry && (
+            <button
+              type="button"
+              aria-label="重新生成资源"
+              disabled={retrying}
+              onClick={regenerate}
+              className="mt-1 inline-flex min-h-11 items-center text-amber-800 underline hover:text-amber-950 disabled:opacity-60 dark:text-fg-muted dark:hover:text-fg"
+            >
+              {retrying ? "正在重新生成…" : "重新生成"}
+            </button>
+          )}
+          {retryError && (
+            <div className="mt-1 text-red-700 dark:text-fg-muted">{retryError}</div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -386,5 +436,4 @@ function display(value: unknown): string {
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return JSON.stringify(value);
 }
-
 export const RESOURCE_TYPE_META = TYPE_META;

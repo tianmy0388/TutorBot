@@ -12,12 +12,11 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
+from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.learner_profile.builder import (
     ProfileBuilder,
     reset_profile_builder,
 )
-from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.learner_profile.schema import (
     LearnerProfile,
     ModalityPreferences,
@@ -30,6 +29,191 @@ from tutor.services.resource_package.schema import (
     ResourcePackage,
     ResourceType,
 )
+
+
+async def _wait_terminal(store, job_id):
+    from tutor.services.jobs.schema import JobStatus
+
+    for _ in range(200):
+        job = await store.get(job_id)
+        if job is not None and job.status in {
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.PARTIAL,
+        }:
+            return job
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"job {job_id} did not terminalize")
+
+
+@pytest.mark.asyncio
+async def test_first_submission_persists_profile_then_version_bound_path(
+    tmp_path, monkeypatch
+):
+    import networkx as nx
+    from tutor.services.exercise_responses.publisher import publish_submission_event
+    from tutor.services.exercise_responses.schema import ExerciseSubmission
+    from tutor.services.exercise_responses.store import ExerciseResponseStore
+    from tutor.services.jobs import follow_up as follow_up_module
+    from tutor.services.jobs.follow_up import (
+        PathRebuildFollowUpCapability,
+        ProfileUpdateFollowUpCapability,
+    )
+    from tutor.services.jobs.runner import JobRunner
+    from tutor.services.jobs.store import JobStore
+    from tutor.services.knowledge_graph.planner import KGPathPlanner
+    from tutor.services.knowledge_graph.schema import EdgeType, KGEdge, KGNode, KnowledgeGraph
+    from tutor.services.learner_profile.store import ProfileStore
+    from tutor.services.learning_events.schema import EventType
+    from tutor.services.learning_events.store import LearningEventStore
+    from tutor.services.learning_events.workflow import LearningWorkflow
+
+    events = LearningEventStore(tmp_path / "events.db")
+    responses = ExerciseResponseStore(tmp_path / "responses.db")
+    profiles = ProfileStore(tmp_path / "profiles.db")
+    jobs = JobStore(tmp_path / "jobs.db")
+    await events.init()
+    await responses.init()
+    await profiles.init()
+    await jobs.init()
+
+    model = KnowledgeGraph(
+        course="test-course",
+        nodes=[
+            KGNode(id="attention", name="Attention", estimated_hours=1),
+            KGNode(id="transformer", name="Transformer", prerequisites=["attention"], estimated_hours=2),
+        ],
+        edges=[KGEdge(**{"from": "attention", "to": "transformer", "type": EdgeType.PREREQUISITE})],
+    )
+    graph = nx.DiGraph()
+    graph.add_nodes_from(["attention", "transformer"])
+    graph.add_edge("attention", "transformer")
+
+    class KG:
+        def default_course(self): return "test-course"
+        def has_course(self, course): return course == "test-course"
+        def get_graph(self, course): return model, graph
+        def plan_for_learner(self, course, profile):
+            return KGPathPlanner().plan(model, graph, profile)
+
+    monkeypatch.setitem(
+        follow_up_module._FOLLOW_UP_BUILDERS,
+        "profile_update",
+        lambda: ProfileUpdateFollowUpCapability(event_store=events, profile_store=profiles),
+    )
+    monkeypatch.setitem(
+        follow_up_module._FOLLOW_UP_BUILDERS,
+        "path_rebuild",
+        lambda: PathRebuildFollowUpCapability(profile_store=profiles, kg_service=KG()),
+    )
+
+    class Registry:
+        def get(self, name): return None
+
+    runner = JobRunner(job_store=jobs, capability_registry=Registry())
+    workflow = LearningWorkflow(event_store=events, profile_store=profiles, job_store=jobs)
+    durable = await responses.save_submission(
+        ExerciseSubmission(
+            submission_id="first-loop-response",
+            user_id="local-user",
+            session_id="sess-loop",
+            package_id="pkg-loop",
+            resource_id="resource-loop",
+            question_id="q-attention",
+            question_type="single_choice",
+            answer_json="B",
+            correct=False,
+            score=0.0,
+            concept_id="attention",
+            course="test-course",
+        )
+    )
+    assert await publish_submission_event(
+        durable,
+        response_store=responses,
+        workflow=workflow,
+    )
+    scored = await events.query(
+        "local-user", event_types=[EventType.EXERCISE_SCORED]
+    )
+    assert [event.event_id for event in scored] == [
+        "exercise-response:first-loop-response"
+    ]
+
+    assert await runner.resume_pending() == 1
+    root = await jobs.get(workflow.root_job_id("local-user"))
+    profile_child = (await jobs.get_children(root.job_id))[0]
+    assert (await _wait_terminal(jobs, profile_child.job_id)).status.value == "succeeded"
+    path_child = (await jobs.get_children(profile_child.job_id))[0]
+    assert path_child.dedupe_key == "path_rebuild:2"
+    assert (await _wait_terminal(jobs, path_child.job_id)).status.value == "succeeded"
+
+    profile = await profiles.get("local-user")
+    path = await profiles.get_latest_path("local-user")
+    assert profile.version == 2 and profile.event_watermark == 1
+    assert profile.knowledge_map.get("attention") == 0.0
+    assert path.profile_version == profile.version
+    assert [node["id"] for node in path.nodes] == ["attention", "transformer"]
+    assert {edge["from"] for edge in path.edges} <= {node["id"] for node in path.nodes}
+    await runner.shutdown()
+    await events.close()
+    await responses.close()
+    await profiles.close()
+    await jobs.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_failure_never_creates_path_child(tmp_path, monkeypatch):
+    from tutor.services.jobs import follow_up as follow_up_module
+    from tutor.services.jobs.follow_up import ProfileUpdateFollowUpCapability
+    from tutor.services.jobs.runner import JobRunner
+    from tutor.services.jobs.store import JobStore
+    from tutor.services.learner_profile.store import ProfileStore
+    from tutor.services.learning_events.schema import EventType, LearningEvent
+    from tutor.services.learning_events.store import LearningEventStore
+    from tutor.services.learning_events.workflow import LearningWorkflow
+
+    events = LearningEventStore(tmp_path / "events.db")
+    profiles = ProfileStore(tmp_path / "profiles.db")
+    jobs = JobStore(tmp_path / "jobs.db")
+    await events.init()
+    await profiles.init()
+    await jobs.init()
+    workflow = LearningWorkflow(event_store=events, profile_store=profiles, job_store=jobs)
+    for index in range(5):
+        appended = await events.append(LearningEvent(
+            event_id=f"failure-{index}", user_id="local-user",
+            event_type=EventType.EXERCISE_SCORED, concept_id="attention", score=0.5,
+        ))
+        await workflow.reconcile_user("local-user", through_sequence=appended.event.sequence)
+
+    async def fail_save(*args, **kwargs):
+        raise RuntimeError("private database detail")
+
+    monkeypatch.setattr(profiles, "save_event_profile", fail_save)
+    monkeypatch.setitem(
+        follow_up_module._FOLLOW_UP_BUILDERS,
+        "profile_update",
+        lambda: ProfileUpdateFollowUpCapability(event_store=events, profile_store=profiles),
+    )
+
+    class Registry:
+        def get(self, name): return None
+
+    runner = JobRunner(job_store=jobs, capability_registry=Registry())
+    assert await runner.resume_pending() == 1
+    root = await jobs.get(workflow.root_job_id("local-user"))
+    child = (await jobs.get_children(root.job_id))[0]
+    terminal = await _wait_terminal(jobs, child.job_id)
+    assert terminal.status.value == "failed"
+    assert await jobs.get_children(child.job_id) == []
+    assert await profiles.get("local-user") is None
+    assert "private database detail" not in str(terminal.result)
+    await runner.shutdown()
+    await events.close()
+    await profiles.close()
+    await jobs.close()
 
 
 @pytest.fixture

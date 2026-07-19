@@ -198,7 +198,15 @@ describe("585f367d — stage lifecycle in job-reducer", () => {
       terminalEvent("job-1", "failed", "Job timed out after 600s"),
     );
     expect(state.jobsById["job-1"].status).toBe("failed");
-    expect(state.jobsById["job-1"].stage).toBe("");
+    expect(
+      state.jobsById["job-1"].stage,
+      "stage must be empty after terminal — no more 'active' spinner",
+    ).toBe("");
+    expect(state.messages.find((message) => message.id === "workflow:job-1")?.metadata?.workflow)
+      .toMatchObject({ stages: [
+        { name: "parallel_resource_generation", status: "completed" },
+        { name: "video_rendering", status: "incomplete" },
+      ] });
   });
 
   it("stage_start after job_terminal does not reanimate the stage chip", () => {

@@ -15,12 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from tutor.agents.profile.cognitive_diagnostic import CognitiveDiagnosticAgent
 from tutor.agents.profile.feature_extractor import FeatureExtractorAgent
 from tutor.agents.profile.profile_updater import ProfileUpdaterAgent
@@ -30,14 +27,11 @@ from tutor.core.stream import StreamEvent, StreamEventType
 from tutor.core.stream_bus import StreamBus
 from tutor.services.learner_profile.builder import (
     DialogueSignal,
-    ProfileBuilder,
     get_profile_builder,
 )
 from tutor.services.learner_profile.schema import LearnerProfile
 from tutor.services.learner_profile.store import (
-    ProfileEventType,
     ProfileStore,
-    get_profile_store,
 )
 
 
@@ -52,10 +46,7 @@ def _mock_llm(*responses: str):
     llm.default_max_tokens = 1024
 
     async def call(req):
-        if queue:
-            content = queue.pop(0)
-        else:
-            content = "{}"
+        content = queue.pop(0) if queue else "{}"
         return LLMResponse(content=content, model="mock-model", finish_reason="stop")
 
     llm.call = call
@@ -172,6 +163,35 @@ def warm_capability(fresh_builder):
 
 
 @pytest.mark.asyncio
+async def test_caught_feature_error_redacts_secret_and_emits_stable_code(
+    profile_capability,
+    capsys,
+):
+    secret = "SECRET_TOKEN_PROFILE_123"
+
+    class FailingFeatureExtractor:
+        async def process(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError(secret)
+
+    profile_capability.feature_extractor = FailingFeatureExtractor()
+    bus = StreamBus()
+    queue = bus.subscribe()
+    await profile_capability.run(
+        UnifiedContext(user_id="secret-profile", user_message="更新画像"),
+        bus,
+    )
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event.to_dict())
+
+    captured = capsys.readouterr()
+    public_blob = json.dumps(events, ensure_ascii=False, default=str)
+    assert secret not in public_blob + captured.out + captured.err
+    assert "PROFILE_FEATURE_EXTRACTION_FAILED" in public_blob
+
+
+@pytest.mark.asyncio
 async def test_full_flow_cold_start(profile_capability, fresh_builder):
     """First turn with a fresh user → cold start → 2 probe questions."""
     user_id = "alice"
@@ -193,8 +213,8 @@ async def test_full_flow_cold_start(profile_capability, fresh_builder):
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
 
-    await profile_capability.run(context, bus)
-    await bus.done()
+    result = await profile_capability.run(context, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
     # All 5 stages should have run
@@ -207,10 +227,8 @@ async def test_full_flow_cold_start(profile_capability, fresh_builder):
         "cognitive_diagnosis",
     ]
 
-    # Result event
-    results = [e for e in collected if e.type == StreamEventType.RESULT]
-    assert len(results) == 1
-    payload = json.loads(results[0].content)
+    assert not [e for e in collected if e.type in {StreamEventType.RESULT, StreamEventType.DONE}]
+    payload = result.payload
     assert payload["user_id"] == user_id
     assert payload["mode"] == "cold_start"
     assert payload["next_step"] == "answer_probe_questions"
@@ -256,12 +274,11 @@ async def test_warm_start_no_probes(warm_capability, fresh_builder):
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
 
-    await warm_capability.run(context, bus)
-    await bus.done()
+    result = await warm_capability.run(context, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    results = [e for e in collected if e.type == StreamEventType.RESULT]
-    payload = json.loads(results[0].content)
+    payload = result.payload
     # Warm start with populated profile → no probes
     assert payload["mode"] == "incremental"
     assert len(payload["probe_questions"]) == 0

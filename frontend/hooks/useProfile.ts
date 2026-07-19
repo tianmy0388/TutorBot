@@ -15,7 +15,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTutorStore } from "@/lib/store";
 import { ApiError, getProfile } from "@/lib/api";
 import type { LearnerProfileDetail } from "@/lib/types";
@@ -25,44 +25,83 @@ export function useProfile(userId?: string): {
   loaded: boolean;
   loading: boolean;
   error: string | null;
+  status: "loading" | "empty" | "success" | "failed";
   refresh: () => Promise<void>;
 } {
-  const profile = useTutorStore((s) => s.profile);
-  const loaded = useTutorStore((s) => s.profileLoaded);
+  const cachedProfile = useTutorStore((s) => s.profile);
+  const cacheOwner = useTutorStore((s) => s.profileOwnerId);
+  const cacheLoaded = useTutorStore((s) => s.profileLoaded);
   const setProfile = useTutorStore((s) => s.setProfile);
   const fallbackUserId = useTutorStore((s) => s.userId);
   const target = userId ?? fallbackUserId;
 
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [requestState, setRequestState] = useState<{
+    target: string | null;
+    loading: boolean;
+    error: string | null;
+  }>({ target: null, loading: false, error: null });
+  const requestGeneration = useRef(0);
 
-  const refresh = async () => {
+  const ownsCache = Boolean(target) && cacheOwner === target;
+  const profile = ownsCache ? cachedProfile : null;
+  const loaded = ownsCache && cacheLoaded;
+  const requestIsCurrent = requestState.target === target;
+  const error = requestIsCurrent ? requestState.error : null;
+  const loading = Boolean(target) && (
+    (requestIsCurrent && requestState.loading) || (!loaded && !requestIsCurrent)
+  );
+
+  const refresh = useCallback(async () => {
     if (!target) return;
-    setLoading(true);
-    setError(null);
+    const generation = ++requestGeneration.current;
+    setRequestState({ target, loading: true, error: null });
     try {
       const p = await getProfile(target);
-      setProfile(p);
+      if (generation !== requestGeneration.current) return;
+      setProfile(p, target);
     } catch (e: any) {
+      if (generation !== requestGeneration.current) return;
       // 404 = the user simply has no profile yet. That's a normal
       // first-load state, not a failure; surface it as no profile
       // instead of an error.
       if (e instanceof ApiError && e.status === 404) {
-        setProfile(null);
+        setProfile(null, target);
         return;
       }
-      setError(e?.message || String(e));
+      setRequestState({
+        target,
+        loading: true,
+        error: e?.message || String(e),
+      });
     } finally {
-      setLoading(false);
+      if (generation === requestGeneration.current) {
+        setRequestState((state) =>
+          state.target === target ? { ...state, loading: false } : state,
+        );
+      }
     }
-  };
+  }, [setProfile, target]);
+
+  useEffect(() => {
+    return () => {
+      requestGeneration.current += 1;
+    };
+  }, [target]);
 
   useEffect(() => {
     if (!loaded && target) {
       void refresh();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target]);
+  }, [loaded, refresh, target]);
 
-  return { profile, loaded, loading, error, refresh };
+  const status = loading
+    ? "loading"
+    : error
+      ? "failed"
+      : profile
+        ? "success"
+        : loaded
+          ? "empty"
+          : "loading";
+  return { profile, loaded, loading, error, status, refresh };
 }

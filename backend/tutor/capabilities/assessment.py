@@ -14,16 +14,20 @@ automatically after every N resource completions (Phase 5 background job).
 
 from __future__ import annotations
 
-import json
+from contextlib import suppress
 from typing import Any
-
-from loguru import logger
 
 from tutor.agents.assessment.adaptive_strategy import AdaptiveStrategyEngine
 from tutor.agents.assessment.assessment_agent import AssessmentAgent
+from tutor.capabilities.failure_reporting import log_degraded, report_degraded
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
+from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
+from tutor.services.learner_profile.builder import (
+    ProfileBuilder,
+    get_profile_builder,
+)
 from tutor.services.learning_events.schema import (
     EventType,
     LearningEvent,
@@ -31,10 +35,6 @@ from tutor.services.learning_events.schema import (
 from tutor.services.learning_events.store import (
     LearningEventStore,
     get_learning_event_store,
-)
-from tutor.services.learner_profile.builder import (
-    ProfileBuilder,
-    get_profile_builder,
 )
 
 
@@ -79,7 +79,7 @@ class AssessmentCapability(BaseCapability):
             self.builder = get_profile_builder()
         return self.builder
 
-    async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
         # ------------------------------------------------------------------
         # Stage 1: event collection
         # ------------------------------------------------------------------
@@ -87,10 +87,8 @@ class AssessmentCapability(BaseCapability):
         async with stream.stage("event_collection", source="assessment_capability"):
             try:
                 # Initialise store if needed
-                try:
+                with suppress(Exception):
                     await self.event_store.init()
-                except Exception:
-                    pass
                 events = await self.event_store.query(
                     context.user_id, limit=500
                 )
@@ -100,10 +98,13 @@ class AssessmentCapability(BaseCapability):
                     stage="event_collection",
                     metadata={"event_count": len(events)},
                 )
-            except Exception as exc:
-                logger.exception(f"Event collection failed: {exc!r}")
-                await stream.error(
-                    f"事件采集失败: {exc}", source="assessment_capability"
+            except Exception:
+                await report_degraded(
+                    stream,
+                    code="ASSESSMENT_EVENT_COLLECTION_FAILED",
+                    summary="事件采集失败，将使用空事件集继续评估",
+                    source="assessment_capability",
+                    stage="event_collection",
                 )
 
         # ------------------------------------------------------------------
@@ -122,23 +123,29 @@ class AssessmentCapability(BaseCapability):
                     stage="event_aggregation",
                     metadata=stats,
                 )
-            except Exception as exc:
-                logger.warning(f"Event aggregation failed: {exc!r}")
-                await stream.error(
-                    f"事件聚合失败: {exc}", source="assessment_capability"
+            except Exception:
+                await report_degraded(
+                    stream,
+                    code="ASSESSMENT_EVENT_AGGREGATION_FAILED",
+                    summary="事件聚合失败，将使用空统计继续评估",
+                    source="assessment_capability",
+                    stage="event_aggregation",
                 )
 
         # ------------------------------------------------------------------
         # Stage 3: assessment
         # ------------------------------------------------------------------
         profile = None
-        from tutor.services.learner_profile.schema import LearnerProfile
 
         try:
             profile = await self._builder.get(context.user_id)
             context.metadata["learner_profile"] = profile
-        except Exception as exc:
-            logger.warning(f"Profile load failed: {exc!r}")
+        except Exception:
+            log_degraded(
+                code="ASSESSMENT_PROFILE_LOAD_FAILED",
+                source="assessment_capability",
+                stage="assessment",
+            )
 
         report = None
         async with stream.stage("assessment", source="assessment_capability"):
@@ -152,10 +159,13 @@ class AssessmentCapability(BaseCapability):
                     profile=profile,
                     window_hours=self.window_hours,
                 )
-            except Exception as exc:
-                logger.exception(f"Assessment failed: {exc!r}")
-                await stream.error(
-                    f"评估失败: {exc}", source="assessment_capability"
+            except Exception:
+                await report_degraded(
+                    stream,
+                    code="ASSESSMENT_AGENT_FAILED",
+                    summary="评估生成失败",
+                    source="assessment_capability",
+                    stage="assessment",
                 )
                 report = None
 
@@ -182,10 +192,13 @@ class AssessmentCapability(BaseCapability):
                             ),
                         },
                     )
-                except Exception as exc:
-                    logger.exception(f"Strategy failed: {exc!r}")
-                    await stream.error(
-                        f"策略生成失败: {exc}", source="assessment_capability"
+                except Exception:
+                    await report_degraded(
+                        stream,
+                        code="ASSESSMENT_STRATEGY_FAILED",
+                        summary="自适应策略生成失败",
+                        source="assessment_capability",
+                        stage="adaptive_strategy",
                     )
 
         # ------------------------------------------------------------------
@@ -205,11 +218,14 @@ class AssessmentCapability(BaseCapability):
                         },
                     )
                 )
-            except Exception as exc:
-                logger.warning(f"Persist assessment failed: {exc!r}")
+            except Exception:
+                log_degraded(
+                    code="ASSESSMENT_PERSIST_FAILED",
+                    source="assessment_capability",
+                    stage="persist_and_emit",
+                )
 
-            await stream.result(
-                {
+            payload = {
                     "report": report.to_dict() if report else {},
                     "strategy": strategy.to_dict() if strategy else {},
                     "stats_summary": {
@@ -218,10 +234,11 @@ class AssessmentCapability(BaseCapability):
                         "event_types": list(stats.get("by_type", {}).keys()),
                     },
                     "next_step": "apply_strategy",
-                },
-                source="assessment_capability",
-            )
-            await stream.done(source="assessment_capability")
+                }
+        return CapabilityResult(
+            assistant_message="学习效果评估已完成",
+            payload=payload,
+        )
 
 
 __all__ = ["AssessmentCapability"]

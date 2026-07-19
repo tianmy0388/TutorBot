@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.agents.tutor.multimodal_enrichment import MultiModalEnrichmentAgent
 from tutor.agents.tutor.question_understanding import (
-    QuestionType,
     QuestionUnderstandingAgent,
 )
 from tutor.agents.tutor.tutoring import TutoringAgent
@@ -18,13 +17,15 @@ from tutor.capabilities.tutoring import TutoringCapability
 from tutor.core.context import UnifiedContext
 from tutor.core.stream import StreamEventType
 from tutor.core.stream_bus import StreamBus
+from tutor.services.learner_profile import _close_profile_store_sync
 from tutor.services.learner_profile.builder import (
-    ProfileBuilder,
     get_profile_builder,
 )
 from tutor.services.learner_profile.store import ProfileStore
-from tutor.services.learner_profile import _close_profile_store_sync
+from tutor.services.learning_events.schema import EventType, LearningEvent
+from tutor.services.learning_events.store import LearningEventStore
 from tutor.services.llm.base import LLMResponse
+from tutor.services.search import SearchOutcome, SearchSource
 from tutor.services.tutor.service import TutorService, reset_tutor_service
 
 
@@ -67,6 +68,7 @@ async def fresh_builder(tmp_path, monkeypatch):
 @pytest.fixture
 def tutor_capability(fresh_builder):
     import pathlib
+
     from tutor.services.config.settings import get_settings
 
     settings = get_settings()
@@ -106,6 +108,261 @@ def tutor_capability(fresh_builder):
     )
 
 
+class _SearchExecutor:
+    def __init__(self, outcome: SearchOutcome) -> None:
+        self.outcome = outcome
+        self.calls: list[tuple[str, bool]] = []
+
+    async def execute(self, query: str, *, conversation_enabled: bool):
+        self.calls.append((query, conversation_enabled))
+        return self.outcome
+
+
+@pytest.mark.asyncio
+async def test_tutoring_receives_answer_safe_recent_exercises_without_profile(
+    tutor_capability,
+    tmp_path,
+) -> None:
+    event_store = LearningEventStore(tmp_path / "tutoring-events.db")
+    await event_store.init()
+    await event_store.append(
+        LearningEvent(
+            event_id="exercise-response:tutoring-evidence",
+            user_id="evidence-user",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="chain_rule",
+            score=0.0,
+            metadata={
+                "question_type": "short_answer",
+                "answer_json": "private response",
+                "canonical_answer": "private key",
+            },
+        )
+    )
+
+    class CapturingTutoringAgent:
+        last_profile: dict | None = None
+
+        async def process(self, *args, profile, **kwargs):  # type: ignore[no-untyped-def]
+            self.last_profile = profile
+            return __import__(
+                "tutor.agents.tutor.tutoring", fromlist=["TutoringAnswer"]
+            ).TutoringAnswer(tldr="captured")
+
+    capturing_agent = CapturingTutoringAgent()
+    tutor_capability.tutoring_agent = capturing_agent
+    tutor_capability.event_store = event_store
+    try:
+        await tutor_capability.run(
+            UnifiedContext(user_id="evidence-user", user_message="解释链式法则"),
+            StreamBus(),
+        )
+        assert capturing_agent.last_profile is not None
+        assert capturing_agent.last_profile["recent_exercises"][0][
+            "concept_id"
+        ] == "chain_rule"
+        assert capturing_agent.last_profile["recent_exercises"][0]["score"] == 0.0
+        assert "private" not in str(capturing_agent.last_profile)
+    finally:
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_failure_still_passes_recent_exercises(
+    tutor_capability,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event_store = LearningEventStore(tmp_path / "profile-failure-events.db")
+    await event_store.init()
+    await event_store.append(
+        LearningEvent(
+            event_id="exercise-response:profile-failure",
+            user_id="failure-user",
+            event_type=EventType.EXERCISE_SCORED,
+            concept_id="chain_rule",
+            score=0.0,
+            metadata={"question_type": "short_answer"},
+        )
+    )
+
+    async def fail_profile(_user_id: str):
+        raise RuntimeError("private profile failure")
+
+    class CapturingTutoringAgent:
+        last_profile: dict | None = None
+
+        async def process(self, *args, profile, **kwargs):  # type: ignore[no-untyped-def]
+            self.last_profile = profile
+            return __import__(
+                "tutor.agents.tutor.tutoring", fromlist=["TutoringAnswer"]
+            ).TutoringAnswer(tldr="captured")
+
+    monkeypatch.setattr(tutor_capability.builder, "get", fail_profile)
+    capturing_agent = CapturingTutoringAgent()
+    tutor_capability.tutoring_agent = capturing_agent
+    tutor_capability.event_store = event_store
+    bus = StreamBus()
+    queue = bus.subscribe()
+    try:
+        await tutor_capability.run(
+            UnifiedContext(user_id="failure-user", user_message="解释链式法则"), bus
+        )
+        await bus.close()
+        emitted = []
+        while (event := await queue.get()) is not None:
+            emitted.append(event)
+        assert capturing_agent.last_profile is not None
+        assert capturing_agent.last_profile["recent_exercises"][0][
+            "concept_id"
+        ] == "chain_rule"
+        codes = {event.metadata.get("code") for event in emitted}
+        assert "TUTORING_PROFILE_LOAD_FAILED" in codes
+        assert "TUTORING_EXERCISE_EVIDENCE_LOAD_FAILED" not in codes
+    finally:
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_evidence_failure_passes_empty_recent_exercises_and_keeps_profile(
+    tutor_capability,
+    fresh_builder,
+    monkeypatch,
+) -> None:
+    from tutor.services.learner_profile.schema import LearnerProfile
+
+    await fresh_builder.store.replace(
+        LearnerProfile(user_id="profile-user"), source="evidence-failure"
+    )
+
+    async def fail_evidence(_user_id: str, limit: int = 10):
+        raise RuntimeError("private evidence failure")
+
+    class CapturingTutoringAgent:
+        last_profile: dict | None = None
+
+        async def process(self, *args, profile, **kwargs):  # type: ignore[no-untyped-def]
+            self.last_profile = profile
+            return __import__(
+                "tutor.agents.tutor.tutoring", fromlist=["TutoringAnswer"]
+            ).TutoringAnswer(tldr="captured")
+
+    monkeypatch.setattr(
+        tutor_capability.event_store,
+        "recent_exercise_evidence",
+        fail_evidence,
+    )
+    capturing_agent = CapturingTutoringAgent()
+    tutor_capability.tutoring_agent = capturing_agent
+    bus = StreamBus()
+    queue = bus.subscribe()
+    await tutor_capability.run(
+        UnifiedContext(user_id="profile-user", user_message="解释链式法则"), bus
+    )
+    await bus.close()
+    emitted = []
+    while (event := await queue.get()) is not None:
+        emitted.append(event)
+
+    assert capturing_agent.last_profile is not None
+    assert capturing_agent.last_profile["user_id"] == "profile-user"
+    assert capturing_agent.last_profile["recent_exercises"] == []
+    codes = {event.metadata.get("code") for event in emitted}
+    assert "TUTORING_EXERCISE_EVIDENCE_LOAD_FAILED" in codes
+    assert "TUTORING_PROFILE_LOAD_FAILED" not in codes
+
+
+@pytest.mark.asyncio
+async def test_web_sources_are_added_to_answer_context_and_result(tutor_capability) -> None:
+    source = SearchSource(
+        title="Current LSTM source",
+        url="https://example.com/lstm",
+        excerpt="Current evidence",
+        provider="fake",
+        retrieved_at=datetime.now(UTC),
+    )
+    search = _SearchExecutor(SearchOutcome(search_used=True, sources=(source,)))
+    tutor_capability.search_executor = search
+    context = UnifiedContext(
+        user_id="web-user",
+        user_message="LSTM 最近有什么进展？",
+        web_search_enabled=True,
+    )
+
+    result = await tutor_capability.run(context, StreamBus())
+
+    assert search.calls == [("LSTM 最近有什么进展？\n\n相关概念：LSTM", True)]
+    assert context.metadata["search_used"] is True
+    assert "Current evidence" in context.metadata["answer_context"]
+    assert result.payload["search_used"] is True
+    assert result.payload["sources"][0]["url"] == "https://example.com/lstm"
+
+
+@pytest.mark.asyncio
+async def test_web_search_unavailable_emits_one_degradation_and_continues(
+    tutor_capability,
+) -> None:
+    tutor_capability.search_executor = _SearchExecutor(
+        SearchOutcome(
+            unavailable=True,
+            degradation_code="WEB_SEARCH_UNAVAILABLE",
+        )
+    )
+    bus = StreamBus()
+    queue = bus.subscribe()
+    result = await tutor_capability.run(
+        UnifiedContext(
+            user_id="web-user",
+            user_message="current question",
+            web_search_enabled=True,
+        ),
+        bus,
+    )
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event)
+    codes = [
+        event.metadata.get("code")
+        for event in events
+        if event.metadata.get("code") == "WEB_SEARCH_UNAVAILABLE"
+    ]
+
+    assert codes == ["WEB_SEARCH_UNAVAILABLE"]
+    assert result.assistant_message
+    assert result.payload["search_used"] is False
+    assert result.payload["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_caught_understanding_error_redacts_secret_and_emits_stable_code(
+    tutor_capability,
+    capsys,
+):
+    secret = "SECRET_TOKEN_TUTORING_123"
+
+    class FailingQuestionAgent:
+        async def process(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError(secret)
+
+    tutor_capability.question_agent = FailingQuestionAgent()
+    bus = StreamBus()
+    queue = bus.subscribe()
+    await tutor_capability.run(
+        UnifiedContext(user_id="secret-tutor", user_message="解释 LSTM"),
+        bus,
+    )
+    await bus.close()
+    events = []
+    while (event := await queue.get()) is not None:
+        events.append(event.to_dict())
+
+    captured = capsys.readouterr()
+    public_blob = json.dumps(events, ensure_ascii=False, default=str)
+    assert secret not in public_blob + captured.out + captured.err
+    assert "TUTORING_QUESTION_UNDERSTANDING_FAILED" in public_blob
+
+
 @pytest.mark.asyncio
 async def test_full_pipeline_emits_all_5_stages(tutor_capability, fresh_builder):
     ctx = UnifiedContext(
@@ -126,8 +383,8 @@ async def test_full_pipeline_emits_all_5_stages(tutor_capability, fresh_builder)
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await tutor_capability.run(ctx, bus)
-    await bus.done()
+    result = await tutor_capability.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
     stages = [e.stage for e in events if e.type == StreamEventType.STAGE_START]
@@ -137,9 +394,8 @@ async def test_full_pipeline_emits_all_5_stages(tutor_capability, fresh_builder)
     assert "multi_modal_enrichment" in stages
     assert "session_recording" in stages
 
-    # Done event at end
-    done_events = [e for e in events if e.type == StreamEventType.DONE]
-    assert len(done_events) == 1
+    assert result.payload["answer"]["tldr"]
+    assert not [e for e in events if e.type in {StreamEventType.RESULT, StreamEventType.DONE}]
 
 
 @pytest.mark.asyncio
@@ -162,13 +418,11 @@ async def test_result_event_contains_all_layers(tutor_capability, fresh_builder)
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await tutor_capability.run(ctx, bus)
-    await bus.done()
+    result = await tutor_capability.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    assert len(results) == 1
-    payload = json.loads(results[0].content)
+    payload = result.payload
     assert "understanding" in payload
     assert "answer" in payload
     assert "enrichments" in payload
@@ -242,15 +496,12 @@ async def test_handles_llm_failure_gracefully(tmp_path, fresh_builder):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await cap.run(ctx, bus)
-    await bus.done()
+    result = await cap.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    # Errors emitted but capability completes
-    assert any(e.type == StreamEventType.DONE for e in events)
-    # Result still emitted
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    assert len(results) == 1
+    assert result.payload["answer"]["tldr"]
+    assert not [e for e in events if e.type in {StreamEventType.RESULT, StreamEventType.DONE}]
 
 
 @pytest.mark.asyncio
@@ -297,10 +548,9 @@ async def test_follow_up_suggestion_next_step(fresh_builder):
 
     task = asyncio.create_task(collect())
     await asyncio.sleep(0)
-    await cap.run(ctx, bus)
-    await bus.done()
+    result = await cap.run(ctx, bus)
+    await bus.close()
     await asyncio.wait_for(task, timeout=10)
 
-    results = [e for e in events if e.type == StreamEventType.RESULT]
-    payload = json.loads(results[0].content)
+    payload = result.payload
     assert payload["next_step"] == "follow_up"

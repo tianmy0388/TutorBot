@@ -454,3 +454,48 @@
 .animate-slide-up  { animation: slide-up 0.45s cubic-bezier(0.2, 0.6, 0.2, 1) both; }
 .animate-slide-down{ animation: slide-down 0.4s cubic-bezier(0.2, 0.6, 0.2, 1) both; }
 .animate-scale-in  { animation: scale-in 0.3s cubic-bezier(0.2, 0.6, 0.2, 1) both; }
+
+/* Artifact images keep their intrinsic ratio in cards and move into a body
+   portal for interaction, so ResourceDetail overflow cannot crop the viewer. */
+.image-artifact-preview {
+  width: 100%;
+  height: auto;
+  max-height: min(28rem, 60vh);
+  object-fit: contain;
+}
+
+.image-lightbox-overlay {
+  position: fixed !important;
+  inset: 0;
+  z-index: 1000 !important;
+}
+
+.image-lightbox-controls > button,
+.image-lightbox-controls > a {
+  min-height: 2.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: 0.375rem;
+  background: rgb(0 0 0 / 0.35);
+}
+
+.image-lightbox-controls > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.image-lightbox-stage {
+  touch-action: none;
+}
+
+.image-lightbox-image {
+  width: auto;
+  height: auto;
+}
+
+@media (max-width: 640px) {
+  .image-lightbox-controls {
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+}

@@ -115,6 +115,9 @@ lerna-debug.log*
 data/
 !data/.gitkeep
 !data/README.md
+/backups/
+/migration-audit/
+/recovery/
 
 # Knowledge base runtime
 backend/tutor/knowledge_base/*/llamaindex_storage/

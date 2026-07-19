@@ -4,22 +4,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
-from tutor.services.learner_profile.builder import get_profile_builder
+from tutor.services.learning_events.workflow import get_learning_workflow
 
 router = APIRouter()
 
 
 @router.get("/profile/{user_id}")
-async def get_profile(user_id: str) -> dict[str, Any]:
+async def get_profile(user_id: str, request: Request) -> dict[str, Any]:
     """Return the complete frontend-facing learner profile."""
     if not user_id.strip():
         raise HTTPException(status_code=400, detail="user_id is required")
 
-    builder = get_profile_builder()
-    await builder.initialize()
-    profile = await builder.get(user_id)
+    workflow = (
+        getattr(request.app.state, "learning_workflow", None)
+        or get_learning_workflow()
+    )
+    await workflow.profile_store.init()
+    profile = await workflow.profile_store.get_or_create(user_id)
     summary = profile.to_summary()
     return {
         **summary,

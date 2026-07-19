@@ -49,7 +49,7 @@ type Tab = "overview" | "knowledge" | "errors";
 // ---------------------------------------------------------------------------
 
 export function ProfilePanel() {
-  const { profile, loading, error, refresh } = useProfile();
+  const { profile, loading, error, status, refresh } = useProfile();
   const [tab, setTab] = useState<Tab>("overview");
   const latestAssessment = useTutorStore((s) => s.latestAssessment);
 
@@ -70,8 +70,12 @@ export function ProfilePanel() {
         </button>
       </div>
 
-      {!profile ? (
-        <EmptyProfile loading={loading} error={error} onRefresh={refresh} />
+      {status === "loading" ? (
+        <ProfileLoading />
+      ) : status === "failed" ? (
+        <ProfileFailure error={error} onRefresh={refresh} />
+      ) : !profile ? (
+        <EmptyProfile loading={false} error={null} onRefresh={refresh} />
       ) : (
         <>
           <div className="flex gap-4 mb-3 text-xs shrink-0 border-b border-border">
@@ -124,7 +128,7 @@ function EmptyProfile({
       <p className="text-fg-subtle leading-relaxed">
         完成一次学习任务后，这里会逐步整理你的学习状态
       </p>
-      {error && <p className="text-red-400">{error}</p>}
+      {error && <p className="text-red-700 dark:text-fg-muted">{error}</p>}
       <button
         onClick={onRefresh}
         disabled={loading}
@@ -132,6 +136,31 @@ function EmptyProfile({
       >
         {loading ? "加载中…" : "重试"}
       </button>
+    </div>
+  );
+}
+
+function ProfileLoading() {
+  return (
+    <div className="flex-1 flex items-center justify-center text-xs text-fg-muted">
+      学习状态加载中…
+    </div>
+  );
+}
+
+function ProfileFailure({
+  error,
+  onRefresh,
+}: {
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center text-center text-xs space-y-2 px-2">
+      <AlertCircle className="w-8 h-8 text-red-700 opacity-70 dark:text-fg" />
+      <p className="text-red-700 dark:text-fg">学习状态加载失败</p>
+      {error && <p className="text-fg-muted">{error}</p>}
+      <button onClick={onRefresh} className="btn-ghost text-xs">重试</button>
     </div>
   );
 }
@@ -465,11 +494,11 @@ function AssessmentSummary() {
   const trend = a.trajectory;
   const trendColor =
     trend === "improving"
-      ? "text-green-400"
+      ? "text-green-700 dark:text-fg"
       : trend === "declining"
-      ? "text-red-400"
+      ? "text-red-700 dark:text-fg"
       : trend === "stagnant"
-      ? "text-yellow-400"
+      ? "text-yellow-700 dark:text-fg-muted"
       : "text-fg-subtle";
 
   return (

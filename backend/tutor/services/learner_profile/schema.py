@@ -13,13 +13,12 @@ Design notes
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -96,7 +95,7 @@ class KnowledgeMap(BaseModel):
 
     def set(self, concept: str, mastery: float) -> None:
         self.scores[concept] = max(0.0, min(1.0, float(mastery)))
-        self.last_updated[concept] = datetime.now(timezone.utc)
+        self.last_updated[concept] = datetime.now(UTC)
 
     def update(self, concept: str, delta: float) -> float:
         """Apply a delta (positive or negative) to a concept's mastery.
@@ -106,7 +105,7 @@ class KnowledgeMap(BaseModel):
         cur = self.scores.get(concept, 0.0)
         new = max(0.0, min(1.0, cur + float(delta)))
         self.scores[concept] = new
-        self.last_updated[concept] = datetime.now(timezone.utc)
+        self.last_updated[concept] = datetime.now(UTC)
         return new
 
     def known_concepts(self) -> list[str]:
@@ -132,13 +131,13 @@ class ErrorPattern(BaseModel):
     concept: str
     mistake_type: str = "general"  # free-form: "sign_error", "off_by_one", ...
     frequency: int = 1
-    last_observed: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_observed: datetime = Field(default_factory=lambda: datetime.now(UTC))
     examples: list[str] = Field(default_factory=list)
     notes: str = ""
 
     def bump(self, example: str | None = None) -> None:
         self.frequency += 1
-        self.last_observed = datetime.now(timezone.utc)
+        self.last_observed = datetime.now(UTC)
         if example:
             self.examples.append(example)
             # Keep only last 5 examples
@@ -265,9 +264,10 @@ class LearnerProfile(BaseModel):
     learning_pace: PaceProfile = Field(default_factory=PaceProfile)
     motivation: MotivationProfile = Field(default_factory=MotivationProfile)
     modality: ModalityPreferences = Field(default_factory=ModalityPreferences)
+    event_watermark: int = Field(default=0, ge=0)
     version: int = 1
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------
@@ -275,7 +275,7 @@ class LearnerProfile(BaseModel):
     # ------------------------------------------------------------------
 
     def age_days(self) -> float:
-        delta = datetime.now(timezone.utc) - self.created_at
+        delta = datetime.now(UTC) - self.created_at
         return delta.total_seconds() / 86400.0
 
     def weak_concepts(self, threshold: float = 0.4) -> list[str]:
@@ -300,7 +300,7 @@ class LearnerProfile(BaseModel):
             "self_efficacy": round(self.motivation.self_efficacy, 3),
             "modality_dominant": self.modality.dominant(),
             "session_duration_min": self.learning_pace.avg_session_duration_min,
-            "version": self.version,
+            "event_watermark": self.event_watermark,
             "updated_at": self.updated_at.isoformat(),
         }
 
@@ -323,7 +323,29 @@ class LearningPath(BaseModel):
     sequence: list[str] = Field(default_factory=list)  # concept_ids in order
     current_index: int = 0
     completed: list[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class PersistedLearningPath(BaseModel):
+    """Durable path bound to the exact profile version used to plan it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    profile_version: int = Field(ge=1)
+    course: str = ""
+    path_id: str = ""
+    name: str = ""
+    description: str = ""
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
+    rationale: str = ""
+    total_estimated_hours: float = 0.0
+    completed_count: int = 0
+    available_count: int = 0
+    locked_count: int = 0
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ProfileDiff(BaseModel):
@@ -447,7 +469,7 @@ def apply_diff(profile: LearnerProfile, diff: ProfileDiff) -> LearnerProfile:
         profile.metadata.update(diff.metadata_merge)
 
     profile.version += 1
-    profile.updated_at = datetime.now(timezone.utc)
+    profile.updated_at = datetime.now(UTC)
     return profile
 
 
@@ -466,6 +488,7 @@ __all__ = [
     "ModalityPreferences",
     "MotivationProfile",
     "PaceProfile",
+    "PersistedLearningPath",
     "ProfileDiff",
     "Urgency",
     "apply_diff",

@@ -27,7 +27,7 @@ class UnifiedContext:
 
     Attributes
     ----------
-    session_id, turn_id : str
+    session_id, turn_id, job_id : str
         Routing identifiers (auto-generated if not provided).
     user_id : str
         The student user (defaults to ``"anonymous"`` in MVP).
@@ -53,6 +53,7 @@ class UnifiedContext:
 
     session_id: str = ""
     turn_id: str = ""
+    job_id: str = ""
     user_id: str = "anonymous"
     user_message: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -61,6 +62,7 @@ class UnifiedContext:
     tool_choice: list[str] = field(default_factory=list)
     model_override: dict[str, Any] | None = None
     language: str = "zh"
+    web_search_enabled: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     stream: StreamBus | None = None
 
@@ -81,7 +83,7 @@ class UnifiedContext:
             self.stream = StreamBus(session_id=self.session_id, turn_id=self.turn_id)
         return self.stream
 
-    def with_capability(self, name: str) -> "UnifiedContext":
+    def with_capability(self, name: str) -> UnifiedContext:
         """Return a shallow copy with ``capability`` set."""
         from dataclasses import replace
 
@@ -92,6 +94,7 @@ class UnifiedContext:
         return {
             "session_id": self.session_id,
             "turn_id": self.turn_id,
+            "job_id": self.job_id,
             "user_id": self.user_id,
             "user_message": self.user_message,
             "history_count": len(self.history),
@@ -100,6 +103,7 @@ class UnifiedContext:
             "tool_choice": self.tool_choice,
             "model_override": self.model_override,
             "language": self.language,
+            "web_search_enabled": self.web_search_enabled,
             "metadata_keys": list(self.metadata.keys()),
         }
 

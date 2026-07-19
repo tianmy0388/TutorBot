@@ -22,11 +22,12 @@ persistence layer.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from tutor.services.resource_package.schema import ResourcePackage
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -34,6 +35,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 MessageRole = Literal["user", "assistant", "system"]
+RecoveryWarningCode = Literal[
+    "migrated_ownership",
+    "interrupted_job_repaired",
+    "missing_artifact",
+    "recovery_association_missing",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +59,7 @@ class Message(BaseModel):
     job_id: str | None = None
     # The capability that produced the assistant message, if any.
     capability: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -66,14 +73,37 @@ class Conversation(BaseModel):
     title: str = ""
     message_count: int = 0
     last_message_preview: str = ""
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    web_search_enabled: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ConversationDetail(Conversation):
     """Conversation plus its full message list."""
 
     messages: list[Message] = Field(default_factory=list)
+
+
+class RecoveryWarning(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: RecoveryWarningCode
+    message: str
+    job_id: str | None = None
+    package_id: str | None = None
+    resource_id: str | None = None
+    artifact_key: str | None = None
+
+
+class ConversationAggregate(BaseModel):
+    """One refresh-safe payload for restoring an entire conversation view."""
+
+    conversation: ConversationDetail
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
+    packages: list[ResourcePackage] = Field(default_factory=list)
+    profile_summary: dict[str, Any] = Field(default_factory=dict)
+    path_summary: dict[str, Any] = Field(default_factory=dict)
+    recovery_warnings: list[RecoveryWarning] = Field(default_factory=list)
 
 
 class ConversationListResponse(BaseModel):
@@ -90,6 +120,9 @@ class CreateConversationRequest(BaseModel):
     session_id: str | None = None
     user_id: str
     title: str | None = None
+    # Applied only when the row is first created. Repeating POST for an
+    # existing session remains idempotent and never acts as a settings PATCH.
+    web_search_enabled: bool = False
 
 
 class AppendMessageRequest(BaseModel):
@@ -108,12 +141,23 @@ class UpdateConversationRequest(BaseModel):
     title: str | None = None
 
 
+class UpdateConversationSettingsRequest(BaseModel):
+    """Narrow per-conversation settings mutation contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    web_search_enabled: bool
+
+
 __all__ = [
     "AppendMessageRequest",
     "Conversation",
     "ConversationDetail",
+    "ConversationAggregate",
     "ConversationListResponse",
     "CreateConversationRequest",
     "Message",
+    "RecoveryWarning",
     "UpdateConversationRequest",
+    "UpdateConversationSettingsRequest",
 ]

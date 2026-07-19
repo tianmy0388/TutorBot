@@ -24,9 +24,8 @@ Security guarantees (asserted in tests):
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -385,6 +384,12 @@ class RuntimeConfigService:
                 "enabled": s.web_search_enabled,
                 "provider": s.web_search_provider,
                 "max_results": s.web_search_max_results,
+                "mcp_server": (
+                    s.web_search_mcp_server if s.web_search_provider == "mcp" else ""
+                ),
+                "mcp_tool": (
+                    s.web_search_mcp_tool if s.web_search_provider == "mcp" else ""
+                ),
                 "api_key": mask_key(
                     web_secret,
                     required=web_key_required,

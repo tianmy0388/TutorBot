@@ -29,8 +29,9 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Literal, cast
 
 from tutor.services.resource_plan.schema import ResourcePlan
 from tutor.services.resource_plan.service import build_default_plan
@@ -41,7 +42,7 @@ from tutor.services.resource_plan.service import build_default_plan
 
 #: Phrases that, if present, indicate an assessment request.
 ASSESSMENT_KEYWORDS: tuple[str, ...] = (
-    "评估", "测评", "评估一下", "掌握情况", "评估报告",
+    "评估", "测评", "测验", "评估一下", "掌握情况", "评估报告",
     "assessment", "evaluate my", "test my",
 )
 
@@ -105,6 +106,15 @@ CODE_KEYWORDS: tuple[str, ...] = (
 # Decision
 # ---------------------------------------------------------------------------
 
+CapabilityName = Literal[
+    "tutoring",
+    "resource_generation",
+    "assessment",
+    "profile",
+    "path_planning",
+]
+
+
 VALID_CAPABILITIES: frozenset[str] = frozenset(
     {
         "tutoring",
@@ -116,16 +126,41 @@ VALID_CAPABILITIES: frozenset[str] = frozenset(
 )
 
 
+class InvalidCapabilityError(ValueError):
+    """Raised when a caller supplies an unsupported explicit capability."""
+
+    code = "INVALID_CAPABILITY"
+
+    def __init__(self, capability: str) -> None:
+        self.capability = capability
+        expected = ", ".join(sorted(VALID_CAPABILITIES))
+        super().__init__(
+            f"{self.code}: unsupported explicit capability {capability!r}; "
+            f"expected one of: {expected}"
+        )
+
+
+def validate_explicit_capability(value: str | None) -> CapabilityName | None:
+    """Validate a non-empty explicit hint; empty hints mean no override."""
+
+    if value is None or value == "":
+        return None
+    if value not in VALID_CAPABILITIES:
+        raise InvalidCapabilityError(value)
+    return cast(CapabilityName, value)
+
+
 @dataclass(frozen=True)
 class IntentDecision:
     """The router's output: a capability name plus an optional plan."""
 
-    capability: str
+    capability: CapabilityName
     topic: str
     explicit_types: frozenset[str]
     resource_plan: ResourcePlan | None
     is_comparison: bool
-    notes: str = ""
+    confidence: float = 0.5
+    reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -187,23 +222,14 @@ def classify(
     *,
     explicit_capability: str | None = None,
     explicit_types: Iterable[str] | None = None,
-    plan_id_factory: "callable[[], str] | None" = None,
+    plan_id_factory: Callable[[], str] | None = None,
 ) -> IntentDecision:
     """Classify a user message into a capability + optional plan.
 
     Pure / deterministic: same message in, same decision out.
     """
+    validated_explicit = validate_explicit_capability(explicit_capability)
     msg = (message or "").strip()
-    if not msg:
-        return IntentDecision(
-            capability="tutoring",
-            topic="",
-            explicit_types=frozenset(),
-            resource_plan=None,
-            is_comparison=False,
-            notes="empty message → tutoring default",
-        )
-
     is_comparison = _is_comparison(msg)
     detected_explicit = set(_detect_explicit_types(msg))
     if explicit_types is not None:
@@ -216,8 +242,8 @@ def classify(
     wants_resource = bool(detected_explicit)
 
     # 1. Explicit capability override
-    if explicit_capability and explicit_capability in VALID_CAPABILITIES:
-        if explicit_capability == "resource_generation":
+    if validated_explicit is not None:
+        if validated_explicit == "resource_generation":
             plan = build_default_plan(
                 topic=_extract_topic(msg),
                 explicit_types=detected_explicit,
@@ -232,15 +258,28 @@ def classify(
                 explicit_types=frozenset(detected_explicit),
                 resource_plan=plan,
                 is_comparison=is_comparison,
-                notes="explicit capability override",
+                confidence=1.0,
+                reason="explicit capability override",
             )
         return IntentDecision(
-            capability=explicit_capability,
+            capability=validated_explicit,
             topic=_extract_topic(msg),
             explicit_types=frozenset(detected_explicit),
             resource_plan=None,
             is_comparison=is_comparison,
-            notes="explicit capability override",
+            confidence=1.0,
+            reason="explicit capability override",
+        )
+
+    if not msg:
+        return IntentDecision(
+            capability="tutoring",
+            topic="",
+            explicit_types=frozenset(),
+            resource_plan=None,
+            is_comparison=False,
+            confidence=0.5,
+            reason="empty message → tutoring default",
         )
 
     # 2. Assessment
@@ -251,7 +290,8 @@ def classify(
             explicit_types=frozenset(detected_explicit),
             resource_plan=None,
             is_comparison=is_comparison,
-            notes="assessment keyword",
+            confidence=0.95,
+            reason="assessment keyword",
         )
 
     # 3. Profile
@@ -262,7 +302,8 @@ def classify(
             explicit_types=frozenset(detected_explicit),
             resource_plan=None,
             is_comparison=is_comparison,
-            notes="profile keyword",
+            confidence=0.95,
+            reason="profile keyword",
         )
 
     # 4. Path planning
@@ -273,7 +314,8 @@ def classify(
             explicit_types=frozenset(detected_explicit),
             resource_plan=None,
             is_comparison=is_comparison,
-            notes="path planning keyword",
+            confidence=0.95,
+            reason="path planning keyword",
         )
 
     # 5. Resource generation: explicit keyword OR user-requested resource type.
@@ -292,7 +334,8 @@ def classify(
             explicit_types=frozenset(detected_explicit),
             resource_plan=plan,
             is_comparison=is_comparison,
-            notes="resource generation keyword"
+            confidence=0.9,
+            reason="resource generation keyword"
             if _has_any(msg, RESOURCE_GENERATION_KEYWORDS)
             else "explicit resource type request",
         )
@@ -304,7 +347,8 @@ def classify(
         explicit_types=frozenset(detected_explicit),
         resource_plan=None,
         is_comparison=is_comparison,
-        notes="tutoring default (no keyword match)",
+        confidence=0.6,
+        reason="tutoring default (no keyword match)",
     )
 
 
@@ -315,7 +359,8 @@ def _new_plan_id() -> str:
 __all__ = [
     "ASSESSMENT_KEYWORDS",
     "COMPARISON_PATTERNS",
-    "EXPLICIT_ONLY_TYPES",  # re-exported for tests
+    "CapabilityName",
+    "InvalidCapabilityError",
     "IntentDecision",
     "PPT_KEYWORDS",
     "PATH_PLANNING_KEYWORDS",
@@ -324,4 +369,5 @@ __all__ = [
     "VALID_CAPABILITIES",
     "VIDEO_KEYWORDS",
     "classify",
+    "validate_explicit_capability",
 ]

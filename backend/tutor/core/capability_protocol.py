@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 
@@ -70,12 +71,13 @@ class BaseCapability(ABC):
             raise TypeError(f"{type(self).__name__} must set class attribute 'manifest'")
 
     @abstractmethod
-    async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
         """Execute the capability.
 
-        Implementations should ``await stream.done()`` on success and may
-        emit ``stream.error(...)`` on failure. They must NOT close the
-        stream — the orchestrator owns that lifecycle.
+        Implementations may emit nonterminal progress, stage, resource and
+        source events. They return :class:`CapabilityResult` on success or
+        raise on failure; the runner exclusively owns terminal events and
+        stream closure.
         """
         raise NotImplementedError
 

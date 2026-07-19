@@ -54,8 +54,33 @@ const STATUS_META: Record<
   },
 };
 
-export function PathVisualizer({ path }: { path: PlannedPath }) {
+export function PathVisualizer({
+  path,
+  loading = false,
+  error = null,
+  stale = false,
+}: {
+  path: PlannedPath | null;
+  loading?: boolean;
+  error?: string | null;
+  stale?: boolean;
+}) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  if (loading) {
+    return <div className="p-6 text-center text-xs text-fg-muted">学习路径加载中…</div>;
+  }
+  if (error) {
+    return (
+      <div className="p-6 text-center text-xs text-red-700 dark:text-fg">
+        <p>学习路径加载失败</p>
+        <p className="mt-1 text-fg-muted">{error}</p>
+      </div>
+    );
+  }
+  if (!path || path.nodes.length === 0) {
+    return <div className="p-6 text-center text-xs text-fg-muted">暂无学习路径</div>;
+  }
 
   const completed = path.completed_count;
   const total = path.nodes.length;
@@ -72,6 +97,11 @@ export function PathVisualizer({ path }: { path: PlannedPath }) {
 
   return (
     <div className="p-4">
+      {stale && (
+        <div className="mb-3 rounded-md border border-dashed border-border bg-bg-subtle p-3 text-xs text-fg-muted">
+          学习状态有更新，建议重新规划接下来的内容
+        </div>
+      )}
       <div className="flex items-center gap-2 mb-3">
         <TrendingUp className="w-4 h-4 text-brand-400" />
         <h3 className="font-semibold text-sm">学习路径</h3>

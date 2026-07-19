@@ -25,6 +25,14 @@ export interface ChatMessage {
   metadata?: Record<string, unknown>;
 }
 
+export interface ConversationMessageInput {
+  role: "user" | "assistant" | "system";
+  content: string;
+  job_id?: string | null;
+  capability?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
 // ============================================================================
 // Stream events (from StreamBus on backend)
 // ============================================================================
@@ -41,6 +49,7 @@ export type StreamEventType =
   | "tool_result"
   | "progress"
   | "sources"
+  | "resource"
   | "result"
   | "error"
   | "cancelled"
@@ -212,7 +221,7 @@ export interface PathStep {
   difficulty: number;
   status: NodeStatus;
   estimated_hours: number;
-  matched_resources: string[];
+  matched_resources?: string[];
   prerequisites?: string[];
 }
 
@@ -227,6 +236,9 @@ export interface PlannedPath {
   available_count: number;
   locked_count: number;
   generated_at: string;
+  profile_version?: number;
+  edges?: Array<{ from: string; to: string; type: string }>;
+  rationale?: string;
 }
 
 export interface KGNode {
@@ -258,6 +270,31 @@ export interface CourseGraph {
 export interface CourseListResponse {
   courses: string[];
 }
+
+export interface CourseResponse {
+  id: string;
+  name: string;
+  description: string;
+  knowledge_graph_id: string;
+  is_seeded: boolean;
+  library_count: number;
+  document_count: number;
+  ready_count: number;
+  total_chunks: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CourseListResponseV2 {
+  items: CourseResponse[];
+  total: number;
+}
+
+export type RetrievalScope =
+  | { kind: "course"; id: string }
+  | { kind: "library"; id: string }
+  | { kind: "all" }
+  | { kind: "none" };
 
 // ============================================================================
 // Resources
@@ -299,6 +336,63 @@ export interface Resource {
   review?: ReviewVerdict | Record<string, unknown>;
   safety?: Record<string, unknown>;
   unverified_claims?: string[];
+}
+
+export interface CodeResourceFormat {
+  language?: string;
+  code?: string;
+  explanation?: string;
+  output_kind?: "text" | "figure";
+  execution_status?: "not_run" | "pending" | "success" | "failed" | "timeout";
+  stdout?: string;
+  stderr?: string;
+  error_code?: string;
+  runtime?: string;
+  dependencies?: string[];
+  artifacts?: Array<{ name: string; path?: string; kind?: string }>;
+  files?: Array<{ name: string; language: string; code: string }>;
+}
+
+export type VideoRepairStatus = "pending" | "running" | "ready" | "failed";
+
+export interface VideoRepairHistoryRecord {
+  job_id: string;
+  failed_revision: number;
+  status: "ready" | "failed";
+  error_code?: string;
+  summary?: string;
+  log_artifact_key?: string;
+}
+
+/** Browser-safe public projection of a video resource. */
+export interface VideoResourceFormat {
+  video_url?: string;
+  artifact_key?: string;
+  manim_code?: string;
+  scene_class?: string;
+  render_status?: "pending" | "rendering" | "ready" | "failed";
+  render_job_id?: string;
+  render_error?: string;
+  render_failure?: {
+    error_code?: string;
+    summary?: string;
+    traceback_tail?: string[] | string;
+    log_artifact_key?: string;
+  };
+  source_revision?: number;
+  repair_status?: VideoRepairStatus;
+  repair_job_id?: string;
+  repair_history?: VideoRepairHistoryRecord[];
+  duration_seconds?: number;
+  artifacts?: Array<{
+    name?: string;
+    kind?: string;
+    artifact_key?: string;
+  }>;
+  scenes?: Array<{ name: string; duration: number; description?: string }>;
+  concept?: string;
+  fps?: number;
+  resolution?: string;
 }
 
 export interface ResourcePackage {
@@ -379,15 +473,26 @@ export type JobStatus =
 
 export type JobTerminalStatus = "succeeded" | "partial" | "failed" | "cancelled";
 
+export interface WorkflowSnapshot {
+  status: JobTerminalStatus;
+  stages: Array<{ name: string; status: "completed" | "incomplete" }>;
+}
+
+export type SessionOrigin = "none" | "draft" | "restored" | "server";
+
 export interface JobProgress {
   stage: string;
   percent: number;
   active_agents: string[];
 }
 
-export interface JobError {
+export interface StructuredError {
   code: string;
   message: string;
+  details?: unknown;
+}
+
+export interface JobError extends StructuredError {
   diagnostic?: string;
   retryable: boolean;
 }
@@ -435,20 +540,149 @@ export interface JobSummary {
   status: JobStatus;
   message_preview: string;
   language: string;
+  web_search_enabled?: boolean;
+  web_search_requested?: boolean;
   event_count: number;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
   duration_seconds: number | null;
   has_result: boolean;
-  error: string | null;
+  error: StructuredError | null;
+  parent_job_id?: string | null;
+  task_kind?: string | null;
+  dedupe_key?: string | null;
+  metadata?: Record<string, unknown>;
+  children?: JobChildSummary[];
+  background_status?: JobStatus | null;
+}
+
+export interface PublicCodeSpec {
+  language: "python";
+  starter_code: string;
+  time_limit_seconds: number;
+  test_count: number;
+}
+
+export interface CodeExerciseQuestion {
+  id: string;
+  type: "code";
+  difficulty: number;
+  knowledge_point: string;
+  question: string;
+  options: Array<{ label: string; text: string }>;
+  explanation: string;
+  code_spec: PublicCodeSpec | null;
+}
+
+export type ExerciseAttemptStatus =
+  | "passed"
+  | "failed"
+  | "syntax_error"
+  | "timeout"
+  | "policy_rejected"
+  | "error";
+
+export interface ExerciseTestResult {
+  name: string;
+  passed: boolean;
+  actual_json?: unknown;
+  error_code?: string | null;
+}
+
+export interface ExerciseAttempt {
+  attempt_id: string;
+  client_attempt_id?: string | null;
+  user_id: string;
+  session_id: string;
+  package_id: string;
+  question_id: string;
+  source_code: string;
+  status: ExerciseAttemptStatus;
+  passed_tests: number;
+  total_tests: number;
+  test_results: ExerciseTestResult[];
+  stdout: string;
+  stderr: string;
+  duration_seconds: number;
+  created_at: string;
+  error_code?: string | null;
+}
+
+export interface ExerciseAttemptListResponse {
+  items: ExerciseAttempt[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// Durable learner responses for ordinary and code exercise questions.
+// These deliberately retain JSON-native answer shapes used by the API.
+export type ExerciseResponseAnswer = string | string[] | boolean | null;
+
+export interface ExerciseDraft {
+  user_id: string;
+  package_id: string;
+  resource_id: string;
+  question_id: string;
+  question_type: string;
+  answer_json: ExerciseResponseAnswer;
+  updated_at?: string;
+}
+
+export interface ExerciseSubmission {
+  submission_id: string;
+  client_submission_id?: string | null;
+  user_id?: string;
+  session_id?: string;
+  package_id?: string;
+  resource_id?: string;
+  question_id: string;
+  question_type?: string;
+  answer_json: ExerciseResponseAnswer;
+  /** Server-owned canonical answer captured at submit time (owner-private).
+   * Fill-blank multi-blank answers may nest per-slot accepted variants. */
+  answer?: string | boolean | Array<string | string[]> | null;
+  /** Server-owned explanation captured at submit time (owner-private). */
+  explanation?: string | null;
+  grading_status: "auto_graded" | "manual_review";
+  correct: boolean | null;
+  score: number | null;
+  linked_code_attempt_id?: string | null;
+  created_at?: string;
+}
+
+export interface ExerciseResponseState {
+  draft: ExerciseDraft | null;
+  submissions: ExerciseSubmission[];
+}
+
+export interface JobChildSummary {
+  job_id: string;
+  capability: string;
+  status: JobStatus;
+  parent_job_id: string | null;
+  task_kind: string | null;
+  dedupe_key?: string | null;
+  metadata?: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface VideoRetryResponse {
+  job_id: string;
+  parent_job_id: string;
+  package_id: string;
+  resource_id: string;
+  status: JobStatus;
+  child: JobChildSummary;
+  resource: Resource;
 }
 
 export interface JobDetail extends JobSummary {
   message: string;
   language: string;
   metadata: Record<string, unknown>;
-  result: Record<string, unknown> | null;
+  result: JobResultContract | null;
   events: StreamEvent[];
 }
 
@@ -620,6 +854,8 @@ export interface WebSearchConfig {
   enabled: boolean;
   provider: string;
   max_results: number;
+  mcp_server: string;
+  mcp_tool: string;
   api_key: MaskedSecret;
 }
 

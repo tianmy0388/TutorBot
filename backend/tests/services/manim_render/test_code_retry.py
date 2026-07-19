@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
 from unittest.mock import MagicMock
 
 import pytest
-
+from loguru import logger
 from tutor.services.llm.base import LLMResponse
 from tutor.services.manim_render.code_retry import CodeRetry
 
@@ -43,6 +42,66 @@ def test_apply_patches_replaces_first_match():
     assert out == "x = 100\ny = 2\nx = x + 1\n"
 
 
+def test_apply_patches_rejects_token_prefix_match():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = "self.play(Create(dot), run_time=0.5)\n"
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "run_time=0", "replace": "run_time=1"}],
+    )
+
+    assert out == code
+
+
+def test_apply_patches_rejects_search_inside_string_literal():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = 'message = "self.play(Create(dot))"\n'
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "self.play(Create(dot))", "replace": "self.wait()"}],
+    )
+
+    assert out == code
+
+
+def test_apply_patches_rejects_search_inside_comment():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = "# self.play(Create(dot))\nself.wait()\n"
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "self.play(Create(dot))", "replace": "self.wait()"}],
+    )
+
+    assert out == code
+
+
+def test_apply_patches_accepts_complete_python_token_span():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = "self.play(Create(dot))\n"
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "self.play(Create(dot))", "replace": "self.wait()"}],
+    )
+
+    assert out == "self.wait()\n"
+
+
+def test_apply_patches_rejects_all_patches_when_source_cannot_be_tokenized():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = "x = 1\nmessage = '''unterminated\n"
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "x = 1", "replace": "x = 2"}],
+    )
+
+    assert out == code
+
+
 def test_apply_patches_skips_unmatched_search():
     cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
     code = "x = 1\n"
@@ -52,6 +111,25 @@ def test_apply_patches_skips_unmatched_search():
     out = cr._apply_patches(code, patches)
     # Unchanged because search not found
     assert out == "x = 1\n"
+
+
+def test_unmatched_patch_log_does_not_include_source_text():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    source = "api_key = 'SECRET_PATCH_SEARCH_VALUE'"
+    records = []
+    sink_id = logger.add(records.append, format="{message}", level="DEBUG")
+    try:
+        cr._apply_patches(
+            "x = 1\n",
+            [{"search": source, "replace": "x = 2"}],
+        )
+    finally:
+        logger.remove(sink_id)
+
+    captured = "\n".join(str(record) for record in records)
+    assert "MANIM_PATCH_SEARCH_MISSED" in captured
+    assert f"[REDACTED:{len(source)} chars]" in captured
+    assert "SECRET_PATCH_SEARCH_VALUE" not in captured
 
 
 def test_apply_multiple_patches():
@@ -144,7 +222,15 @@ async def test_retry_succeeds_after_one_patch():
 @pytest.mark.asyncio
 async def test_retry_gives_up_after_max_attempts():
     """All attempts fail → success=False, attempts_used=max."""
-    cr = CodeRetry(llm=_mock_llm([]), max_attempts=3)
+    cr = CodeRetry(
+        llm=_mock_llm(
+            [
+                '{"patches": [{"search": "x = 1", "replace": "x = 2"}]}',
+                '{"patches": [{"search": "x = 2", "replace": "x = 3"}]}',
+            ]
+        ),
+        max_attempts=3,
+    )
 
     async def render_fn(code: str) -> tuple[bool, str]:
         return False, "always fails"
@@ -158,36 +244,46 @@ async def test_retry_gives_up_after_max_attempts():
 
 
 @pytest.mark.asyncio
-async def test_retry_continues_after_empty_patches():
-    """If LLM returns no patches, retry loop continues until max_attempts."""
+async def test_retry_stops_before_rendering_unchanged_empty_patch_output():
+    """An empty patch result must not launch the same render again."""
     cr = CodeRetry(llm=_mock_llm(["{}"]), max_attempts=3)
 
+    calls = 0
+
     async def render_fn(code: str) -> tuple[bool, str]:
+        nonlocal calls
+        calls += 1
         return False, "fail"
 
     result = await cr.fix_until_renderable(
         original_code="x = 1", render_fn=render_fn
     )
-    # Loops to max_attempts even without patches
     assert result.success is False
-    assert result.attempts_used == 3
+    assert result.attempts_used == 1
+    assert result.error_code == "unchanged_retry"
+    assert calls == 1
 
 
 @pytest.mark.asyncio
-async def test_retry_continues_after_no_op_patches():
-    """If patches' search strings don't match, loop continues."""
+async def test_retry_stops_before_rendering_nonmatching_patch_output():
+    """A non-matching patch is terminal unchanged output."""
     no_op_patches = json_dumps_no_op()
     cr = CodeRetry(llm=_mock_llm([no_op_patches]), max_attempts=3)
 
+    calls = 0
+
     async def render_fn(code: str) -> tuple[bool, str]:
+        nonlocal calls
+        calls += 1
         return False, "fail"
 
     result = await cr.fix_until_renderable(
         original_code="x = 1", render_fn=render_fn
     )
-    # Patches were no-op but we keep trying
     assert result.success is False
-    assert result.attempts_used == 3
+    assert result.attempts_used == 1
+    assert result.error_code == "unchanged_retry"
+    assert calls == 1
 
 
 def json_dumps_no_op():
@@ -206,15 +302,15 @@ def json_dumps_no_op():
 
 
 @pytest.mark.asyncio
-async def test_retry_handles_llm_failure_gracefully():
-    """If LLM call raises, retry still continues through max_attempts."""
+async def test_retry_handles_llm_failure_as_terminal_unchanged_output():
+    """If patch generation fails, the same source is not rendered again."""
     llm = MagicMock()
     llm.model = "mock"
     llm.default_temperature = 0.5
     llm.default_max_tokens = 2048
 
     async def call(req):
-        raise RuntimeError("LLM down")
+        raise RuntimeError("api_key=SECRET_RETRY_PROVIDER_VALUE")
 
     llm.call = call
     cr = CodeRetry(llm=llm, max_attempts=3)
@@ -222,9 +318,41 @@ async def test_retry_handles_llm_failure_gracefully():
     async def render_fn(code: str) -> tuple[bool, str]:
         return False, "render fail"
 
-    result = await cr.fix_until_renderable(
-        original_code="x = 1", render_fn=render_fn
-    )
-    # LLM failures don't kill the loop — we go through max_attempts renders
+    records = []
+    sink_id = logger.add(records.append, format="{message}")
+    try:
+        result = await cr.fix_until_renderable(
+            original_code="x = 1", render_fn=render_fn
+        )
+    finally:
+        logger.remove(sink_id)
     assert result.success is False
-    assert result.attempts_used == 3
+    assert result.attempts_used == 1
+    assert result.error_code == "unchanged_retry"
+    captured = "\n".join(str(record) for record in records)
+    assert "MANIM_RETRY_LLM_FAILED" in captured
+    assert "RuntimeError" in captured
+    assert "SECRET_RETRY_PROVIDER_VALUE" not in captured
+
+
+@pytest.mark.asyncio
+async def test_retry_normalizes_fences_line_endings_and_trailing_whitespace_before_hashing():
+    patches = (
+        '{"patches": [{"search": "x = 1", '
+        '"replace": "```python\\r\\nx = 1   \\r\\n```"}]}'
+    )
+    cr = CodeRetry(llm=_mock_llm([patches]), max_attempts=3)
+    rendered: list[str] = []
+
+    async def render_fn(code: str) -> tuple[bool, str]:
+        rendered.append(code)
+        return False, "root cause"
+
+    result = await cr.fix_until_renderable(
+        original_code="```python\r\nx = 1   \r\n```",
+        render_fn=render_fn,
+    )
+
+    assert rendered == ["x = 1\n"]
+    assert result.attempts_used == 1
+    assert result.error_code == "unchanged_retry"

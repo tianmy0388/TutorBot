@@ -15,7 +15,7 @@ Pipeline (per idea.md):
     6. quality_review          → per-resource verdict + quality_score
     7. package_assembly        → ResourcePackage
     8. path_integration        → KG PlannedPath attached
-    9. result_emission         → RESULT event + DONE
+    9. result_handoff          → CapabilityResult returned to JobRunner
 
 Each Agent emits its own stage events; the capability emits high-level
 stage_start / stage_end wrappers around each pipeline stage.
@@ -27,7 +27,7 @@ the whole generation. The package will simply have one fewer resource.
 from __future__ import annotations
 
 import asyncio
-import traceback
+from pathlib import PurePosixPath
 from typing import Any
 
 from loguru import logger
@@ -49,9 +49,30 @@ from tutor.agents.safety.anti_hallucination import (
     AntiHallucinationAgent,
     OverallVerdict,
 )
+from tutor.capabilities.failure_reporting import log_degraded, report_degraded
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
+from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
+from tutor.runtime.workflow_graph import WorkflowGraph, WorkflowNode
+from tutor.services.config.settings import Settings
+from tutor.services.jobs.contracts import (
+    ResourceArtifactNodeInput,
+    ResourceArtifactNodeOutput,
+    ResourceIntentNodeInput,
+    ResourceIntentNodeOutput,
+    ResourcePackageNodeInput,
+    ResourcePedagogyNodeInput,
+    ResourcePedagogyNodeOutput,
+    ResourceProfileNodeInput,
+    ResourceProfileNodeOutput,
+    ResourceQualityNodeInput,
+    ResourceQualityNodeOutput,
+    ResourceSafetyNodeInput,
+    ResourceSafetyNodeOutput,
+    ResourceSourceNodeInput,
+    ResourceSourceNodeOutput,
+)
 from tutor.services.knowledge_graph.service import (
     get_knowledge_graph_service,
 )
@@ -60,11 +81,13 @@ from tutor.services.learner_profile.builder import (
     get_profile_builder,
 )
 from tutor.services.resource_package.schema import (
+    ArtifactRef,
     Resource,
     ResourcePackage,
     ResourceReview,
     ResourceType,
     ReviewVerdict,
+    public_package_dump,
 )
 from tutor.services.resource_package.store import (
     ResourcePackageStore,
@@ -75,6 +98,7 @@ from tutor.services.retrieval import (
     RetrievalService,
     get_retrieval_service,
 )
+from tutor.services.search import SearchExecutor, SearchOutcome
 
 
 class ResourceGenerationCapability(BaseCapability):
@@ -87,6 +111,8 @@ class ResourceGenerationCapability(BaseCapability):
             "intent_understanding",
             "profile_loading",
             "knowledge_graph_query",
+            "rag_retrieval",
+            "web_search",
             "resource_planning",
             "content_and_pedagogy",
             "parallel_resource_generation",
@@ -117,6 +143,8 @@ class ResourceGenerationCapability(BaseCapability):
         ppt_generator: PPTGeneratorAgent | None = None,
         package_store: ResourcePackageStore | None = None,
         retrieval_service: RetrievalService | None = None,
+        settings: Settings | None = None,
+        search_executor: SearchExecutor | None = None,
     ) -> None:
         super().__init__()
         self.builder = builder
@@ -127,17 +155,14 @@ class ResourceGenerationCapability(BaseCapability):
         self.multimedia = multimedia or MultimediaAgent()
         self.exercise_generator = exercise_generator or ExerciseGeneratorAgent()
         self.manim_video = manim_video or ManimVideoAgent()
-        self.code_sandbox = code_sandbox or CodeSandboxAgent()
+        self.settings = settings
+        self.code_sandbox = code_sandbox or CodeSandboxAgent(settings=settings)
         self.quality_reviewer = quality_reviewer or QualityReviewerAgent()
         self.anti_hallucination = anti_hallucination or AntiHallucinationAgent()
         self.ppt_generator = ppt_generator or PPTGeneratorAgent()
         self.package_store = package_store
         self.retrieval_service = retrieval_service
-        # **2026-07-08 fix (fdb26152):** strong references to
-        # fire-and-forget video render tasks. Without this, asyncio
-        # GC's the task as soon as ``_start_pending_video_renders``
-        # returns and the manim subprocess gets cancelled mid-encode.
-        self._bg_render_tasks: list[asyncio.Task] = []
+        self.search_executor = search_executor
 
     @property
     def _builder(self) -> ProfileBuilder:
@@ -155,311 +180,834 @@ class ResourceGenerationCapability(BaseCapability):
     def _retrieval(self) -> RetrievalService:
         return self.retrieval_service or get_retrieval_service()
 
+    @property
+    def _search(self) -> SearchExecutor:
+        if self.search_executor is None:
+            self.search_executor = SearchExecutor()
+        return self.search_executor
+
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
 
-    async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
-        profile_snapshot: dict[str, Any] = {}
-        intent: Intent | None = None
-        resources: list[Resource] = []
-        reviews: list[ResourceReview] = []
+    async def run(
+        self,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> CapabilityResult:
+        """Execute the explicit resource DAG and hand its result to JobRunner."""
 
-        # ------------------------------------------------------------------
-        # Stage 1: Intent understanding
-        # ------------------------------------------------------------------
-        async with stream.stage("intent_understanding", source="resource_capability"):
-            await stream.thinking(
-                "解析用户意图...", source="resource_capability"
+        graph = self.build_resource_graph(context, stream)
+        execution = await graph.execute({})
+        for node_name, outcome in execution.outcomes.items():
+            if outcome.status not in {"failed", "skipped"}:
+                continue
+            await report_degraded(
+                stream,
+                code=outcome.error_code or "RESOURCE_WORKFLOW_NODE_FAILED",
+                summary=f"资源工作流节点 {node_name} 未完成，已隔离该分支",
+                source="resource_capability",
+                stage=node_name,
             )
-            try:
+
+        package_outcome = execution.outcomes["package"]
+        if package_outcome.status not in {"succeeded", "degraded"}:
+            raise RuntimeError("RESOURCE_WORKFLOW_FAILED")
+        result = graph.typed_output(execution, "package")
+        if not isinstance(result, CapabilityResult):
+            raise RuntimeError("RESOURCE_WORKFLOW_FAILED")
+        return result
+
+    def build_resource_graph(
+        self,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> WorkflowGraph:
+        """Build the validated, fixed resource-generation dependency graph."""
+
+        async def intent_node(
+            _inputs: ResourceIntentNodeInput,
+        ) -> ResourceIntentNodeOutput:
+            async with stream.stage(
+                "intent_understanding",
+                source="resource_capability",
+            ):
+                await stream.thinking(
+                    "解析用户意图...",
+                    source="resource_capability",
+                )
                 intent = await self.intent_agent.process(context, stream=stream)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"IntentUnderstandingAgent failed: {exc!r}")
-                await stream.error(
-                    f"意图解析失败 (回退): {exc}", source="resource_capability"
-                )
-                intent = parse_intent_keyword(context.user_message)
+            return self._intent_contract(intent)
 
-        # ------------------------------------------------------------------
-        # Stage 2: Profile loading
-        # ------------------------------------------------------------------
-        async with stream.stage("profile_loading", source="resource_capability"):
-            await stream.thinking(
-                "加载学习者画像...", source="resource_capability"
+        async def intent_degrade(
+            _inputs: ResourceIntentNodeInput,
+            _error_code: str,
+        ) -> ResourceIntentNodeOutput:
+            await report_degraded(
+                stream,
+                code="RESOURCE_INTENT_FAILED",
+                summary="意图解析失败，已使用本地规则回退",
+                source="resource_capability",
+                stage="intent_understanding",
             )
-            try:
+            return self._intent_contract(parse_intent_keyword(context.user_message))
+
+        async def profile_node(
+            inputs: ResourceProfileNodeInput,
+        ) -> ResourceProfileNodeOutput:
+            intent = inputs.intent
+            async with stream.stage("profile_loading", source="resource_capability"):
+                await stream.thinking("加载学习者画像...", source="resource_capability")
                 profile = await self._builder.get(context.user_id)
-                profile_snapshot = profile.to_summary()
+                snapshot = profile.to_summary()
                 context.metadata["learner_profile"] = profile
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"Profile load failed: {exc!r}")
-                await stream.error(
-                    f"画像加载失败: {exc}", source="resource_capability"
-                )
-                profile_snapshot = {}
+            return ResourceProfileNodeOutput(
+                intent=intent,
+                profile_snapshot=snapshot,
+            )
 
-        if intent is None:
-            intent = parse_intent_keyword(context.user_message)
+        async def profile_degrade(
+            inputs: ResourceProfileNodeInput,
+            _error_code: str,
+        ) -> ResourceProfileNodeOutput:
+            await report_degraded(
+                stream,
+                code="RESOURCE_PROFILE_LOAD_FAILED",
+                summary="画像加载失败，将使用默认生成策略",
+                source="resource_capability",
+                stage="profile_loading",
+            )
+            return ResourceProfileNodeOutput(
+                intent=inputs.intent,
+                profile_snapshot={},
+            )
 
-        # ------------------------------------------------------------------
-        # Stage 3: Knowledge graph query
-        # ------------------------------------------------------------------
-        kg_summary: dict[str, Any] = {}
-        kg_recommendations: list[Any] = []
-        async with stream.stage("knowledge_graph_query", source="resource_capability"):
-            try:
-                svc = get_knowledge_graph_service()
-                course = (
-                    context.metadata.get("course")
-                    or svc.default_course()
-                )
-                if course and svc.has_course(course):
-                    from tutor.services.learner_profile.schema import LearnerProfile
-
-                    prof_obj = (
-                        profile
-                        if isinstance(profile, LearnerProfile)
-                        else LearnerProfile()
+        async def source_node(
+            inputs: ResourceSourceNodeInput,
+        ) -> ResourceSourceNodeOutput:
+            profile_output = inputs.profile_snapshot
+            intent = self._intent_from_contract(profile_output.intent)
+            web_outcome = SearchOutcome()
+            async with stream.stage("web_search", source="resource_capability"):
+                try:
+                    web_outcome = await self._search.execute(
+                        intent.topic,
+                        conversation_enabled=context.web_search_enabled,
                     )
-                    locate = svc.locate(course, prof_obj)
-                    planned_path = svc.plan_for_learner(course, prof_obj)
-                    kg_recommendations = svc.recommend_next(
-                        course, prof_obj, limit=5
+                except Exception:  # noqa: BLE001 - project only stable details
+                    web_outcome = SearchOutcome(
+                        unavailable=True,
+                        degradation_code="WEB_SEARCH_UNAVAILABLE",
                     )
-                    kg_summary = planned_path.model_dump(mode="json")
-                    kg_summary["mastered_count"] = len(locate["mastered"])
-                    kg_summary["unmastered_count"] = len(locate["unmastered"])
-                    kg_summary["next_targets"] = locate["next_targets"][:5]
-                    await stream.observation(
-                        f"知识图谱定位：掌握 {len(locate['mastered'])}，"
-                        f"未掌握 {len(locate['unmastered'])}",
+                if web_outcome.unavailable:
+                    await report_degraded(
+                        stream,
+                        code="WEB_SEARCH_UNAVAILABLE",
+                        summary="联网搜索暂不可用，将使用知识库和模型知识继续生成",
                         source="resource_capability",
-                        stage="knowledge_graph_query",
-                        metadata=kg_summary,
+                        stage="web_search",
                     )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"KG query failed: {exc!r}")
-                await stream.error(
-                    f"知识图谱查询失败 (回退): {exc}",
-                    source="resource_capability",
-                )
-
-        # ------------------------------------------------------------------
-        # Stage 3.5: Course-scoped RAG retrieval
-        # ------------------------------------------------------------------
-        rag_context: RAGContext | None = None
-        rag_snippets: list[str] = []
-        rag_citations: list[dict[str, Any]] = []
-        async with stream.stage("rag_retrieval", source="resource_capability"):
-            try:
-                scope = (context.metadata or {}).get("retrieval_scope") or "all"
-                if (context.metadata or {}).get("rag_enabled") is False:
-                    scope = "none"
-                rag_query = f"{intent.topic}\n{context.user_message}"
-                retrieval_result = await self._retrieval.retrieve(
-                    query=rag_query,
-                    user_id=context.user_id,
-                    scope=scope,
-                )
-                rag_context = RAGContext.from_result(
-                    retrieval_result,
-                    query=rag_query,
-                )
-                rag_citations = [c.to_dict() for c in rag_context.chunks]
-                rag_snippets = [
-                    (
-                        f"[{idx}] {c.knowledge_base_name} / {c.document_name}"
-                        f"{' (' + c.anchor + ')' if c.anchor else ''}"
-                        f" — score={c.score:.3f}\n{c.text}"
-                    )
-                    for idx, c in enumerate(rag_context.chunks, 1)
-                ]
-                context.metadata["rag_context"] = (
-                    RAGContext.to_plain_text(rag_context)
-                    if rag_context.chunks
-                    else ""
-                )
-                context.metadata["rag_citations"] = rag_citations
-                await stream.observation(
-                    (
-                        f"RAG 检索完成：{len(rag_citations)} 条证据"
-                        if rag_context.status == "ok"
-                        else f"RAG 状态：{rag_context.status}"
-                    ),
-                    source="resource_capability",
-                    stage="rag_retrieval",
-                    metadata={
-                        "status": rag_context.status,
-                        "scope": scope,
-                        "citation_count": len(rag_citations),
-                        "error_code": rag_context.error_code,
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"Resource RAG retrieval failed: {exc!r}")
-                await stream.error(
-                    f"RAG 检索失败，本轮将降级生成: {exc}",
-                    source="resource_capability",
-                )
-
-        # ------------------------------------------------------------------
-        # Stage 4: Resource planning
-        # ------------------------------------------------------------------
-        async with stream.stage("resource_planning", source="resource_capability"):
+            web_sources = [item.to_dict() for item in web_outcome.sources]
+            web_snippets = [
+                f"[Web: {item.title}]({item.url})\n{item.excerpt}"
+                for item in web_outcome.sources
+            ]
+            context.metadata["search_used"] = web_outcome.search_used
+            context.metadata["web_search_sources"] = web_sources
+            context.metadata["web_search_context"] = "\n\n".join(web_snippets)
+            rag_snippets = await self._load_rag_context(intent, context, stream)
+            kg_summary = await self._load_kg_summary(context, stream)
             planned_types = self._plan_resources(
                 intent=intent,
-                profile_snapshot=profile_snapshot,
+                profile_snapshot=dict(profile_output.profile_snapshot),
                 kg_summary=kg_summary,
                 metadata=dict(context.metadata or {}),
             )
-            await stream.observation(
-                f"计划生成 {len(planned_types)} 类资源："
-                f"{', '.join(t.value for t in planned_types)}",
-                source="resource_capability",
-                stage="resource_planning",
-                metadata={"types": [t.value for t in planned_types]},
-            )
+            async with stream.stage("resource_planning", source="resource_capability"):
+                await stream.observation(
+                    f"计划生成 {len(planned_types)} 类资源："
+                    f"{', '.join(item.value for item in planned_types)}",
+                    source="resource_capability",
+                    stage="resource_planning",
+                    metadata={"types": [item.value for item in planned_types]},
+                )
 
-        # ------------------------------------------------------------------
-        # Stage 5: Content + Pedagogy (sequential dependency)
-        # ------------------------------------------------------------------
-        document_resource: Resource | None = None
-        pedagogy_resource: Resource | None = None
-        async with stream.stage(
-            "content_and_pedagogy", source="resource_capability"
-        ):
-            if ResourceType.DOCUMENT in planned_types:
-                try:
-                    document_resource = await self.content_expert.process(
+            source_resource: Resource | None = None
+            async with stream.stage(
+                "content_and_pedagogy",
+                source="resource_capability",
+            ):
+                if ResourceType.DOCUMENT in planned_types:
+                    source_resource = await self.content_expert.process(
                         context,
                         stream=stream,
                         topic=intent.topic,
-                        profile=profile_snapshot,
-                        rag_snippets=rag_snippets,
+                        profile=dict(profile_output.profile_snapshot),
+                        rag_snippets=[*rag_snippets, *web_snippets],
                     )
-                    self._attach_rag_evidence(
-                        document_resource,
-                        rag_citations,
-                        rag_context,
+                    self._attach_context_rag_evidence(
+                        source_resource,
+                        context,
                         source="content_expert",
                     )
-                    # Pedagogy rewrites ContentExpert output
-                    pedagogy_resource = await self.pedagogy.process(
-                        context,
-                        stream=stream,
-                        source_resource=document_resource,
-                        profile=profile_snapshot,
+                else:
+                    await stream.observation(
+                        "未计划 document 类型，跳过内容生成",
+                        source="resource_capability",
                     )
-                    # Bump confidence on the teaching version
-                    pedagogy_resource.confidence_score = max(
-                        pedagogy_resource.confidence_score,
-                        document_resource.confidence_score,
-                    )
-                    self._attach_rag_evidence(
-                        pedagogy_resource,
-                        rag_citations,
-                        rag_context,
-                        source="pedagogy",
-                    )
-                    # **2026-07-08 fix (187b2955):** emit a ``RESOURCE``
-                    # event for the pedagogy output *before* the slower
-                    # parallel agents + video rendering finish. The
-                    # frontend renders the document card immediately.
-                    try:
-                        await stream.resource(
-                            pedagogy_resource,
-                            source="resource_capability",
-                            stage="content_and_pedagogy",
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(f"stream.resource() emission failed: {exc!r}")
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception(f"Content/Pedagogy failed: {exc!r}")
-                    await stream.error(
-                        f"内容生成失败: {exc}", source="resource_capability"
-                    )
-            else:
-                await stream.observation(
-                    "未计划 document 类型，跳过内容生成",
-                    source="resource_capability",
-                )
-
-        # ------------------------------------------------------------------
-        # Stage 6: Parallel resource generation (mindmap/exercise/video/code)
-        # ------------------------------------------------------------------
-        async with stream.stage(
-            "parallel_resource_generation", source="resource_capability"
-        ):
-            parallel_resources = await self._generate_parallel(
-                context=context,
-                intent=intent,
-                profile_snapshot=profile_snapshot,
-                source_content=pedagogy_resource.content if pedagogy_resource else "",
-                planned_types=planned_types,
-                stream=stream,
-                rag_context=rag_context,
-                rag_citations=rag_citations,
+            return ResourceSourceNodeOutput(
+                profile=profile_output,
+                kg_summary=kg_summary,
+                planned_types=tuple(item.value for item in planned_types),
+                source_resource=source_resource,
             )
-            resources.extend(parallel_resources)
 
-        # ------------------------------------------------------------------
-        # Stage 7: Quality review (parallel per resource)
-        # ------------------------------------------------------------------
-        all_resources: list[Resource] = []
-        if pedagogy_resource is not None:
-            all_resources.append(pedagogy_resource)
-        if document_resource is not None and document_resource is not pedagogy_resource:
-            # Keep pedagogy version (it supersedes); document is intermediate
-            pass
-        all_resources.extend(parallel_resources)
+        async def source_degrade(
+            inputs: ResourceSourceNodeInput,
+            _error_code: str,
+        ) -> ResourceSourceNodeOutput:
+            profile_output = inputs.profile_snapshot
+            intent = self._intent_from_contract(profile_output.intent)
+            planned_types = self._plan_resources(
+                intent=intent,
+                profile_snapshot=dict(profile_output.profile_snapshot),
+                kg_summary={},
+                metadata=dict(context.metadata or {}),
+            )
+            await report_degraded(
+                stream,
+                code="RESOURCE_CONTENT_GENERATION_FAILED",
+                summary="内容生成失败",
+                source="resource_capability",
+                stage="content_and_pedagogy",
+            )
+            return ResourceSourceNodeOutput(
+                profile=profile_output,
+                kg_summary={},
+                planned_types=tuple(item.value for item in planned_types),
+                source_resource=None,
+            )
 
-        # ------------------------------------------------------------------
-        # **2026-07-07 fix:** pre-filter resources whose *generation*
-        # already failed (vs. resources whose content is simply
-        # low-quality). The agent still returns a typed failed
-        # Resource so the user sees "视频生成失败 — 重新提交" in the
-        # trace, but it must NOT enter the quality-review loop —
-        # the reviewer would correctly reject it, then the reject
-        # filter would strip it from the package, then the
-        # video_rendering stage would be a confusing no-op.
-        #
-        # Filter rule:
-        #   * video     — drop if ``render_status == "failed"``
-        #                  (Manim code generation / syntax check failed)
-        #   * code      — keep; reviewer handles ``execution_status``
-        #                  failures so we don't lose valid-but-env-broken
-        #                  snippets.
-        #   * other     — keep.
-        #
-        # We emit a clear stream observation so the UI / chat
-        # channel can show "1 video resource skipped (generation
-        # failed)" rather than a silent 5/6 retain count.
-        # ------------------------------------------------------------------
-        all_resources, prefilter_summary = await self._prefilter_failed_resources(
-            all_resources, stream
+        async def pedagogy_node(
+            inputs: ResourcePedagogyNodeInput,
+        ) -> ResourcePedagogyNodeOutput:
+            source_output = inputs.source
+            source_resource = source_output.source_resource
+            if source_resource is None:
+                return ResourcePedagogyNodeOutput(source=source_output)
+            pedagogy_resource = await self.pedagogy.process(
+                context,
+                stream=stream,
+                source_resource=source_resource,
+                profile=dict(source_output.profile.profile_snapshot),
+            )
+            pedagogy_resource.confidence_score = max(
+                pedagogy_resource.confidence_score,
+                source_resource.confidence_score,
+            )
+            self._attach_context_rag_evidence(
+                pedagogy_resource,
+                context,
+                source="pedagogy",
+            )
+            await self._emit_resource(
+                pedagogy_resource,
+                stream,
+                "content_and_pedagogy",
+            )
+            return ResourcePedagogyNodeOutput(
+                source=source_output,
+                pedagogy_resource=pedagogy_resource,
+            )
+
+        async def pedagogy_degrade(
+            inputs: ResourcePedagogyNodeInput,
+            _error_code: str,
+        ) -> ResourcePedagogyNodeOutput:
+            source_output = inputs.source
+            await report_degraded(
+                stream,
+                code="RESOURCE_PEDAGOGY_FAILED",
+                summary="教学重构失败，已使用原始内容",
+                source="resource_capability",
+                stage="content_and_pedagogy",
+            )
+            return ResourcePedagogyNodeOutput(
+                source=source_output,
+                pedagogy_resource=source_output.source_resource,
+            )
+
+        async def branch_node(
+            inputs: ResourceArtifactNodeInput,
+            branch_name: str,
+        ) -> ResourceArtifactNodeOutput:
+            return await self._run_resource_branch(
+                branch_name,
+                inputs.pedagogy,
+                context,
+                stream,
+            )
+
+        async def quality_node(
+            inputs: ResourceQualityNodeInput,
+        ) -> ResourceQualityNodeOutput:
+            return await self._run_quality_node(inputs, context, stream)
+
+        async def quality_degrade(
+            inputs: ResourceQualityNodeInput,
+            _error_code: str,
+        ) -> ResourceQualityNodeOutput:
+            return await self._run_quality_node(inputs, context, stream)
+
+        async def safety_node(
+            inputs: ResourceSafetyNodeInput,
+        ) -> ResourceSafetyNodeOutput:
+            return await self._run_safety_node(
+                inputs.quality,
+                context,
+                stream,
+            )
+
+        async def package_node(inputs: ResourcePackageNodeInput) -> CapabilityResult:
+            return await self._run_package_node(
+                inputs.safety,
+                context,
+                stream,
+            )
+
+        return WorkflowGraph(
+            [
+                WorkflowNode(
+                    "intent",
+                    (),
+                    120.0,
+                    intent_node,
+                    intent_degrade,
+                    input_model=ResourceIntentNodeInput,
+                    output_model=ResourceIntentNodeOutput,
+                ),
+                WorkflowNode(
+                    "profile_snapshot",
+                    ("intent",),
+                    60.0,
+                    profile_node,
+                    profile_degrade,
+                    input_model=ResourceProfileNodeInput,
+                    output_model=ResourceProfileNodeOutput,
+                ),
+                WorkflowNode(
+                    "source",
+                    ("profile_snapshot",),
+                    300.0,
+                    source_node,
+                    source_degrade,
+                    input_model=ResourceSourceNodeInput,
+                    output_model=ResourceSourceNodeOutput,
+                ),
+                WorkflowNode(
+                    "pedagogy",
+                    ("source",),
+                    300.0,
+                    pedagogy_node,
+                    pedagogy_degrade,
+                    input_model=ResourcePedagogyNodeInput,
+                    output_model=ResourcePedagogyNodeOutput,
+                ),
+                *[
+                    WorkflowNode(
+                        name,
+                        ("pedagogy",),
+                        300.0,
+                        lambda inputs, branch=name: branch_node(inputs, branch),
+                        input_model=ResourceArtifactNodeInput,
+                        output_model=ResourceArtifactNodeOutput,
+                    )
+                    for name in (
+                        "mindmap",
+                        "exercise",
+                        "code",
+                        "video-code",
+                        "reading",
+                    )
+                ],
+                WorkflowNode(
+                    "quality",
+                    ("mindmap", "exercise", "code", "video-code", "reading"),
+                    300.0,
+                    quality_node,
+                    quality_degrade,
+                    input_model=ResourceQualityNodeInput,
+                    output_model=ResourceQualityNodeOutput,
+                    degrade_input_model=ResourceQualityNodeInput,
+                ),
+                WorkflowNode(
+                    "safety",
+                    ("quality",),
+                    300.0,
+                    safety_node,
+                    input_model=ResourceSafetyNodeInput,
+                    output_model=ResourceSafetyNodeOutput,
+                ),
+                WorkflowNode(
+                    "package",
+                    ("safety",),
+                    120.0,
+                    package_node,
+                    input_model=ResourcePackageNodeInput,
+                    output_model=CapabilityResult,
+                ),
+            ]
         )
 
-        async with stream.stage("quality_review", source="resource_capability"):
-            reviews = await self._review_all(all_resources, context, stream)
+    @staticmethod
+    def _intent_contract(intent: Intent) -> ResourceIntentNodeOutput:
+        return ResourceIntentNodeOutput(
+            topic=intent.topic,
+            scope=intent.scope,
+            resource_types=tuple(item.value for item in intent.resource_types),
+            prerequisites=tuple(intent.prerequisites),
+            goal=intent.goal,
+            raw_message=intent.raw_message,
+            confidence=intent.confidence,
+        )
 
-        # ------------------------------------------------------------------
-        # Stage 8: Anti-hallucination + Safety (per-resource)
-        # ------------------------------------------------------------------
-        safety_reports: list[Any] = []
-        async with stream.stage("anti_hallucination", source="resource_capability"):
-            safety_reports = await self._safety_check_all(
-                all_resources, context, intent, stream
+    @staticmethod
+    def _intent_from_contract(output: ResourceIntentNodeOutput) -> Intent:
+        return Intent(
+            topic=output.topic,
+            scope=output.scope,
+            resource_types=[ResourceType(item) for item in output.resource_types],
+            prerequisites=list(output.prerequisites),
+            goal=output.goal,
+            raw_message=output.raw_message,
+            confidence=output.confidence,
+        )
+
+    async def _load_rag_context(
+        self,
+        intent: Intent,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> list[str]:
+        scope = str(context.metadata.get("retrieval_scope") or "all")
+        query = context.user_message or intent.topic
+        rag_context: RAGContext | None = None
+        async with stream.stage("rag_retrieval", source="resource_capability"):
+            try:
+                rag_context = await self._retrieval.retrieve(
+                    query=query,
+                    scope=scope,
+                    user_id=context.user_id,
+                )
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code="RESOURCE_RETRIEVAL_FAILED",
+                    summary="课程资料暂时不可用，本轮继续使用现有内容生成",
+                    source="resource_capability",
+                    stage="rag_retrieval",
+                )
+
+        citations = (
+            [chunk.to_dict() for chunk in rag_context.chunks]
+            if rag_context is not None
+            else []
+        )
+        rag_text = (
+            RAGContext.to_plain_text(rag_context)
+            if rag_context is not None and rag_context.chunks
+            else ""
+        )
+        context.metadata["rag_context"] = rag_text
+        context.metadata["rag_citations"] = citations
+        context.metadata["rag_status"] = (
+            rag_context.status if rag_context is not None else "error"
+        )
+        context.metadata["rag_query"] = query
+        context.metadata["rag_scope"] = scope
+        return [rag_text] if rag_text else []
+
+    def _attach_context_rag_evidence(
+        self,
+        resource: Resource,
+        context: UnifiedContext,
+        *,
+        source: str,
+    ) -> None:
+        citations = [
+            dict(item)
+            for item in (context.metadata.get("rag_citations") or [])
+            if isinstance(item, dict)
+        ]
+        self._attach_rag_evidence(resource, citations, source=source)
+        resource.metadata["rag"] = {
+            **dict(resource.metadata.get("rag") or {}),
+            "status": str(context.metadata.get("rag_status") or "not_run"),
+            "query": str(context.metadata.get("rag_query") or ""),
+            "scope": str(context.metadata.get("rag_scope") or ""),
+            "source": source,
+            "citation_count": len(citations),
+        }
+
+    async def _load_kg_summary(
+        self,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> dict[str, Any]:
+        async with stream.stage("knowledge_graph_query", source="resource_capability"):
+            try:
+                service = get_knowledge_graph_service()
+                course = context.metadata.get("course") or service.default_course()
+                if not course or not service.has_course(course):
+                    return {}
+                from tutor.services.learner_profile.schema import LearnerProfile
+
+                profile = context.metadata.get("learner_profile")
+                if not isinstance(profile, LearnerProfile):
+                    profile = LearnerProfile()
+                located = service.locate(course, profile)
+                requested_path_id = str(context.metadata.get("path_id") or "")
+                planned = service.plan_for_learner(
+                    course,
+                    profile,
+                    path_id=requested_path_id,
+                )
+                summary = planned.model_dump(mode="json")
+                summary.update(
+                    {
+                        "course": course,
+                        "mastered_count": len(located["mastered"]),
+                        "unmastered_count": len(located["unmastered"]),
+                        "next_targets": located["next_targets"][:5],
+                    }
+                )
+                await stream.observation(
+                    f"知识图谱定位：掌握 {summary['mastered_count']}，未掌握 {summary['unmastered_count']}",
+                    source="resource_capability",
+                    stage="knowledge_graph_query",
+                    metadata=summary,
+                )
+                return summary
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code="RESOURCE_KNOWLEDGE_GRAPH_FAILED",
+                    summary="知识图谱查询失败，已跳过图谱增强",
+                    source="resource_capability",
+                    stage="knowledge_graph_query",
+                )
+                return {}
+
+    async def _run_resource_branch(
+        self,
+        branch_name: str,
+        pedagogy_output: ResourcePedagogyNodeOutput,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> ResourceArtifactNodeOutput:
+        planned = set(pedagogy_output.source.planned_types)
+        intent = self._intent_from_contract(pedagogy_output.source.profile.intent)
+        profile_snapshot = dict(pedagogy_output.source.profile.profile_snapshot)
+        base_resource = pedagogy_output.pedagogy_resource or pedagogy_output.source.source_resource
+        base_content = base_resource.content if base_resource is not None else ""
+        web_content = str(context.metadata.get("web_search_context") or "").strip()
+        rag_content = str(context.metadata.get("rag_context") or "").strip()
+        source_content = base_content
+        supplemental = [
+            item
+            for item in (rag_content, web_content)
+            if item and item not in base_content
+        ]
+        if supplemental:
+            source_content = "\n\n".join(
+                part for part in (base_content, *supplemental) if part
+            )
+        resources: list[Resource] = []
+
+        if branch_name == "mindmap":
+            async with stream.stage(
+                "parallel_resource_generation",
+                source="resource_capability",
+            ):
+                artifact_calls: list[tuple[ResourceType, Any]] = []
+                if ResourceType.MINDMAP.value in planned:
+                    artifact_calls.append(
+                        (
+                            ResourceType.MINDMAP,
+                            self.multimedia.process(
+                                context,
+                                stream=stream,
+                                topic=intent.topic,
+                                source_content=source_content,
+                                profile=profile_snapshot,
+                            ),
+                        )
+                    )
+                if ResourceType.PPT.value in planned:
+                    artifact_calls.append(
+                        (
+                            ResourceType.PPT,
+                            self.ppt_generator.process(
+                                topic=intent.topic,
+                                source_content=source_content,
+                                profile=profile_snapshot,
+                                package_id=None,
+                                stream=stream,
+                            ),
+                        )
+                    )
+                results = await asyncio.gather(
+                    *(call for _, call in artifact_calls),
+                    return_exceptions=True,
+                )
+                for (resource_type, _), result in zip(
+                    artifact_calls,
+                    results,
+                    strict=True,
+                ):
+                    if isinstance(result, Exception):
+                        log_degraded(
+                            code=(
+                                f"RESOURCE_{resource_type.value.upper()}_"
+                                "GENERATION_FAILED"
+                            ),
+                            source="resource_capability",
+                            stage="parallel_resource_generation",
+                        )
+                        continue
+                    resources.append(result)
+        elif branch_name == "exercise" and ResourceType.EXERCISE.value in planned:
+            resources.append(
+                await self.exercise_generator.process(
+                    context,
+                    stream=stream,
+                    topic=intent.topic,
+                    source_content=source_content,
+                    profile=profile_snapshot,
+                )
+            )
+        elif branch_name == "code" and ResourceType.CODE.value in planned:
+            resources.append(
+                await self.code_sandbox.process(
+                    context,
+                    stream=stream,
+                    topic=intent.topic,
+                    source_content=source_content,
+                    profile=profile_snapshot,
+                    run_locally=True,
+                )
+            )
+        elif branch_name == "video-code" and ResourceType.VIDEO.value in planned:
+            resources.append(
+                await self.manim_video.process(
+                    context,
+                    stream=stream,
+                    topic=intent.topic,
+                    source_content=source_content,
+                    profile=profile_snapshot,
+                )
+            )
+        elif branch_name == "reading" and ResourceType.READING.value in planned:
+            resources.append(
+                await self._generate_reading(
+                    topic=intent.topic,
+                    profile_snapshot=profile_snapshot,
+                    source_content=source_content,
+                    stream=stream,
+                )
             )
 
-        # ------------------------------------------------------------------
-        # Stage 9: Package assembly
-        # ------------------------------------------------------------------
+        for resource in resources:
+            self._attach_context_rag_evidence(
+                resource,
+                context,
+                source=f"{resource.type.value}_generator",
+            )
+            await self._emit_resource(
+                resource,
+                stream,
+                "parallel_resource_generation",
+            )
+        return ResourceArtifactNodeOutput(
+            pedagogy=pedagogy_output,
+            resources=tuple(resources),
+        )
+
+    async def _emit_resource(
+        self,
+        resource: Resource,
+        stream: StreamBus,
+        stage: str,
+    ) -> None:
+        try:
+            self._canonicalize_resource_artifacts(resource)
+            await stream.resource(
+                resource,
+                source="resource_capability",
+                stage=stage,
+            )
+        except Exception:  # noqa: BLE001
+            log_degraded(
+                code="RESOURCE_STREAM_EMIT_FAILED",
+                source="resource_capability",
+                stage=stage,
+            )
+
+    async def _run_quality_node(
+        self,
+        inputs: ResourceQualityNodeInput,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> ResourceQualityNodeOutput:
+        branch_outputs = list(inputs.available_outputs())
+        if not branch_outputs:
+            raise RuntimeError("RESOURCE_QUALITY_INPUT_MISSING")
+        pedagogy_output = branch_outputs[0].pedagogy
+        candidates: list[Resource] = []
+        if pedagogy_output.pedagogy_resource is not None:
+            candidates.append(pedagogy_output.pedagogy_resource)
+        seen_ids = {resource.resource_id for resource in candidates}
+        for output in branch_outputs:
+            for resource in output.resources:
+                if resource.resource_id in seen_ids:
+                    continue
+                seen_ids.add(resource.resource_id)
+                candidates.append(resource)
+
+        candidates, filtered_failed = await self._prefilter_failed_resources(
+            candidates,
+            stream,
+        )
+        malformed: list[dict[str, Any]] = []
+        valid_candidates: list[Resource] = []
+        for resource in candidates:
+            if _is_malformed_resource(resource):
+                malformed.append(
+                    {
+                        "resource_id": resource.resource_id,
+                        "type": resource.type.value,
+                        "reason": "malformed_resource",
+                    }
+                )
+                continue
+            valid_candidates.append(resource)
+        filtered_failed.extend(malformed)
+
+        async with stream.stage("quality_review", source="resource_capability"):
+            reviews = await self._review_all(valid_candidates, context, stream)
+        review_by_id = {review.resource_id: review for review in reviews}
+        approved: list[Resource] = []
+        approved_reviews: list[ResourceReview] = []
+        filtered_reviews: list[dict[str, Any]] = []
+        for resource in valid_candidates:
+            review = review_by_id.get(resource.resource_id)
+            if review is None:
+                filtered_reviews.append(
+                    {
+                        "resource_id": resource.resource_id,
+                        "reason": "quality_review_failed",
+                    }
+                )
+                continue
+            if review.verdict == ReviewVerdict.REJECT:
+                filtered_reviews.append(
+                    {
+                        "resource_id": resource.resource_id,
+                        "reason": "quality_review_rejected",
+                    }
+                )
+                continue
+            review_payload = {
+                "verdict": review.verdict.value,
+                "quality_score": review.quality_score,
+                "issues": review.issues,
+                "suggestions": review.suggestions,
+            }
+            resource.metadata["review"] = review_payload
+            resource.review = review_payload
+            approved.append(resource)
+            approved_reviews.append(review)
+
+        if filtered_reviews:
+            await stream.observation(
+                f"已过滤 {len(filtered_reviews)} 个未通过质量审核的资源",
+                source="resource_capability",
+                stage="quality_review",
+                metadata={"filtered_count": len(filtered_reviews)},
+            )
+        return ResourceQualityNodeOutput(
+            pedagogy=pedagogy_output,
+            resources=tuple(approved),
+            reviews=tuple(approved_reviews),
+            filtered_failed=tuple(filtered_failed),
+            filtered_reviews=tuple(filtered_reviews),
+        )
+
+    async def _run_safety_node(
+        self,
+        quality_output: ResourceQualityNodeOutput,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> ResourceSafetyNodeOutput:
+        resources = list(quality_output.resources)
+        intent = self._intent_from_contract(quality_output.pedagogy.source.profile.intent)
+        async with stream.stage("anti_hallucination", source="resource_capability"):
+            reports = await self._safety_check_all(
+                resources,
+                context,
+                intent,
+                stream,
+            )
+        kept: list[Resource] = []
+        kept_reports: list[Any] = []
+        filtered: list[dict[str, Any]] = []
+        for resource, report in zip(resources, reports, strict=True):
+            safety_payload = report.to_dict()
+            resource.metadata["safety"] = safety_payload
+            resource.safety = safety_payload
+            if report.overall_verdict == OverallVerdict.UNSAFE:
+                filtered.append(
+                    {
+                        "resource_id": resource.resource_id,
+                        "reason": "anti_hallucination_unsafe",
+                    }
+                )
+                continue
+            kept.append(resource)
+            kept_reports.append(report)
+        if filtered:
+            await stream.observation(
+                f"已过滤 {len(filtered)} 个安全校验未通过的资源",
+                source="resource_capability",
+                stage="anti_hallucination",
+                metadata={
+                    "unsafe_count": len(filtered),
+                    "kept_count": len(kept),
+                },
+            )
+        return ResourceSafetyNodeOutput(
+            quality=quality_output,
+            resources=tuple(kept),
+            safety_reports=tuple(kept_reports),
+            filtered_safety=tuple(filtered),
+        )
+
+    async def _run_package_node(
+        self,
+        safety_output: ResourceSafetyNodeOutput,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> CapabilityResult:
+        quality = safety_output.quality
+        source = quality.pedagogy.source
+        intent = self._intent_from_contract(source.profile.intent)
+        web_sources = list(context.metadata.get("web_search_sources") or [])
+        search_used = bool(context.metadata.get("search_used"))
         package = ResourcePackage(
             topic=intent.topic,
-            resources=all_resources,
-            target_profile_snapshot=profile_snapshot,
-            learning_path_summary=kg_summary,
+            resources=list(safety_output.resources),
+            target_profile_snapshot=dict(source.profile.profile_snapshot),
+            learning_path_summary=dict(source.kg_summary),
             generated_by=[
                 self.intent_agent.agent_name,
                 self.content_expert.agent_name,
@@ -476,132 +1024,38 @@ class ResourceGenerationCapability(BaseCapability):
                 "intent_scope": intent.scope,
                 "intent_confidence": intent.confidence,
                 "intent_prerequisites": intent.prerequisites,
-                "review_count": len(reviews),
-                "passing_reviews": sum(
-                    1 for r in reviews if r.verdict == ReviewVerdict.PASS
-                ),
-                "safety_blocked": sum(
-                    1 for s in safety_reports if s.overall_verdict == OverallVerdict.UNSAFE
-                ),
-                "rag_status": rag_context.status if rag_context else "not_run",
-                "rag_citation_count": len(rag_citations),
+                "review_count": len(quality.reviews),
+                "passing_reviews": sum(review.verdict == ReviewVerdict.PASS for review in quality.reviews),
+                "safety_blocked": len(safety_output.filtered_safety),
+                "filtered_failed": list(quality.filtered_failed),
+                "filtered_reviews": list(quality.filtered_reviews),
+                "filtered_safety": list(safety_output.filtered_safety),
+                "search_used": search_used,
+                "web_search_sources": web_sources,
+                "rag_status": str(context.metadata.get("rag_status") or "not_run"),
+                "rag_citation_count": len(context.metadata.get("rag_citations") or []),
             },
         )
-        # Attach review + safety to each resource
-        review_by_id = {r.resource_id: r for r in reviews}
-        safety_by_id = {s.fact_check.topic if False else i: s for i, s in enumerate(safety_reports)}
-        # Match safety to resource by order (same iteration order as resources)
-        for idx, r in enumerate(package.resources):
-            rev = review_by_id.get(r.resource_id)
-            if rev is not None:
-                r.metadata["review"] = {
-                    "verdict": rev.verdict.value,
-                    "quality_score": rev.quality_score,
-                    "issues": rev.issues,
-                    "suggestions": rev.suggestions,
-                }
-            if idx < len(safety_reports):
-                safety = safety_reports[idx]
-                r.metadata["safety"] = safety.to_dict()
+        package.associate_originating_job(context.job_id)
+        session_id = context.session_id or ""
+        if session_id:
+            package.metadata["session_id"] = session_id
+        for resource in package.resources:
+            resource.metadata.setdefault("package_id", package.package_id)
+            resource.metadata["search_used"] = search_used
+            resource.metadata["web_search_sources"] = web_sources
+            self._attach_context_rag_evidence(
+                resource,
+                context,
+                source="resource_package",
+            )
+            if session_id:
+                resource.metadata.setdefault("session_id", session_id)
+            self._canonicalize_resource_artifacts(resource)
 
-        # **2026-07-08 fix (187b2955):** drop resources whose safety
-        # verdict is ``UNSAFE`` (refuted claims OR content-safety
-        # violation). Before this, ``safety_blocked`` was counted in
-        # metadata but the unsafe resource was still shipped to the
-        # user — exactly the kind of "the user sees a hallucinated
-        # answer as a confident resource card" failure we don't want.
-        # We keep ``CAUTION`` and ``UNVERIFIED`` (those are educational
-        # signals, not blocks).
-        unsafe_ids: set[str] = set()
-        for idx, r in enumerate(package.resources):
-            if idx >= len(safety_reports):
-                continue
-            sv = safety_reports[idx].overall_verdict
-            if sv == OverallVerdict.UNSAFE:
-                unsafe_ids.add(r.resource_id)
-        if unsafe_ids:
-            before_count = len(package.resources)
-            package.resources = [
-                r for r in package.resources if r.resource_id not in unsafe_ids
-            ]
-            package.metadata.setdefault("filtered_safety", []).extend(
-                [
-                    {
-                        "resource_id": rid,
-                        "reason": "anti_hallucination_unsafe",
-                    }
-                    for rid in unsafe_ids
-                ]
-            )
-            await stream.observation(
-                f"已过滤 {len(unsafe_ids)} 个安全校验未通过的资源"
-                f"（保留 {len(package.resources)}/{before_count}）",
-                source="resource_capability",
-                stage="anti_hallucination",
-                metadata={
-                    "unsafe_count": len(unsafe_ids),
-                    "kept_count": len(package.resources),
-                },
-            )
-            logger.warning(
-                f"resource_capability: filtered {len(unsafe_ids)} unsafe resources "
-                f"(topic={package.topic!r}); kept={len(package.resources)}"
-            )
-
-        # ------------------------------------------------------------------
-        # **2026-06-22 fix (Task 9):** filter out resources whose quality
-        # review verdict is ``reject`` BEFORE we persist or surface the
-        # package. Previously the verdict was attached as metadata but
-        # the resource still shipped to the chat viewer — so a code
-        # resource with empty code or a video resource whose generation
-        # failed was published to the user as a real, usable resource.
-        #
-        # We keep ``REVISE`` (the LLM thinks it can be improved but is
-        # still usable) and ``PASS``; only ``REJECT`` is dropped.
-        # Dropped resources are recorded in ``package.metadata`` for
-        # downstream observability and surfaced as a stream observation
-        # so the chat UI can show "2 resources were filtered".
-        # ------------------------------------------------------------------
-        rejected_ids = {
-            r.resource_id
-            for r in package.resources
-            if (r.metadata.get("review") or {}).get("verdict") == "reject"
-        }
-        if rejected_ids:
-            before_count = len(package.resources)
-            package.resources = [
-                r for r in package.resources if r.resource_id not in rejected_ids
-            ]
-            package.metadata.setdefault("filtered_reviews", []).extend(
-                [
-                    {
-                        "resource_id": rid,
-                        "reason": "quality_review_rejected",
-                    }
-                    for rid in rejected_ids
-                ]
-            )
-            await stream.observation(
-                f"已过滤 {len(rejected_ids)} 个质量不达标的资源（保留 "
-                f"{len(package.resources)}/{before_count}）",
-                source="resource_capability",
-                stage="quality_review",
-                metadata={
-                    "rejected_count": len(rejected_ids),
-                    "kept_count": len(package.resources),
-                },
-            )
-            logger.warning(
-                f"resource_capability: filtered {len(rejected_ids)} rejected resources "
-                f"(topic={package.topic!r}); kept={len(package.resources)}"
-            )
-
-        # ------------------------------------------------------------------
-        # Stage 10: Path integration — store package ID in profile metadata
-        # ------------------------------------------------------------------
         async with stream.stage("path_integration", source="resource_capability"):
             try:
-                # Emit summary into profile metadata for next-turn continuity
+                profile = await self._builder.get(context.user_id)
                 profile.metadata.setdefault("resource_history", []).append(
                     {
                         "package_id": package.package_id,
@@ -612,35 +1066,31 @@ class ResourceGenerationCapability(BaseCapability):
                 )
                 profile.metadata["last_package_id"] = package.package_id
                 profile.metadata["last_topic"] = package.topic
-                await self._builder.store.replace(profile, source="resource_capability")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Profile metadata update failed: {exc!r}")
+                await self._builder.store.replace(
+                    profile,
+                    source="resource_capability",
+                )
+            except Exception:  # noqa: BLE001
+                log_degraded(
+                    code="RESOURCE_PROFILE_METADATA_FAILED",
+                    source="resource_capability",
+                    stage="path_integration",
+                )
 
-        # ------------------------------------------------------------------
-        # Stage 11: Persistence — write the package to the persistent store
-        # ------------------------------------------------------------------
-        # First, move any PPT artifacts generated with a placeholder
-        # package_id to the real one. This is a small bookkeeping step
-        # so the file layout mirrors the resource_packages DB layout.
         try:
             self._relocate_ppt_artifacts(package)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"PPT artifact relocation failed: {exc!r}")
-
+        except Exception:  # noqa: BLE001
+            log_degraded(
+                code="RESOURCE_PPT_RELOCATION_FAILED",
+                source="resource_capability",
+                stage="persistence",
+            )
+        for resource in package.resources:
+            self._replace_unowned_markdown_images(resource)
         async with stream.stage("persistence", source="resource_capability"):
             try:
-                # 2026-06-21 plan: tag the package with the session_id
-                # so conversation-detail can filter packages by session
-                # in a single SQL query. We write the id into
-                # ``package.metadata`` (the store already round-trips
-                # it through the ``package_metadata`` JSON column) and
-                # the per-resource ``metadata`` for downstream lookups
-                # (RAG scope, retried jobs, etc.).
-                session_id = getattr(context, "session_id", "") or ""
-                if session_id:
-                    package.metadata.setdefault("session_id", session_id)
-                    for r in package.resources:
-                        r.metadata.setdefault("session_id", session_id)
+                for resource in package.resources:
+                    resource.metadata["package_persisted"] = True
                 await self._store.save(package, user_id=context.user_id)
                 await stream.observation(
                     f"资源包已持久化: pkg={package.package_id[:12]}… "
@@ -653,67 +1103,61 @@ class ResourceGenerationCapability(BaseCapability):
                         "resource_count": len(package.resources),
                     },
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"ResourcePackage persistence failed: {exc!r}")
-                await stream.error(
-                    f"资源包持久化失败 (不影响本轮): {exc}",
+            except Exception:  # noqa: BLE001
+                for resource in package.resources:
+                    resource.metadata["package_persisted"] = False
+                await report_degraded(
+                    stream,
+                    code="RESOURCE_PERSIST_FAILED",
+                    summary="资源包持久化失败，本轮结果仍可查看",
                     source="resource_capability",
+                    stage="persistence",
                 )
 
-        # ------------------------------------------------------------------
-        # Stage 12: Video rendering status (2026-06-21 plan, C2)
-        # ------------------------------------------------------------------
-        # The agent already outputs ``VideoResource(render_status="pending")``.
-        # We kick off the actual ``manim`` subprocess via
-        # :meth:`ManimRenderService.render`, which is async + uses
-        # ``loop.run_in_executor`` so the manim subprocess never blocks
-        # the FastAPI event loop. Each render updates the resource's
-        # ``render_status`` in-place and re-saves the package so the UI
-        # can poll/snapshot it without the user reloading.
-        #
-        # **2026-07-08 fix (fdb26152):** rendering is now fire-and-forget.
-        # Before this, ``_render_pending_videos`` was awaited inline, so
-        # a slow Manim render pushed the job past 600s — even though the
-        # resource was already streamable. Now we start the render
-        # background tasks, register them on the running loop (so they
-        # keep going after ``cap.run()`` returns), and IMMEDIATELY emit
-        # ``stream.result()`` so the user gets the package + the final
-        # contract without waiting for video encoding. The render task
-        # keeps streaming ``RESOURCE`` events for each finished video
-        # (with the updated ``render_status`` / ``video_url``) so the
-        # right-pane card updates live as the video comes online.
-        # We also persist a strong reference to the task so it can't be
-        # garbage-collected mid-render.
-        render_bg_tasks = await self._start_pending_video_renders(
-            package, context, stream
-        )
-        # Hold a reference on the capability instance for the lifetime
-        # of the loop. The task is fire-and-forget; if the loop ends
-        # the manim subprocess is torn down anyway.
-        if render_bg_tasks:
-            self._bg_render_tasks.extend(render_bg_tasks)
+        follow_up_tasks = self._video_follow_up_specs(package, context.user_id)
+        artifact_refs: list[ArtifactRef] = []
+        for resource in package.resources:
+            format_specific = resource.format_specific or {}
+            artifact_key = format_specific.get("artifact_key")
+            if artifact_key:
+                artifact_refs.append(
+                    ArtifactRef(
+                        name=PurePosixPath(str(artifact_key)).name,
+                        kind=resource.type.value,
+                        artifact_key=str(artifact_key),
+                    )
+                )
+            for raw in format_specific.get("artifacts") or []:
+                try:
+                    reference = ArtifactRef.model_validate(raw)
+                except Exception:  # noqa: BLE001
+                    continue
+                if reference.artifact_key:
+                    artifact_refs.append(reference)
 
-        # ------------------------------------------------------------------
-        # Emit final result
-        # ------------------------------------------------------------------
-        await stream.result(
-            {
-                "package": package.model_dump(mode="json"),
+        surviving_ids = {resource.resource_id for resource in package.resources}
+        reviews = [review for review in quality.reviews if review.resource_id in surviving_ids]
+        return CapabilityResult(
+            assistant_message=f"已生成 {len(package.resources)} 项学习资源",
+            payload={
+                "package": public_package_dump(package),
                 "summary": package.summary(),
                 "reviews": [
                     {
-                        "resource_id": r.resource_id,
-                        "verdict": r.verdict.value,
-                        "quality_score": r.quality_score,
+                        "resource_id": review.resource_id,
+                        "verdict": review.verdict.value,
+                        "quality_score": review.quality_score,
                     }
-                    for r in reviews
+                    for review in reviews
                 ],
-                "kg_summary": kg_summary,
+                "kg_summary": dict(source.kg_summary),
                 "next_step": "open_resource_cards",
+                "search_used": search_used,
+                "sources": web_sources,
             },
-            source="resource_capability",
+            artifacts=tuple(artifact_refs),
+            follow_up_tasks=follow_up_tasks,
         )
-        await stream.done(source="resource_capability")
 
 # ---------------------------------------------------------------------------
 # PPT bookkeeping
@@ -721,27 +1165,37 @@ class ResourceGenerationCapability(BaseCapability):
 
     def _relocate_ppt_artifacts(self, package: ResourcePackage) -> None:
         """Move any PPT files written under ``ad_hoc/`` to
-        ``<data_dir>/ppt/<package_id>/`` and update the resource's
-        ``format_specific["pptx_path"]`` in place.
+        ``<data_dir>/ppt/<package_id>/`` and retain only a portable key.
         """
         from pathlib import Path
 
+        from tutor.services.artifacts import resolve_artifact_key, to_artifact_key
         from tutor.services.config.settings import get_settings
         from tutor.services.ppt import get_ppt_service
 
+        data_dir = get_settings().data_dir
         ppt_root = get_ppt_service().output_dir
         for r in package.resources:
             if r.type != ResourceType.PPT:
                 continue
-            pptx_path = (r.format_specific or {}).get("pptx_path")
-            if not pptx_path:
+            fs = r.format_specific or {}
+            artifact_key = fs.get("artifact_key")
+            raw = artifact_key or fs.get("pptx_path")
+            if not raw:
                 continue
-            src = Path(pptx_path)
+            src = (
+                resolve_artifact_key(str(raw), data_dir)
+                if artifact_key
+                else Path(str(raw))
+            )
             if not src.exists():
+                self._canonicalize_resource_artifacts(r)
                 continue
             # Already under the right package dir?
             try:
                 if src.parent.parent == ppt_root and src.parent.name == package.package_id:
+                    r.format_specific["artifact_key"] = to_artifact_key(src, data_dir)
+                    r.format_specific.pop("pptx_path", None)
                     continue
             except Exception:
                 pass
@@ -757,52 +1211,69 @@ class ResourceGenerationCapability(BaseCapability):
                 import shutil
 
                 shutil.copy2(src, dst)
-            r.format_specific["pptx_path"] = str(dst)
+            r.format_specific["artifact_key"] = to_artifact_key(dst, data_dir)
+            r.format_specific.pop("pptx_path", None)
+
+    @staticmethod
+    def _canonicalize_resource_artifacts(resource: Resource) -> None:
+        """Remove host paths from a resource before persistence or streaming."""
+        from tutor.services.config.settings import get_settings
+        from tutor.services.resource_package.store import portable_format_specific
+
+        resource.format_specific = portable_format_specific(
+            resource.format_specific,
+            get_settings().data_dir,
+        )
+
+    @staticmethod
+    def _replace_unowned_markdown_images(resource: Resource) -> None:
+        """Keep relative Markdown images only when this resource owns them."""
+        from tutor.services.resource_package.markdown_media import (
+            replace_unowned_markdown_images,
+        )
+
+        artifact_names: set[str] = set()
+        format_specific = resource.format_specific or {}
+        artifact_key = format_specific.get("artifact_key")
+        if artifact_key:
+            artifact_names.add(PurePosixPath(str(artifact_key)).name)
+        for raw in format_specific.get("artifacts") or []:
+            if isinstance(raw, dict) and raw.get("name"):
+                artifact_names.add(PurePosixPath(str(raw["name"])).name)
+        resource.content = replace_unowned_markdown_images(resource.content, artifact_names)
+        sections = format_specific.get("sections")
+        if isinstance(sections, list):
+            for section in sections:
+                if isinstance(section, dict) and isinstance(section.get("content"), str):
+                    section["content"] = replace_unowned_markdown_images(
+                        section["content"],
+                        artifact_names,
+                    )
 
     # ------------------------------------------------------------------
     # Video rendering (2026-06-21 plan, C2)
     # ------------------------------------------------------------------
 
-    async def _start_pending_video_renders(
-        self,
+    @staticmethod
+    def _video_follow_up_specs(
         package: ResourcePackage,
-        context: UnifiedContext,
-        stream: StreamBus,
-    ) -> list[asyncio.Task]:
-        """Start one background asyncio task per pending video and
-        return immediately.
-
-        **2026-07-08 fix (fdb26152):** the previous ``_render_pending_videos``
-        awaited every render inline, so a slow Manim encode (one
-        video can take 30-90s to compile) pushed the entire job past
-        the 600s timeout — even though the resource was already
-        streamable. We now start the render tasks fire-and-forget and
-        return without awaiting them, so ``cap.run()`` can emit the
-        final ``result`` + ``done`` immediately. The render tasks
-        each emit ``RESOURCE`` events (with the updated
-        ``render_status`` / ``video_url``) when they finish, so the
-        right pane updates live as the video comes online.
-
-        Returns the list of started tasks so the caller can keep a
-        strong reference (otherwise asyncio GC's them mid-render).
-        """
-        pending = [
-            r
-            for r in package.resources
-            if r.type == ResourceType.VIDEO
-            and (r.format_specific or {}).get("render_status") == "pending"
-        ]
-        if not pending:
-            return []
-
-        # Emit the stage markers + observation INSIDE the now-fire-and-
-        # forget tasks' wrapper, so the trace still shows a
-        # ``video_rendering`` window even though the parent has moved on.
-        tasks: list[asyncio.Task] = []
-        for r in pending:
-            task = asyncio.create_task(self._render_one_video(r, package, context, stream))
-            tasks.append(task)
-        return tasks
+        user_id: str,
+    ) -> tuple[FollowUpTaskSpec, ...]:
+        """Build durable, deterministic work specs for pending video renders."""
+        return tuple(
+            FollowUpTaskSpec(
+                kind="video_render",
+                payload={
+                    "package_id": package.package_id,
+                    "resource_id": resource.resource_id,
+                    "user_id": user_id,
+                },
+                dedupe_key=f"video:{package.package_id}:{resource.resource_id}",
+            )
+            for resource in package.resources
+            if resource.type == ResourceType.VIDEO
+            and (resource.format_specific or {}).get("render_status") == "pending"
+        )
 
     async def _render_one_video(
         self,
@@ -810,6 +1281,9 @@ class ResourceGenerationCapability(BaseCapability):
         package: ResourcePackage,
         context: UnifiedContext,
         stream: StreamBus,
+        *,
+        persist_package: bool = True,
+        emit_resource: bool = True,
     ) -> None:
         """Render a single video, updating its ``format_specific`` and
         emitting a ``RESOURCE`` event when done.
@@ -823,20 +1297,39 @@ class ResourceGenerationCapability(BaseCapability):
         placeholder for a real video player.
         """
         try:
+            from tutor.services.manim_render.executor import RenderFailure
             from tutor.services.manim_render.service import (
                 ManimRenderService,
                 get_manim_render_service,
             )
 
-            manim_service = get_manim_render_service()
+            if context.job_id:
+                res.format_specific["render_job_id"] = context.job_id
             code = (res.format_specific or {}).get("manim_code", "")
             scene = (res.format_specific or {}).get("scene_class", "GeneratedScene")
             if not code:
-                res.format_specific["render_status"] = "failed"
-                res.format_specific["render_error"] = "no manim_code in resource"
+                message = "Manim source code is missing"
+                log_key = ManimRenderService._write_log_artifact(
+                    context.job_id or res.resource_id,
+                    attempt_label="missing-code",
+                    stdout="",
+                    stderr=message,
+                )
+                self._apply_video_failure(
+                    res,
+                    RenderFailure(
+                        error_code="missing_manim_code",
+                        summary=message,
+                        traceback_tail=(message,),
+                        log_artifact_key=log_key,
+                    ),
+                )
             else:
+                manim_service = get_manim_render_service()
                 render_result = await manim_service.render(
-                    code=code, scene_class=scene
+                    code=code,
+                    scene_class=scene,
+                    job_id=context.job_id or None,
                 )
                 # Update the resource payload in-place.
                 res.format_specific["render_status"] = (
@@ -845,13 +1338,59 @@ class ResourceGenerationCapability(BaseCapability):
                 if render_result.public_url:
                     res.format_specific["video_url"] = render_result.public_url
                 if render_result.video_path:
-                    res.format_specific["mp4_path"] = str(render_result.video_path)
+                    from pathlib import Path
+
+                    from tutor.services.artifacts import (
+                        UnsafeArtifactKey,
+                        to_artifact_key,
+                    )
+                    from tutor.services.config.settings import get_settings
+
+                    res.format_specific.pop("mp4_path", None)
+                    try:
+                        res.format_specific["artifact_key"] = to_artifact_key(
+                            Path(render_result.video_path),
+                            get_settings().data_dir,
+                        )
+                        res.format_specific.pop("artifact_unresolved", None)
+                    except UnsafeArtifactKey:
+                        res.format_specific.pop("artifact_key", None)
+                        res.format_specific["artifact_unresolved"] = True
                 if render_result.duration_seconds:
                     res.format_specific["duration_seconds"] = (
                         render_result.duration_seconds
                     )
-                if render_result.error:
-                    res.format_specific["render_error"] = render_result.error
+                if not render_result.success:
+                    failure = getattr(render_result, "failure", None)
+                    if failure is not None:
+                        self._apply_video_failure(res, failure)
+                    else:
+                        message = "Video rendering failed internally"
+                        log_key = ManimRenderService._write_log_artifact(
+                            context.job_id or res.resource_id,
+                            attempt_label="internal-error",
+                            stdout="",
+                            stderr=message,
+                            operator_stderr=str(
+                                getattr(render_result, "error", "") or message
+                            ),
+                        )
+                        self._apply_video_failure(
+                            res,
+                            RenderFailure(
+                                error_code="internal_error",
+                                summary=message,
+                                traceback_tail=(message,),
+                                log_artifact_key=log_key,
+                            ),
+                        )
+                else:
+                    for key in (
+                        "render_failure",
+                        "render_error_code",
+                        "render_error",
+                    ):
+                        res.format_specific.pop(key, None)
                 await stream.observation(
                     (
                         f"视频渲染{'成功' if render_result.success else '失败'}: "
@@ -865,15 +1404,33 @@ class ResourceGenerationCapability(BaseCapability):
                         "attempts": render_result.attempts,
                     },
                 )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                f"Video render failed res={res.resource_id}: {exc!r}"
+        except Exception:  # noqa: BLE001
+            from tutor.services.manim_render.executor import RenderFailure
+            from tutor.services.manim_render.service import ManimRenderService
+
+            message = "Video rendering failed internally"
+            log_key = ManimRenderService._write_current_exception_log_artifact(
+                context.job_id or res.resource_id,
+                attempt_label="internal-error",
+                public_stderr=message,
             )
-            res.format_specific["render_status"] = "failed"
-            res.format_specific["render_error"] = f"{type(exc).__name__}: {exc}"
-            await stream.error(
-                f"视频渲染异常: {res.title} — {exc}",
+            if context.job_id:
+                res.format_specific["render_job_id"] = context.job_id
+            self._apply_video_failure(
+                res,
+                RenderFailure(
+                    error_code="internal_error",
+                    summary=message,
+                    traceback_tail=(message,),
+                    log_artifact_key=log_key,
+                ),
+            )
+            await report_degraded(
+                stream,
+                code="VIDEO_RENDER_FAILED",
+                summary=f"视频渲染失败: {res.title}",
                 source="resource_capability",
+                stage="video_rendering",
             )
         finally:
             # **2026-07-08 fix:** emit a fresh ``RESOURCE`` event so the
@@ -881,20 +1438,82 @@ class ResourceGenerationCapability(BaseCapability):
             # player. We do this in ``finally`` so even render failures
             # surface (the user sees "渲染失败" instead of a forever-
             # pending placeholder).
-            try:
-                await stream.resource(
-                    res,
-                    source="resource_capability",
-                    stage="video_rendering",
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"stream.resource() emission failed: {exc!r}")
+            if emit_resource:
+                try:
+                    await stream.resource(
+                        res,
+                        source="resource_capability",
+                        stage="video_rendering",
+                    )
+
+                except Exception:  # noqa: BLE001
+                    log_degraded(
+                        code="RESOURCE_STREAM_EMIT_FAILED",
+                        source="resource_capability",
+                        stage="video_rendering",
+                    )
             # Re-save the package so the updated format_specific is
             # persisted for reconnection / reload.
-            try:
-                await self._store.save(package, user_id=context.user_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Video render re-save failed: {exc!r}")
+            if persist_package:
+                try:
+                    await self._store.save(package, user_id=context.user_id)
+                except Exception:  # noqa: BLE001
+                    log_degraded(
+                        code="VIDEO_RENDER_PERSIST_FAILED",
+                        source="resource_capability",
+                        stage="video_rendering",
+                    )
+
+    @staticmethod
+    def _apply_video_failure(res: Resource, failure: Any) -> None:
+        """Persist one safe, structured terminal failure plus its log."""
+        from tutor.services.manim_render.executor import (
+            RenderFailure,
+            safe_failure_summary,
+            tail_lines,
+        )
+
+        error_code = str(getattr(failure, "error_code", "") or "internal_error")
+        if not all(
+            character.isalnum() or character == "_" for character in error_code
+        ):
+            error_code = "internal_error"
+        fallback = "Video rendering failed internally"
+        summary = safe_failure_summary(
+            str(getattr(failure, "summary", "") or fallback),
+            fallback=fallback,
+        )
+        diagnostic_tail = tail_lines(
+            "\n".join(str(line) for line in getattr(failure, "traceback_tail", ()))
+        ) or (summary,)
+        log_artifact_key = str(getattr(failure, "log_artifact_key", "") or "")
+        public_failure = RenderFailure(
+            error_code=error_code,
+            summary=summary,
+            traceback_tail=diagnostic_tail,
+            log_artifact_key=log_artifact_key,
+        )
+        res.format_specific["render_status"] = "failed"
+        res.format_specific["render_failure"] = public_failure.to_dict()
+        res.format_specific["render_error_code"] = error_code
+        res.format_specific["render_error"] = summary
+        if log_artifact_key:
+            log_name = log_artifact_key.rsplit("/", 1)[-1]
+            artifacts = [
+                item
+                for item in (res.format_specific.get("artifacts") or [])
+                if not (
+                    isinstance(item, dict) and item.get("kind") == "render_log"
+                )
+            ]
+            artifacts.append(
+                {
+                    "name": log_name,
+                    "kind": "render_log",
+                    "artifact_key": log_artifact_key,
+                }
+            )
+            res.format_specific["artifacts"] = artifacts
 
     # ------------------------------------------------------------------
     # Resource planning
@@ -990,10 +1609,13 @@ class ResourceGenerationCapability(BaseCapability):
             types = [t for t in types if t != ResourceType.VIDEO]
 
         # Always include document unless explicitly excluded
-        if ResourceType.DOCUMENT not in types and intent.scope != "deep_dive":
+        if (
+            ResourceType.DOCUMENT not in types
+            and intent.scope != "deep_dive"
+            and "document" in msg
+        ):
             # Document is optional for deep_dive (video/reading may suffice)
-            if "document" in msg:
-                types.append(ResourceType.DOCUMENT)
+            types.append(ResourceType.DOCUMENT)
 
         # Deduplicate but preserve order
         seen: set[ResourceType] = set()
@@ -1024,17 +1646,6 @@ class ResourceGenerationCapability(BaseCapability):
         """Run the type-specific agents in parallel."""
         tasks: list[tuple[ResourceType, asyncio.Task]] = []
 
-        async def _safe(coro, rtype: ResourceType) -> Resource | None:
-            try:
-                return await coro
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"{rtype.value} generation failed: {exc!r}")
-                await stream.error(
-                    f"{rtype.value} 生成失败: {exc}",
-                    source="resource_capability",
-                )
-                return None
-
         # **2026-07-08 fix (187b2955):** wrap each agent call in a semaphore-
         # bounded task so we don't fan out 6+ concurrent LLM calls if the
         # topic requests many resource types. Before this, the trace showed
@@ -1058,11 +1669,13 @@ class ResourceGenerationCapability(BaseCapability):
                     async with sem:
                         return await coro
                 return await coro
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"{rtype.value} generation failed: {exc!r}")
-                await stream.error(
-                    f"{rtype.value} 生成失败: {exc}",
+            except Exception:  # noqa: BLE001
+                await report_degraded(
+                    stream,
+                    code=f"RESOURCE_{rtype.value.upper()}_GENERATION_FAILED",
+                    summary=f"{rtype.value} 生成失败",
                     source="resource_capability",
+                    stage="parallel_resource_generation",
                 )
                 return None
 
@@ -1166,7 +1779,6 @@ class ResourceGenerationCapability(BaseCapability):
         # done. ``asyncio.as_completed`` lets us interleave completion
         # events with the gather waiting on the rest.
         finished: list[Resource] = []
-        pending_tasks = {t[1]: t[0] for t in tasks}
         for fut in asyncio.as_completed([t[1] for t in tasks]):
             r = await fut
             if r is None:
@@ -1179,16 +1791,21 @@ class ResourceGenerationCapability(BaseCapability):
             )
             finished.append(r)
             try:
+                self._canonicalize_resource_artifacts(r)
                 await stream.resource(
                     r,
                     source="resource_capability",
                     stage="parallel_resource_generation",
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 # Stream emission must NEVER block the pipeline. A failed
                 # event broadcast (closed bus, full queue) must not
                 # invalidate an already-finished resource.
-                logger.debug(f"stream.resource() emission failed: {exc!r}")
+                log_degraded(
+                    code="RESOURCE_STREAM_EMIT_FAILED",
+                    source="resource_capability",
+                    stage="parallel_resource_generation",
+                )
         return finished
 
     async def _generate_reading(
@@ -1340,19 +1957,22 @@ class ResourceGenerationCapability(BaseCapability):
         """Return True if the resource's *generation* pipeline failed
         (vs. the resource being merely low-quality).
 
-        Currently the only typed failure surface is video:
-        ``format_specific.render_status == "failed"`` (Manim code
-        generation or syntax check failure).
+        Video uses ``format_specific.render_status == "failed"``. Other
+        generators may return a structured ``format_specific.failure`` when
+        no usable artifact exists (for example a failed PPT render).
 
         Code resources with ``execution_status == "failed"`` are NOT
         filtered here — ``RUNTIME_DEPENDENCY_MISSING`` is a valid
         educational resource that the user can still read; the
         quality reviewer decides.
         """
-        if resource.type != ResourceType.VIDEO:
-            return False
         fs = resource.format_specific or {}
-        return fs.get("render_status") == "failed"
+        if resource.type == ResourceType.CODE:
+            return False
+        return (
+            resource.type == ResourceType.VIDEO
+            and fs.get("render_status") == "failed"
+        ) or isinstance(fs.get("failure"), dict)
 
     async def _prefilter_failed_resources(
         self,
@@ -1379,6 +1999,11 @@ class ResourceGenerationCapability(BaseCapability):
                         "type": r.type.value,
                         "title": r.title,
                         "render_error": fs.get("render_error"),
+                        "failure": fs.get("failure") or {
+                            "code": "VIDEO_GENERATION_FAILED",
+                            "message": "Video generation failed",
+                            "retryable": True,
+                        },
                     }
                 )
                 continue
@@ -1395,8 +2020,7 @@ class ResourceGenerationCapability(BaseCapability):
             logger.warning(
                 f"resource_capability: pre-filtered {len(filtered)} "
                 f"failed-generation resources before review "
-                f"({before} -> {len(kept)}): "
-                f"{[f['title'] for f in filtered]}"
+                f"({before} -> {len(kept)})"
             )
         return kept, filtered
 
@@ -1413,8 +2037,12 @@ class ResourceGenerationCapability(BaseCapability):
         async def _review_one(r: Resource) -> ResourceReview | None:
             try:
                 return await self.quality_reviewer.process(context, resource=r, stream=stream)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"Quality review failed for {r.resource_id}: {exc!r}")
+            except Exception:  # noqa: BLE001
+                log_degraded(
+                    code="RESOURCE_QUALITY_REVIEW_FAILED",
+                    source="resource_capability",
+                    stage="quality_review",
+                )
                 return None
 
         tasks = [asyncio.create_task(_review_one(r)) for r in resources]
@@ -1446,14 +2074,16 @@ class ResourceGenerationCapability(BaseCapability):
                     resource_content=r.content,
                     topic=r.topic or intent.topic,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    f"AntiHallucination failed for {r.resource_id}: {exc!r}"
+            except Exception:  # noqa: BLE001
+                log_degraded(
+                    code="RESOURCE_SAFETY_CHECK_FAILED",
+                    source="resource_capability",
+                    stage="safety_check",
                 )
                 return AntiHallucinationReport(
                     overall_verdict=OverallVerdict.UNVERIFIED,
                     overall_confidence=0.5,
-                    notes=f"safety check failed: {exc}",
+                    notes="Safety check failed",
                 )
 
         tasks = [asyncio.create_task(_check_one(r)) for r in resources]
@@ -1466,12 +2096,34 @@ class ResourceGenerationCapability(BaseCapability):
 # ---------------------------------------------------------------------------
 
 
+def _is_malformed_resource(resource: Resource) -> bool:
+    """Return whether a generated resource lacks its minimum usable payload."""
+
+    if not resource.title.strip() or not resource.content.strip():
+        return True
+    format_specific = resource.format_specific or {}
+    if resource.type == ResourceType.VIDEO:
+        status = format_specific.get("render_status")
+        return status in {"pending", "ready"} and (
+            not str(format_specific.get("manim_code") or "").strip()
+            or not str(format_specific.get("scene_class") or "").strip()
+        )
+    if resource.type == ResourceType.CODE:
+        return not str(format_specific.get("code") or "").strip()
+    if resource.type == ResourceType.MINDMAP:
+        return not str(format_specific.get("mermaid_dsl") or "").strip()
+    if resource.type == ResourceType.EXERCISE:
+        return not bool(format_specific.get("questions"))
+    return False
+
+
 def _is_failed_resource(r: Resource) -> bool:
     """Return True if a resource is a known-failed artifact and should
     be filtered out **before** quality review.
 
-    **2026-07-07 fix:** resources with a self-reported hard failure
-    (currently: ``video.render_status == "failed"``) are dropped here
+    Resources with a self-reported hard failure (video
+    ``render_status == "failed"`` or a structured
+    ``format_specific.failure``) are dropped here
     so the quality reviewer doesn't waste cycles judging a "video
     generation failed" diagnostic card. The reviewer can still
     reject other resources, but those represent LLM-judged issues,
@@ -1483,14 +2135,11 @@ def _is_failed_resource(r: Resource) -> bool:
     reviewer decides.
     """
     fs = r.format_specific or {}
-    if r.type == ResourceType.VIDEO and fs.get("render_status") == "failed":
-        return True
-    return False
+    if r.type == ResourceType.CODE:
+        return False
+    return (
+        r.type == ResourceType.VIDEO and fs.get("render_status") == "failed"
+    ) or isinstance(fs.get("failure"), dict)
 
 
 __all__ = ["ResourceGenerationCapability"]
-
-
-def _unused_traceback_import() -> None:
-    """Reference import to keep it for debugging future use."""
-    _ = traceback.format_exc

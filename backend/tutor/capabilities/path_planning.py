@@ -1,16 +1,15 @@
-"""Path planning capability backed by the existing knowledge graph service."""
+"""Persisted mastery-aware learning-path capability."""
 
 from __future__ import annotations
 
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
+from tutor.core.capability_result import CapabilityResult
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
-from tutor.services.knowledge_graph.service import get_knowledge_graph_service
-from tutor.services.learner_profile.builder import get_profile_builder
 
 
 class PathPlanningCapability(BaseCapability):
-    """Plan an actionable course path from persisted learner state."""
+    """Plan and persist an actionable course path from learner state."""
 
     manifest = CapabilityManifest(
         name="path_planning",
@@ -21,36 +20,63 @@ class PathPlanningCapability(BaseCapability):
         tags=["path", "planning"],
     )
 
-    async def run(self, context: UnifiedContext, stream: StreamBus) -> None:
-        service = get_knowledge_graph_service()
-        course = str((context.metadata or {}).get("course") or service.default_course())
-        path_id = str((context.metadata or {}).get("path_id") or "")
+    def __init__(self, *, profile_store=None, kg_service=None) -> None:
+        super().__init__()
+        self._profile_store = profile_store
+        self._kg_service = kg_service
 
+    async def run(self, context: UnifiedContext, stream: StreamBus) -> CapabilityResult:
+        from tutor.services.jobs.follow_up import PathRebuildFollowUpCapability
+        from tutor.services.knowledge_graph import get_knowledge_graph_service
+        from tutor.services.learner_profile.store import get_profile_store
+
+        store = self._profile_store or get_profile_store()
+        service = self._kg_service or get_knowledge_graph_service()
         async with stream.stage("understand_goal", source="path_capability"):
             await stream.observation("正在确认课程目标", source="path_capability")
-
         async with stream.stage("read_progress", source="path_capability"):
-            builder = get_profile_builder()
-            await builder.initialize()
-            profile = await builder.get(context.user_id)
+            profile = await store.get(context.user_id)
             await stream.observation("已读取当前学习记录", source="path_capability")
+        if profile is None:
+            return CapabilityResult(
+                assistant_message="尚无学习记录，完成一次练习后即可规划下一步",
+                payload={
+                    "status": "empty",
+                    "code": "LEARNING_PROFILE_NOT_FOUND",
+                    "nodes": [],
+                    "edges": [],
+                },
+            )
 
+        course = str(context.metadata.get("course") or service.default_course())
+        context.metadata.update(
+            {
+                "profile_version": profile.version,
+                "profile": profile.model_dump(mode="json"),
+                "course": course,
+                "path_id": str(context.metadata.get("path_id") or ""),
+            }
+        )
         async with stream.stage("organize_path", source="path_capability"):
-            plan = service.plan_for_learner(course, profile, path_id=path_id)
+            result = await PathRebuildFollowUpCapability(
+                profile_store=store,
+                kg_service=service,
+            ).run(context, stream)
             await stream.observation(
-                f"已整理 {len(plan.nodes)} 个学习步骤",
+                f"已整理 {len(result.payload.get('nodes', []))} 个学习步骤",
                 source="path_capability",
             )
-
         async with stream.stage("prepare_next", source="path_capability"):
-            next_node = plan.first_available()
+            nodes = result.payload.get("nodes", [])
+            next_node = next(
+                (node for node in nodes if node.get("status") == "available"),
+                nodes[0] if nodes else None,
+            )
             await stream.observation(
-                f"下一步：{next_node.name}" if next_node else "当前路径已整理完成",
+                f"下一步：{next_node.get('name')}" if next_node else "当前路径已整理完成",
                 source="path_capability",
             )
-
-        await stream.result(plan.model_dump(mode="json"), source="path_capability")
-        await stream.done(source="path_capability")
+        return result
 
 
 __all__ = ["PathPlanningCapability"]

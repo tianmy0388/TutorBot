@@ -66,7 +66,7 @@ async def course_teacher_analytics(
             if rtype:
                 resource_types[rtype] += 1
             if (
-                ev.event_type in {EventType.EXERCISE_ATTEMPTED, EventType.EXERCISE_COMPLETED}
+                ev.event_type in {EventType.EXERCISE_ATTEMPTED, EventType.EXERCISE_SCORED}
                 and ev.score is not None
                 and ev.concept_id
             ):
@@ -94,7 +94,8 @@ async def course_teacher_analytics(
     exercise_scores = [
         float(ev.score)
         for ev in all_events
-        if ev.event_type == EventType.EXERCISE_COMPLETED and ev.score is not None
+        if ev.event_type in {EventType.EXERCISE_ATTEMPTED, EventType.EXERCISE_SCORED}
+        and ev.score is not None
     ]
     avg_exercise_score = (
         round(sum(exercise_scores) / len(exercise_scores), 3)
@@ -208,7 +209,8 @@ def _summarise_user(user_id: str, events: list[LearningEvent]) -> dict[str, Any]
     by_type = Counter(ev.event_type.value for ev in events)
     exercise = [
         ev for ev in events
-        if ev.event_type == EventType.EXERCISE_COMPLETED and ev.score is not None
+        if ev.event_type in {EventType.EXERCISE_ATTEMPTED, EventType.EXERCISE_SCORED}
+        and ev.score is not None
     ]
     avg_score = (
         sum(float(ev.score) for ev in exercise) / len(exercise)
@@ -222,7 +224,7 @@ def _summarise_user(user_id: str, events: list[LearningEvent]) -> dict[str, Any]
             ev.concept_id
             for ev in events
             if ev.concept_id
-            and ev.event_type in {EventType.EXERCISE_ATTEMPTED, EventType.EXERCISE_COMPLETED}
+            and ev.event_type in {EventType.EXERCISE_ATTEMPTED, EventType.EXERCISE_SCORED}
             and ev.score is not None
             and float(ev.score) < 0.7
         }

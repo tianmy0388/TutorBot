@@ -19,6 +19,33 @@ import { ChevronRight, Target, BookOpen, List } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Resource } from "@/lib/types";
 
+const markdownComponents = {
+  code: ({ className, children, ...props }: { className?: string; children?: React.ReactNode }) => {
+    const isInline = !className;
+    if (isInline) {
+      return (
+        <code className="bg-bg-panel px-1.5 py-0.5 rounded text-accent text-xs" {...props}>
+          {children}
+        </code>
+      );
+    }
+    const lang = (className || "").replace("language-", "") || "text";
+    return (
+      <SyntaxHighlighter language={lang} style={atomOneDark} customStyle={{ fontSize: "12px", margin: "12px 0", borderRadius: "8px" }}>
+        {String(children).replace(/\n$/, "")}
+      </SyntaxHighlighter>
+    );
+  },
+  img: ({ src, alt, ...props }: React.ImgHTMLAttributes<HTMLImageElement>) => {
+    const imageSrc = typeof src === "string" ? src : "";
+    const isAllowed = /^https?:\/\//i.test(imageSrc) || imageSrc.startsWith("/api/");
+    if (!isAllowed) {
+      return <span className="text-xs text-fg-muted">图片未提供</span>;
+    }
+    return <img src={imageSrc} alt={alt || ""} {...props} />;
+  },
+};
+
 export function DocumentViewer({ resource }: { resource: Resource }) {
   const sections = (resource.format_specific?.sections as Array<{
     title: string;
@@ -32,35 +59,7 @@ export function DocumentViewer({ resource }: { resource: Resource }) {
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[rehypeKatex]}
-          components={{
-            code: ({ className, children, ...props }) => {
-              const isInline = !className;
-              if (isInline) {
-                return (
-                  <code
-                    className="bg-bg-panel px-1.5 py-0.5 rounded text-accent text-xs"
-                    {...props}
-                  >
-                    {children}
-                  </code>
-                );
-              }
-              const lang = (className || "").replace("language-", "") || "text";
-              return (
-                <SyntaxHighlighter
-                  language={lang}
-                  style={atomOneDark}
-                  customStyle={{
-                    fontSize: "12px",
-                    margin: "12px 0",
-                    borderRadius: "8px",
-                  }}
-                >
-                  {String(children).replace(/\n$/, "")}
-                </SyntaxHighlighter>
-              );
-            },
-          }}
+          components={markdownComponents}
         >
           {resource.content || ""}
         </ReactMarkdown>
@@ -120,35 +119,7 @@ function SectionedDocument({
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkMath]}
                 rehypePlugins={[rehypeKatex]}
-                components={{
-                  code: ({ className, children, ...props }) => {
-                    const isInline = !className;
-                    if (isInline) {
-                      return (
-                        <code
-                          className="bg-bg-panel px-1.5 py-0.5 rounded text-accent text-xs"
-                          {...props}
-                        >
-                          {children}
-                        </code>
-                      );
-                    }
-                    const lang = (className || "").replace("language-", "") || "text";
-                    return (
-                      <SyntaxHighlighter
-                        language={lang}
-                        style={atomOneDark}
-                        customStyle={{
-                          fontSize: "12px",
-                          margin: "12px 0",
-                          borderRadius: "8px",
-                        }}
-                      >
-                        {String(children).replace(/\n$/, "")}
-                      </SyntaxHighlighter>
-                    );
-                  },
-                }}
+                components={markdownComponents}
               >
                 {s.content || ""}
               </ReactMarkdown>

@@ -20,9 +20,14 @@
 import type {
   ChatMessage,
   JobResultContract,
+  JobChildSummary,
+  JobTerminalStatus,
   JobStatus,
+  StructuredError,
   StreamEvent,
 } from "./types";
+import { normalizeStructuredError } from "./errors";
+import { workflowMessage } from "./workflow-snapshot";
 
 function toMillis(value: string | number | null | undefined): number | null {
   if (value == null) return null;
@@ -47,7 +52,7 @@ export interface ClientJob {
   events: StreamEvent[];
   result: JobResultContract | null;
   /** Server-supplied error message (e.g. "process restarted"). */
-  error: string | null;
+  error: StructuredError | null;
   event_count: number;
   /** event_ids we've already applied (for dedup). */
   seen_event_ids: Set<string>;
@@ -75,6 +80,8 @@ export interface ClientJob {
   stage: string;
   /** Stack of open nested stages. Top of stack = current stage. */
   open_stages: string[];
+  children?: JobChildSummary[];
+  background_status?: JobStatus | null;
 }
 
 export interface JobsState {
@@ -125,8 +132,10 @@ export interface SnapshotReducerEvent {
     last_seq?: number;
     events?: StreamEvent[];
     result?: JobResultContract | null;
-    error?: string | null;
+    error?: StructuredError | null;
     event_count?: number;
+    children?: JobChildSummary[];
+    background_status?: JobStatus | null;
   };
 }
 
@@ -165,6 +174,8 @@ export function createJobState(
     thinking_buffer: "",
     stage: "",
     open_stages: [],
+    children: [],
+    background_status: null,
   };
   return {
     jobsById: { [job_id]: job },
@@ -227,6 +238,8 @@ function applySubmit(state: JobsState, ev: SubmitEvent): JobsState {
     thinking_buffer: "",
     stage: "",
     open_stages: [],
+    children: [],
+    background_status: null,
   };
   return {
     jobsById: { ...state.jobsById, [ev.job_id]: job },
@@ -266,6 +279,20 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
     return state;
   }
 
+  if (stream.type === "job_terminal") {
+    const contract = stream.metadata?.contract;
+    if (isJobResultContract(contract)) {
+      return applyTerminal(state, {
+        type: "job_terminal",
+        job_id: ev.job_id,
+        capability: contract.capability || job.capability,
+        result: contract,
+        timestamp: stream.timestamp,
+        event_id: stream.event_id,
+      });
+    }
+  }
+
   // Order: ignore out-of-order duplicates unless seq is newer.
   if (typeof stream.seq === "number" && stream.seq <= job.last_seq && stream.event_id && job.seen_event_ids.has(stream.event_id) === false) {
     // First time seeing this event_id but seq is older than last_seq — still
@@ -288,6 +315,11 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
     status = "running";
     started_at = stream.timestamp ? stream.timestamp * 1000 : Date.now();
   }
+  if (stream.type === "done") {
+    status = "succeeded";
+  } else if (stream.type === "cancelled") {
+    status = "cancelled";
+  }
 
   // 2026-06-21 plan (B2): accumulate streaming content into
   // per-job buffers so ChatMessages can read from liveJob
@@ -303,8 +335,11 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
   if (stream.type === "thinking" && stream.content) {
     thinkingBuf = thinkingBuf + stream.content;
   }
-  if (stream.type === "error" && stream.content) {
-    jobError = stream.content;
+  if (stream.type === "error") {
+    jobError =
+      normalizeStructuredError(stream.metadata.error, "JOB_STREAM_ERROR") ??
+      normalizeStructuredError(stream.content, "JOB_STREAM_ERROR") ??
+      jobError;
   }
   if (stream.type === "stage_start" && stream.stage) {
     jobStage = stream.stage;
@@ -345,11 +380,21 @@ function applyStream(state: JobsState, ev: StreamReducerEvent): JobsState {
     openStages = job.open_stages ?? [];
     jobStage = job.stage ?? "";
   }
+  if (stream.type === "done" || stream.type === "cancelled") {
+    openStages = [];
+    jobStage = "";
+  }
 
   const next: ClientJob = {
     ...job,
     status,
     started_at,
+    finished_at:
+      stream.type === "done" || stream.type === "cancelled"
+        ? stream.timestamp
+          ? stream.timestamp * 1000
+          : Date.now()
+        : job.finished_at,
     events: trimmed,
     event_count: job.event_count + 1,
     last_seq:
@@ -413,20 +458,25 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       last_seq: ev.result.event_cursor ?? 0,
       events: [],
       result: ev.result,
-      error: ev.result.error?.message ?? null,
+      error: ev.result.error ?? null,
       event_count: 0,
       seen_event_ids: new Set(ev.event_id ? [ev.event_id] : []),
       text_buffer: "",
       thinking_buffer: "",
       stage: "",
       open_stages: [],
+      children: [],
+      background_status: null,
     };
     return {
       jobsById: { ...state.jobsById, [ev.job_id]: fresh },
       jobOrder: state.jobOrder.includes(ev.job_id)
         ? state.jobOrder
         : [ev.job_id, ...state.jobOrder],
-      messages,
+      messages: upsertWorkflowMessage(
+        messages,
+        existingWorkflowTimeline(messages, ev.job_id) ?? workflowMessage(fresh, ev.result.status),
+      ),
     };
   }
 
@@ -452,6 +502,11 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
       ? nextEvents.slice(nextEvents.length - MAX_EVENTS_PER_JOB)
       : nextEvents;
 
+  // A terminal replay arrives after `open_stages` has deliberately been
+  // cleared below. Never rebuild an already persisted timeline from that
+  // cleared state, or an incomplete stage becomes completed on replay.
+  const timeline =
+    existingWorkflowTimeline(messages, ev.job_id) ?? workflowMessage(job, ev.result.status);
   const next: ClientJob = {
     ...job,
     status,
@@ -462,7 +517,7 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
         : job.last_seq,
     events: trimmed,
     result: ev.result,
-    error: ev.result.error?.message ?? null,
+    error: ev.result.error ?? null,
     seen_event_ids: seen,
     // **2026-07-08 fix (585f367d):** clear the open-stages stack so
     // the right-pane chip stops showing a "stuck" active stage
@@ -474,13 +529,17 @@ function applyTerminal(state: JobsState, ev: TerminalReducerEvent): JobsState {
   return {
     ...state,
     jobsById: { ...state.jobsById, [ev.job_id]: next },
-    messages,
+    messages: upsertWorkflowMessage(messages, timeline),
   };
 }
 
 function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
   const incoming = ev.job;
   const existing = state.jobsById[incoming.job_id];
+  const replayStatus = terminalStatusFromEvents(incoming.events ?? []);
+  const effectiveStatus = isTerminal(incoming.status)
+    ? incoming.status
+    : replayStatus ?? incoming.status;
 
   // If we have a fresher local view (newer last_seq or more events), keep it.
   if (existing) {
@@ -488,6 +547,20 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
       (toMillis(incoming.finished_at) ?? 0) < (existing.finished_at ?? 0) ||
       (existing.last_seq ?? 0) > (incoming.last_seq ?? 0);
     if (localNewer) {
+      if (incoming.children !== undefined || incoming.background_status !== undefined) {
+        return {
+          ...state,
+          jobsById: {
+            ...state.jobsById,
+            [incoming.job_id]: {
+              ...existing,
+              children: incoming.children ?? existing.children ?? [],
+              background_status:
+                incoming.background_status ?? existing.background_status ?? null,
+            },
+          },
+        };
+      }
       return state;
     }
   }
@@ -506,7 +579,11 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
   // already terminal, clear the open_stages stack regardless of
   // the local stage string — the chip must stop spinning once the
   // job is over.
-  const isIncomingTerminal = isTerminal(incoming.status);
+  const isIncomingTerminal =
+    isTerminal(effectiveStatus) ||
+    (incoming.events ?? []).some((event) =>
+      TERMINAL_EVENT_TYPES.has(event.type),
+    );
   const snapStage = isIncomingTerminal
     ? ""
     : existing?.stage ?? "";
@@ -517,7 +594,7 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
   const next: ClientJob = {
     job_id: incoming.job_id,
     capability: incoming.capability,
-    status: incoming.status,
+    status: effectiveStatus,
     message_preview: incoming.message_preview ?? "",
     submitted_at: incoming.submitted_at ?? Date.now(),
     started_at: toMillis(incoming.started_at),
@@ -532,6 +609,9 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
     thinking_buffer: snapThinkBuf,
     stage: snapStage,
     open_stages: snapOpenStages,
+    children: incoming.children ?? existing?.children ?? [],
+    background_status:
+      incoming.background_status ?? existing?.background_status ?? null,
   };
   const jobOrder = state.jobOrder.includes(incoming.job_id)
     ? state.jobOrder
@@ -562,6 +642,11 @@ function applySnapshot(state: JobsState, ev: SnapshotReducerEvent): JobsState {
         },
       ];
     }
+    messages = upsertWorkflowMessage(
+      messages,
+      existingWorkflowTimeline(messages, incoming.job_id) ??
+        workflowMessage(next, next.status as JobTerminalStatus),
+    );
   }
 
   return {
@@ -582,6 +667,75 @@ export function isTerminal(status: JobStatus): boolean {
     status === "partial" ||
     status === "failed" ||
     status === "cancelled"
+  );
+}
+
+const TERMINAL_EVENT_TYPES = new Set(["job_terminal", "done", "cancelled"]);
+
+function isJobResultContract(value: unknown): value is JobResultContract {
+  if (!value || typeof value !== "object") return false;
+  const contract = value as Partial<JobResultContract>;
+  return (
+    typeof contract.job_id === "string" &&
+    typeof contract.capability === "string" &&
+    typeof contract.assistant_message === "string" &&
+    contract.status !== undefined &&
+    isTerminal(contract.status)
+  );
+}
+
+function terminalStatusFromEvents(events: StreamEvent[]): JobStatus | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type === "cancelled") return "cancelled";
+    if (event.type === "done") return "succeeded";
+    if (event.type === "job_terminal") {
+      const contract = event.metadata?.contract;
+      if (isJobResultContract(contract)) return contract.status;
+    }
+  }
+  return null;
+}
+
+function upsertWorkflowMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
+  const index = messages.findIndex((existing) => existing.id === message.id);
+  if (index < 0) return [...messages, message];
+  return messages.map((existing) => existing.id === message.id ? message : existing);
+}
+
+function existingWorkflowTimeline(
+  messages: ChatMessage[],
+  jobId: string,
+): ChatMessage | undefined {
+  const message = messages.find((candidate) => candidate.id === `workflow:${jobId}`);
+  const metadata = message?.metadata;
+  const workflow = metadata?.workflow;
+  if (
+    metadata?.kind !== "workflow_timeline" ||
+    metadata.job_id !== jobId ||
+    !workflow ||
+    typeof workflow !== "object"
+  ) return undefined;
+  const snapshot = workflow as { status?: unknown; stages?: unknown };
+  if (
+    !["succeeded", "partial", "failed", "cancelled"].includes(snapshot.status as string) ||
+    !Array.isArray(snapshot.stages) ||
+    !snapshot.stages.every((stage) =>
+      !!stage &&
+      typeof stage === "object" &&
+      typeof (stage as { name?: unknown }).name === "string" &&
+      ["completed", "incomplete"].includes((stage as { status?: unknown }).status as string),
+    )
+  ) return undefined;
+  return message;
+}
+
+/** Durable job state is the sole loading/terminal authority for the UI. */
+export function isJobTerminal(job: ClientJob): boolean {
+  return (
+    isTerminal(job.status) ||
+    job.finished_at != null ||
+    job.events.some((event) => TERMINAL_EVENT_TYPES.has(event.type))
   );
 }
 

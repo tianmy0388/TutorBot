@@ -121,3 +121,176 @@ describe("ApiError surface", () => {
     );
   });
 });
+
+describe("job error adapter", () => {
+  it("normalizes legacy and structured REST errors at the API boundary", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          items: [
+            { job_id: "legacy-job", error: "CAPABILITY_FAILED" },
+            {
+              job_id: "structured-job",
+              error: {
+                code: "INVALID_SCOPE",
+                message: "请选择检索范围",
+                details: { kind: null },
+              },
+            },
+          ],
+          total: 2,
+          limit: 50,
+          offset: 0,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { listJobs } = await import("./api");
+    const response = await listJobs("local-user");
+
+    expect(response.items[0].error).toEqual({
+      code: "JOB_FAILED",
+      message: "CAPABILITY_FAILED",
+    });
+    expect(response.items[1].error).toEqual({
+      code: "INVALID_SCOPE",
+      message: "请选择检索范围",
+      details: { kind: null },
+    });
+  });
+});
+
+describe("video render retry", () => {
+  it("posts to the resource-scoped durable retry endpoint", async () => {
+    const { retryVideoRender } = await import("./api");
+
+    await retryVideoRender("local user", "package/1", "video 1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      "/api/v1/resources/packages/local%20user/package%2F1/resources/video%201/retry-video",
+    );
+    expect(init.method).toBe("POST");
+  });
+});
+
+describe("conversation web-search settings", () => {
+  it("PATCHes the narrow typed settings endpoint", async () => {
+    const { setConversationWebSearch } = await import("./api");
+
+    await setConversationWebSearch("local user", "session/1", true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      "/api/v1/conversations/session%2F1/settings?user_id=local%20user",
+    );
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({ web_search_enabled: true });
+  });
+});
+
+describe("conversation recovery hydration", () => {
+  it("hydrates all recovery state atomically from one aggregate request", async () => {
+    const aggregate = {
+      conversation: {
+        session_id: "session-recovery",
+        user_id: "local-user",
+        title: "Recovered",
+        message_count: 1,
+        last_message_preview: "hello",
+        web_search_enabled: true,
+        created_at: "2026-07-17T00:00:00Z",
+        updated_at: "2026-07-17T00:00:00Z",
+        messages: [
+          {
+            id: "message-1",
+            role: "user",
+            content: "hello",
+            job_id: null,
+            capability: null,
+            created_at: "2026-07-17T00:00:00Z",
+            metadata: {},
+          },
+        ],
+      },
+      jobs: [],
+      packages: [
+        {
+          package_id: "package-1",
+          topic: "recovery",
+          resources: [
+            {
+              resource_id: "resource-1",
+              type: "code",
+              title: "missing",
+              content: "",
+              format_specific: {},
+              difficulty: 2,
+              estimated_minutes: 5,
+              prerequisites: [],
+              generated_by: [],
+              confidence_score: 0.7,
+              topic: "recovery",
+              tags: [],
+              created_at: "2026-07-17T00:00:00Z",
+              metadata: { artifact_missing: true },
+            },
+          ],
+          target_profile_snapshot: {},
+          learning_path_summary: {},
+          generated_by: [],
+          metadata: {},
+          created_at: "2026-07-17T00:00:00Z",
+        },
+      ],
+      profile_summary: { user_id: "local-user", version: 3 },
+      path_summary: { path_id: "path-1", current_index: 2 },
+      recovery_warnings: [
+        {
+          code: "missing_artifact",
+          message: "One generated file is missing",
+          resource_id: "resource-1",
+          artifact_key: "code_runs/missing.png",
+        },
+      ],
+    };
+    aggregate.packages.push({
+      ...aggregate.packages[0],
+      package_id: "package-2",
+      created_at: "2026-07-17T00:01:00Z",
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(aggregate), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { useTutorStore } = await import("./store");
+    useTutorStore.setState({
+      sessionId: "old-session",
+      messages: [],
+      latestPackage: null,
+    });
+
+    await useTutorStore
+      .getState()
+      .loadConversationAggregate("stale-browser-id", "session-recovery");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      "/conversations/session-recovery/aggregate",
+    );
+    const state = useTutorStore.getState();
+    expect(state.sessionId).toBe("session-recovery");
+    expect(state.webSearchEnabled).toBe(true);
+    expect(state.messages.map((message) => message.content)).toEqual(["hello"]);
+    expect(state.latestPackage?.package_id).toBe("package-2");
+    expect(state.profileSummary).toEqual({ user_id: "local-user", version: 3 });
+    expect(state.pathSummary).toEqual({ path_id: "path-1", current_index: 2 });
+    expect(state.recoveryWarnings).toEqual(aggregate.recovery_warnings);
+  });
+});

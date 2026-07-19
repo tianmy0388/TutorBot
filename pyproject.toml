@@ -142,6 +142,7 @@ warn_redundant_casts = true
 no_implicit_optional = true
 
 [tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
 asyncio_mode = "auto"
 testpaths = ["backend/tests"]
 pythonpath = ["backend"]

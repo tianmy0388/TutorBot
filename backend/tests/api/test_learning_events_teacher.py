@@ -38,7 +38,7 @@ async def test_learning_event_record_and_stats(tmp_path, monkeypatch) -> None:
             "/api/v1/learning-events",
             json={
                 "user_id": "u-teacher",
-                "event_type": "exercise_completed",
+                "event_type": "exercise_attempted",
                 "target_id": "cn_tcp_exercise",
                 "concept_id": "transport_tcp",
                 "score": 0.5,
@@ -51,7 +51,7 @@ async def test_learning_event_record_and_stats(tmp_path, monkeypatch) -> None:
         )
         assert created.status_code == 200, created.text
         body = created.json()
-        assert body["event_type"] == "exercise_completed"
+        assert body["event_type"] == "exercise_attempted"
         assert body["score"] == 0.5
 
         stats = await client.get("/api/v1/learning-events/u-teacher/stats")
@@ -91,7 +91,7 @@ async def test_teacher_course_analytics_accepts_graph_id_and_course_id(
             },
             {
                 "user_id": "bob",
-                "event_type": "exercise_completed",
+                "event_type": "exercise_attempted",
                 "target_id": "cn_tcp_exercise",
                 "concept_id": "transport_tcp",
                 "score": 0.4,

@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-
 from tutor.services.resource_package.schema import (
     CodeResource,
     DocumentResource,
-    ExerciseOption,
     ExerciseQuestion,
     ExerciseResource,
-    MindMapResource,
-    PPTResource,
-    ReadingResource,
     Resource,
     ResourcePackage,
     ResourceReview,
@@ -21,7 +16,37 @@ from tutor.services.resource_package.schema import (
     ReviewVerdict,
     VideoResource,
     build_resource,
+    public_resource_dump,
 )
+
+
+def test_artifact_ref_serializes_only_portable_key() -> None:
+    from tutor.services.resource_package.schema import ArtifactRef
+
+    ref = ArtifactRef.model_validate(
+        {
+            "name": "figure_1.png",
+            "artifact_key": "code_runs/run_1/figure_1.png",
+            "kind": "png",
+        }
+    )
+
+    assert ref.model_dump() == {
+        "name": "figure_1.png",
+        "artifact_key": "code_runs/run_1/figure_1.png",
+        "kind": "png",
+    }
+
+
+def test_artifact_ref_accepts_legacy_relative_path_without_reserializing_path() -> None:
+    from tutor.services.resource_package.schema import ArtifactRef
+
+    ref = ArtifactRef.model_validate(
+        {"name": "old.png", "path": "code_runs/old/old.png", "kind": "png"}
+    )
+
+    assert ref.artifact_key == "code_runs/old/old.png"
+    assert "path" not in ref.model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +166,268 @@ def test_video_resource_render_status():
     assert v2.render_status == "pending"
 
 
+def test_video_resource_accepts_structured_render_failure_and_log_manifest():
+    v = VideoResource(
+        manim_code="from manim import *",
+        render_status="failed",
+        render_error_code="missing_external_asset",
+        render_failure={
+            "error_code": "missing_external_asset",
+            "summary": "asset missing",
+            "traceback_tail": ["FileNotFoundError: person.svg"],
+            "log_artifact_key": "manim_logs/child/attempt-01.log",
+        },
+        artifacts=[
+            {
+                "name": "attempt-01.log",
+                "kind": "render_log",
+                "artifact_key": "manim_logs/child/attempt-01.log",
+            }
+        ],
+    )
+
+    assert v.render_failure["error_code"] == "missing_external_asset"
+    assert v.artifacts[0].kind == "render_log"
+
+
+def test_video_resource_parses_bounded_transient_repair_candidate_state() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="repair candidate",
+        format_specific={
+            "manim_code": "ORIGINAL SOURCE",
+            "render_status": "failed",
+            "repair_candidate_code": "from manim import *\n",
+            "repair_candidate_failure": {
+                "error_code": "repair_render_failed",
+                "summary": "renderer failed internally",
+                "traceback_tail": ["safe diagnostic"],
+                "log_artifact_key": "manim_logs/child/repair-render.log",
+            },
+        },
+    )
+
+    parsed = resource.parsed_format_specific()
+
+    assert isinstance(parsed, VideoResource)
+    assert parsed.repair_candidate_code == "from manim import *\n"
+    assert parsed.repair_candidate_failure is not None
+    assert parsed.repair_candidate_failure.error_code == "repair_render_failed"
+
+
+@pytest.mark.parametrize(
+    "candidate_state",
+    [
+        {"repair_candidate_code": "x" * 100_001},
+        {
+            "repair_candidate_failure": {
+                "error_code": "x" * 121,
+                "summary": "safe",
+                "traceback_tail": [],
+            }
+        },
+        {
+            "repair_candidate_failure": {
+                "error_code": "repair_failed",
+                "summary": "x" * 241,
+                "traceback_tail": [],
+            }
+        },
+        {
+            "repair_candidate_failure": {
+                "error_code": "repair_failed",
+                "summary": "safe",
+                "traceback_tail": ["x" * 501],
+            }
+        },
+        {
+            "repair_candidate_failure": {
+                "error_code": "repair_failed",
+                "summary": "safe",
+                "traceback_tail": ["safe"] * 41,
+            }
+        },
+    ],
+)
+def test_video_resource_rejects_oversized_transient_candidate_state(
+    candidate_state,
+) -> None:
+    with pytest.raises(ValidationError):
+        VideoResource.model_validate(
+            {
+                "manim_code": "ORIGINAL SOURCE",
+                "render_status": "failed",
+                **candidate_state,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("render_status", "state_fields"),
+    (
+        ("pending", {}),
+        (
+            "ready",
+            {
+                "video_url": "/static/manim/MainScene.mp4",
+                "artifact_key": "manim_videos/MainScene.mp4",
+            },
+        ),
+        (
+            "failed",
+            {
+                "render_error_code": "process_exit",
+                "render_error": "Manim exited before producing a video",
+            },
+        ),
+    ),
+)
+def test_video_render_job_id_round_trips_through_strict_schema(
+    render_status,
+    state_fields,
+):
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="durable video",
+        format_specific={
+            "manim_code": "from manim import *",
+            "scene_class": "MainScene",
+            "render_status": render_status,
+            "render_job_id": f"child-{render_status}",
+            **state_fields,
+        },
+    )
+
+    reloaded = Resource.model_validate(resource.model_dump(mode="json"))
+    parsed = reloaded.parsed_format_specific()
+
+    assert isinstance(parsed, VideoResource)
+    assert parsed.render_job_id == f"child-{render_status}"
+    assert parsed.model_dump()["render_job_id"] == f"child-{render_status}"
+
+
+def test_legacy_video_without_render_job_id_still_parses():
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="legacy video",
+        format_specific={
+            "manim_code": "from manim import *",
+            "render_status": "ready",
+            "video_url": "/static/manim/legacy.mp4",
+        },
+    )
+
+    parsed = resource.parsed_format_specific()
+
+    assert isinstance(parsed, VideoResource)
+    assert parsed.render_job_id is None
+
+
+def test_public_video_projection_hides_legacy_raw_traceback() -> None:
+    raw = (
+        "+--- Traceback (most recent call last) ---+\n"
+        "E:\\private\\workspace\\scene.py API_KEY=secret-value"
+    )
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="legacy failed video",
+        format_specific={
+            "manim_code": "from manim import *\nclass MainScene(Scene): pass",
+            "render_status": "failed",
+            "render_error": raw,
+        },
+    )
+
+    public = public_resource_dump(resource)
+    serialized = str(public)
+
+    assert "Traceback" not in serialized
+    assert "E:\\private" not in serialized
+    assert "secret-value" not in serialized
+    assert public["format_specific"]["render_error"] == (
+        "渲染流程未生成可播放视频。"
+    )
+    assert public["format_specific"]["manim_code"] == resource.format_specific["manim_code"]
+
+
+def test_public_video_projection_resanitizes_structured_failure() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="structured failed video",
+        format_specific={
+            "render_status": "failed",
+            "render_failure": {
+                "error_code": "process_exit",
+                "summary": "Failed at E:\\private\\scene.py",
+                "traceback_tail": ["File E:\\private\\scene.py", "ValueError: bad input"],
+                "log_artifact_key": "manim_logs/job/error.log",
+            },
+        },
+    )
+
+    public = public_resource_dump(resource)
+    failure = public["format_specific"]["render_failure"]
+
+    assert "E:\\private" not in failure["summary"]
+    assert "E:\\private" not in "\n".join(failure["traceback_tail"])
+    assert "ValueError: bad input" in failure["traceback_tail"]
+    assert failure["log_artifact_key"] == "manim_logs/job/error.log"
+
+
+def test_public_exercise_projection_hides_every_canonical_answer() -> None:
+    questions = [
+        {
+            "id": "single",
+            "type": "single_choice",
+            "question": "VISIBLE_PROMPT",
+            "options": [
+                {"label": "A", "text": "VISIBLE_OPTION"},
+                {"label": "B", "text": "other"},
+            ],
+            "answer": "SECRET-S",
+            "explanation": "SECRET_EXPLANATION_SINGLE",
+        },
+        {"id": "multiple", "type": "multiple_choice", "question": "multiple", "answer": ["SECRET-M1", "SECRET-M2"]},
+        {"id": "boolean", "type": "true_false", "question": "boolean", "answer": True},
+        {"id": "fill", "type": "fill_blank", "question": "fill", "answer": "SECRET-F"},
+        {
+            "id": "short",
+            "type": "short_answer",
+            "question": "short",
+            "answer": "(开放式回答)",
+            "accepted_answers": ["SECRET-SA"],
+            "explanation": "SECRET_EXPLANATION_SHORT",
+        },
+    ]
+    resource = Resource(
+        type=ResourceType.EXERCISE,
+        title="ordinary exercises",
+        content=(
+            "### VISIBLE_PROMPT\n\n**答案**：SECRET_ANSWER\n\n"
+            "**解析**：SECRET_CONTENT_EXPLANATION"
+        ),
+        format_specific={"questions": questions},
+    )
+
+    public = public_resource_dump(resource)
+    projected = public["format_specific"]["questions"]
+
+    assert [question["id"] for question in projected] == [
+        "single",
+        "multiple",
+        "boolean",
+        "fill",
+        "short",
+    ]
+    assert all("answer" not in question for question in projected)
+    assert all("accepted_answers" not in question for question in projected)
+    assert all("explanation" not in question for question in projected)
+    assert public["content"] == ""
+    assert projected[0]["question"] == "VISIBLE_PROMPT"
+    assert projected[0]["options"][0]["text"] == "VISIBLE_OPTION"
+    assert "SECRET-" not in str(public)
+
+
 # ---------------------------------------------------------------------------
 # CodeResource
 # ---------------------------------------------------------------------------
@@ -200,3 +487,119 @@ def test_package_avg_confidence():
         ],
     )
     assert pkg.summary()["avg_confidence"] == pytest.approx(0.7)
+
+
+def test_public_video_dump_sanitizes_legacy_repair_history() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "repair_history": [
+                {
+                    "job_id": "legacy-child",
+                    "failed_revision": 1,
+                    "status": "failed",
+                    "error_code": "repair_failed",
+                    "summary": (
+                        "provider-token=private-value at "
+                        "C:\\private\\scene.py "
+                        + ("x" * 1000)
+                    ),
+                    "traceback": "SECRET UNBOUNDED TRACE " + ("y" * 2000),
+                    "log_artifact_key": "C:\\private\\raw.log",
+                    "unexpected": "SECRET EXTRA FIELD",
+                }
+            ],
+        },
+    )
+
+    public = public_resource_dump(resource)
+    history = public["format_specific"]["repair_history"]
+
+    assert len(history) == 1
+    assert set(history[0]) <= {
+        "job_id",
+        "failed_revision",
+        "status",
+        "error_code",
+        "summary",
+        "log_artifact_key",
+    }
+    assert len(history[0]["summary"]) <= 200
+    assert "private-value" not in str(history)
+    assert "C:\\private" not in str(history)
+    assert "UNBOUNDED" not in str(history)
+    assert "EXTRA FIELD" not in str(history)
+    assert "log_artifact_key" not in history[0]
+
+
+def test_public_video_dump_sanitizes_legacy_structured_render_failure() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "render_failure": {
+                "error_code": "provider-token=SECRET_CODE " + ("x" * 500),
+                "summary": "api_key=SECRET_SUMMARY C:\\private\\scene.py",
+                "traceback_tail": [
+                    "provider-token=SECRET_TRACE C:\\private\\worker.py"
+                ],
+                "log_artifact_key": "C:\\private\\operator.log",
+                "unexpected": "SECRET EXTRA",
+            },
+        },
+    )
+
+    failure = public_resource_dump(resource)["format_specific"]["render_failure"]
+
+    assert set(failure) <= {
+        "error_code",
+        "summary",
+        "traceback_tail",
+        "log_artifact_key",
+    }
+    assert len(failure["error_code"]) <= 120
+    assert "SECRET" not in str(failure)
+    assert "C:\\private" not in str(failure)
+    assert "log_artifact_key" not in failure
+    assert "unexpected" not in failure
+
+
+def test_public_video_dump_sanitizes_legacy_top_level_render_error_code() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "render_error": "legacy failure",
+            "render_error_code": "provider-token=SECRET_CODE " + ("x" * 500),
+        },
+    )
+
+    public = public_resource_dump(resource)["format_specific"]
+
+    assert len(public["render_error_code"]) <= 120
+    assert "SECRET_CODE" not in public["render_error_code"]
+
+
+def test_public_video_dump_omits_private_repair_candidate_state() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "repair_candidate_code": "PRIVATE GENERATED SOURCE",
+            "repair_candidate_failure": {
+                "error_code": "provider-token=SECRET",
+                "summary": "C:\\private\\scene.py",
+                "traceback_tail": ["PRIVATE TRACE"],
+            },
+        },
+    )
+
+    public = public_resource_dump(resource)["format_specific"]
+
+    assert "repair_candidate_code" not in public
+    assert "repair_candidate_failure" not in public

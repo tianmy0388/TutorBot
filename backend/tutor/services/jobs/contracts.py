@@ -20,12 +20,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from tutor.services.resource_package.schema import Resource, ResourceReview
 
-class JobTerminalStatus(str, Enum):
+
+class JobTerminalStatus(str, Enum):  # noqa: UP042 - wire enum compatibility
     """Terminal outcome of a job.
 
     Distinct from :class:`~tutor.services.jobs.schema.JobStatus`:
@@ -56,7 +58,7 @@ class JobError(BaseModel):
 
     ``code`` is a short, machine-stable identifier (used for i18n and
     analytics). ``message`` is the user-facing string. ``diagnostic``
-    is the verbose detail for logs — never surface it in the UI.
+    is an opaque protected-artifact key; raw details never enter this contract.
     ``retryable`` tells the UI whether to expose a retry affordance.
     """
 
@@ -100,6 +102,159 @@ class JobWarning(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class FollowUpTaskContract(BaseModel):
+    """Durable public projection of an internal ``FollowUpTaskSpec``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["video_render", "profile_update", "path_rebuild"]
+    payload: dict[str, Any] = Field(default_factory=dict)
+    dedupe_key: str = Field(min_length=1)
+
+
+class ResourceIntentNodeInput(BaseModel):
+    """The intent node consumes no dependency output."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ResourceIntentNodeOutput(BaseModel):
+    """Validated intent passed into the resource-generation DAG."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    topic: str
+    scope: str
+    resource_types: tuple[str, ...] = ()
+    prerequisites: tuple[str, ...] = ()
+    goal: str = ""
+    raw_message: str = ""
+    confidence: float = 0.0
+
+
+class ResourceProfileNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent: ResourceIntentNodeOutput
+
+
+class ResourceProfileNodeOutput(BaseModel):
+    """Copy-isolated learner snapshot paired with the normalized intent."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent: ResourceIntentNodeOutput
+    profile_snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResourceSourceNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile_snapshot: ResourceProfileNodeOutput
+
+
+class ResourceSourceNodeOutput(BaseModel):
+    """Content-source result and the deterministic resource plan."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile: ResourceProfileNodeOutput
+    kg_summary: dict[str, Any] = Field(default_factory=dict)
+    planned_types: tuple[str, ...] = ()
+    source_resource: Resource | None = None
+
+
+class ResourcePedagogyNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: ResourceSourceNodeOutput
+
+
+class ResourcePedagogyNodeOutput(BaseModel):
+    """Teaching rewrite consumed by all independent artifact branches."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: ResourceSourceNodeOutput
+    pedagogy_resource: Resource | None = None
+
+
+class ResourceArtifactNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pedagogy: ResourcePedagogyNodeOutput
+
+
+class ResourceArtifactNodeOutput(BaseModel):
+    """Usable artifacts emitted by one named branch."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pedagogy: ResourcePedagogyNodeOutput
+    resources: tuple[Resource, ...] = ()
+
+
+class ResourceQualityNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    mindmap: ResourceArtifactNodeOutput | None = None
+    exercise: ResourceArtifactNodeOutput | None = None
+    code: ResourceArtifactNodeOutput | None = None
+    video_code: ResourceArtifactNodeOutput | None = Field(
+        default=None,
+        alias="video-code",
+    )
+    reading: ResourceArtifactNodeOutput | None = None
+
+    def available_outputs(self) -> tuple[ResourceArtifactNodeOutput, ...]:
+        return tuple(
+            output
+            for output in (
+                self.mindmap,
+                self.exercise,
+                self.code,
+                self.video_code,
+                self.reading,
+            )
+            if output is not None
+        )
+
+
+class ResourceQualityNodeOutput(BaseModel):
+    """Only artifacts with a completed non-reject quality review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pedagogy: ResourcePedagogyNodeOutput
+    resources: tuple[Resource, ...] = ()
+    reviews: tuple[ResourceReview, ...] = ()
+    filtered_failed: tuple[dict[str, Any], ...] = ()
+    filtered_reviews: tuple[dict[str, Any], ...] = ()
+
+
+class ResourceSafetyNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    quality: ResourceQualityNodeOutput
+
+
+class ResourceSafetyNodeOutput(BaseModel):
+    """Quality-approved artifacts after safety rejection filtering."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    quality: ResourceQualityNodeOutput
+    resources: tuple[Resource, ...] = ()
+    safety_reports: tuple[Any, ...] = ()
+    filtered_safety: tuple[dict[str, Any], ...] = ()
+
+
+class ResourcePackageNodeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    safety: ResourceSafetyNodeOutput
+
+
 class JobResultContract(BaseModel):
     """The single, typed terminal result of a job.
 
@@ -131,6 +286,7 @@ class JobResultContract(BaseModel):
     # UI rendering when ``artifacts`` is empty.
     partial_artifacts: list[ArtifactResult] = Field(default_factory=list)
     warnings: list[JobWarning] = Field(default_factory=list)
+    follow_up_tasks: list[FollowUpTaskContract] = Field(default_factory=list)
     error: JobError | None = None
     event_cursor: int = 0
     finished_at: datetime | None = None
@@ -138,9 +294,25 @@ class JobResultContract(BaseModel):
 
 __all__ = [
     "ArtifactResult",
+    "FollowUpTaskContract",
     "JobError",
     "JobProgress",
     "JobResultContract",
     "JobTerminalStatus",
     "JobWarning",
+    "ResourceArtifactNodeInput",
+    "ResourceArtifactNodeOutput",
+    "ResourceIntentNodeInput",
+    "ResourceIntentNodeOutput",
+    "ResourcePackageNodeInput",
+    "ResourcePedagogyNodeInput",
+    "ResourcePedagogyNodeOutput",
+    "ResourceProfileNodeInput",
+    "ResourceProfileNodeOutput",
+    "ResourceQualityNodeInput",
+    "ResourceQualityNodeOutput",
+    "ResourceSafetyNodeInput",
+    "ResourceSafetyNodeOutput",
+    "ResourceSourceNodeInput",
+    "ResourceSourceNodeOutput",
 ]

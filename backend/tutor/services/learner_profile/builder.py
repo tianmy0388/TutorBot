@@ -17,32 +17,30 @@ The builder is *stateless*: it reads/writes through :class:`ProfileStore`.
 
 from __future__ import annotations
 
+import math
 import threading
+from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from functools import lru_cache
-from typing import Any, Iterable
-
-from loguru import logger
+from typing import Any
 
 from tutor.services.learner_profile.schema import (
     CognitiveStyle,
     ErrorPattern,
     GoalType,
-    KnowledgeMap,
     LearnerProfile,
     ModalityPreferences,
     MotivationProfile,
     PaceProfile,
     ProfileDiff,
     Urgency,
-    apply_diff,
     empty_profile,
 )
 from tutor.services.learner_profile.store import (
     ProfileStore,
     get_profile_store,
 )
-
+from tutor.services.learning_events.schema import EventType, LearningEvent
 
 # ---------------------------------------------------------------------------
 # Evidence types
@@ -283,6 +281,56 @@ class ProfileBuilder:
             merged.metadata_merge.update(d.metadata_merge)
         return await self.store.apply_diff(user_id, merged, source=source)
 
+    def aggregate_events(
+        self,
+        profile: LearnerProfile,
+        events: Iterable[LearningEvent],
+        *,
+        through_sequence: int,
+    ) -> LearnerProfile:
+        """Deterministically aggregate one stable event window."""
+        updated = profile.model_copy(deep=True)
+        scores: dict[str, list[float]] = defaultdict(list)
+        formats: Counter[str] = Counter()
+        for event in sorted(events, key=lambda item: (item.sequence, item.event_id)):
+            if (
+                event.event_type
+                in {EventType.EXERCISE_ATTEMPTED, EventType.EXERCISE_SCORED}
+                and event.score is not None
+                and event.concept_id
+            ):
+                scores[event.concept_id].append(float(event.score))
+            resource_format = str(event.metadata.get("resource_format") or "").strip()
+            if resource_format:
+                formats[resource_format] += 1
+
+        confidence = dict(updated.metadata.get("concept_confidence") or {})
+        evidence_counts = dict(updated.metadata.get("concept_evidence_count") or {})
+        alpha = 0.4
+        for concept, evidence in sorted(scores.items()):
+            previous_count = int(evidence_counts.get(concept, 0))
+            if previous_count and concept in updated.knowledge_map.scores:
+                value = updated.knowledge_map.get(concept)
+                remaining = evidence
+            else:
+                value = evidence[0]
+                remaining = evidence[1:]
+            for score in remaining:
+                value = alpha * score + (1.0 - alpha) * value
+            total_count = previous_count + len(evidence)
+            updated.knowledge_map.set(concept, value)
+            evidence_counts[concept] = total_count
+            confidence[concept] = 1.0 - math.exp(-total_count / 3.0)
+
+        updated.metadata["concept_evidence_count"] = evidence_counts
+        updated.metadata["concept_confidence"] = confidence
+        if formats:
+            updated.metadata["preferred_resource_formats"] = [
+                name for name, _ in sorted(formats.items(), key=lambda item: (-item[1], item[0]))
+            ]
+        updated.event_watermark = through_sequence
+        return updated
+
     # ------------------------------------------------------------------
     # Aggregates / recommendations
     # ------------------------------------------------------------------
@@ -326,7 +374,7 @@ class ProfileBuilder:
         scored.sort(reverse=True)
         seen: set[str] = set()
         out: list[str] = []
-        for score, rtype in scored:
+        for _score, rtype in scored:
             if rtype in seen:
                 continue
             seen.add(rtype)

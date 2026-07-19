@@ -1,11 +1,13 @@
-import { getProfile, planPath } from "./api";
+import { getLearningPath, getProfile } from "./api";
 import { useTutorStore } from "./store";
 
-export async function refreshLearningState(userId: string, course: string) {
-  if (!userId || !course) return;
-  const profile = await getProfile(userId);
-  if (!profile) return;
-  useTutorStore.getState().setProfile(profile);
-  const path = await planPath(course, profile);
-  useTutorStore.getState().setPlannedPath(path);
+export async function refreshLearningState(userId: string, _course: string) {
+  if (!userId) return;
+  const [profile, path] = await Promise.all([
+    getProfile(userId),
+    getLearningPath(userId),
+  ]);
+  const store = useTutorStore.getState();
+  store.setProfile(profile, userId);
+  store.setPlannedPath(path, userId);
 }

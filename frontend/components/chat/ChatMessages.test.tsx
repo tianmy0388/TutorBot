@@ -12,7 +12,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { ChatMessages } from "./ChatMessages";
 import type { ActiveTurn } from "@/lib/store";
@@ -46,6 +46,9 @@ const baseJobs: JobsState = {
 function mockStoreState(opts: {
   activeTurn?: Partial<ActiveTurn>;
   jobs?: { jobsById?: Record<string, ClientJob>; jobOrder?: string[] };
+  messages?: Array<{ id: string; role: string; content: string; timestamp: number; metadata?: Record<string, unknown> }>;
+  recoveryWarnings?: Array<{ code: string; message: string }>;
+  dismissRecoveryWarning?: (index: number) => void;
 } = {}) {
   const activeTurn: ActiveTurn = {
     ...baseActiveTurn,
@@ -55,11 +58,13 @@ function mockStoreState(opts: {
   const jobOrder = opts.jobs?.jobOrder ?? Object.keys(jobsById);
   useTutorStoreMock.mockImplementation((selector: (s: unknown) => unknown) =>
     selector({
-      messages: [],
+      messages: opts.messages ?? [],
       activeTurn,
       jobsById,
       jobOrder,
       tracePanelOpen: false,
+      recoveryWarnings: opts.recoveryWarnings ?? [],
+      dismissRecoveryWarning: opts.dismissRecoveryWarning ?? vi.fn(),
     }),
   );
 }
@@ -73,7 +78,7 @@ describe("ChatMessages — terminal state", () => {
   it("does not show the loading spinner after job_terminal, even if activeTurn.phase === 'success'", () => {
     // Regression: the legacy activeTurn.phase is left at 'success'
     // after a job_terminal. The current ChatMessages renders the
-    // "正在调用 Agent…" indicator whenever activeTurn.phase !== idle
+    // stale loading indicator whenever activeTurn.phase !== idle
     // and all buffers are empty. We construct a state where the
     // authoritative job is terminal but the legacy buffers are
     // empty — exactly the hang scenario.
@@ -141,8 +146,104 @@ describe("ChatMessages — terminal state", () => {
     });
 
     render(<ChatMessages />);
-    // The "正在调用 Agent" badge must NOT render after a terminal job.
-    expect(screen.queryByText(/调用 Agent/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("准备学习内容")).not.toBeInTheDocument();
+  });
+
+  it("renders a terminal workflow card with completed stages", () => {
+    mockStoreState({
+      messages: [{
+        id: "workflow:job-1",
+        role: "assistant",
+        content: "",
+        timestamp: 1,
+        metadata: {
+          kind: "workflow_timeline",
+          job_id: "job-1",
+          workflow: { status: "succeeded", stages: [{ name: "intent_understanding", status: "completed" }] },
+        },
+      }],
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText(/已完成/)).toBeInTheDocument();
+    expect(screen.getByText("理解目标")).toBeInTheDocument();
+    expect(screen.queryByText("准备学习内容")).not.toBeInTheDocument();
+  });
+
+  it("ignores malformed workflow metadata instead of rendering an invalid stage", () => {
+    mockStoreState({
+      messages: [{
+        id: "workflow:broken",
+        role: "assistant",
+        content: "fallback content",
+        timestamp: 1,
+        metadata: {
+          kind: "workflow_timeline",
+          workflow: { status: "not-terminal", stages: [null] },
+        },
+      }],
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText("fallback content")).toBeInTheDocument();
+  });
+
+  it("trusts a canonical terminal event when the replayed status is stale", () => {
+    const job = {
+      ...baseTerminalJob("job-canonical"),
+      status: "running" as const,
+      finished_at: null,
+    };
+    mockStoreState({
+      activeTurn: { phase: "streaming" },
+      jobs: { jobsById: { [job.job_id]: job }, jobOrder: [job.job_id] },
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.queryByText("准备学习内容")).not.toBeInTheDocument();
+  });
+
+  it("does not render stale activeTurn buffers for a durable running job", () => {
+    const job = {
+      ...baseTerminalJob("job-running"),
+      status: "running" as const,
+      finished_at: null,
+      events: [],
+    };
+    mockStoreState({
+      activeTurn: {
+        phase: "streaming",
+        text_buffer: "来自旧 activeTurn 的错误内容",
+      },
+      jobs: { jobsById: { [job.job_id]: job }, jobOrder: [job.job_id] },
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.queryByText("来自旧 activeTurn 的错误内容")).not.toBeInTheDocument();
+    expect(screen.getByText("准备学习内容")).toBeInTheDocument();
+  });
+
+  it("renders the newest nonterminal job from newest-first jobOrder", () => {
+    const newest = runningJob("job-newest", "最新任务输出");
+    const older = runningJob("job-older", "旧任务输出");
+    mockStoreState({
+      jobs: {
+        jobsById: {
+          [newest.job_id]: newest,
+          [older.job_id]: older,
+        },
+        jobOrder: [newest.job_id, older.job_id],
+      },
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText("最新任务输出")).toBeInTheDocument();
+    expect(screen.queryByText("旧任务输出")).not.toBeInTheDocument();
   });
 
   it("renders the streamed text from jobsById on a succeeded job", () => {
@@ -161,20 +262,19 @@ describe("ChatMessages — terminal state", () => {
       events: [],
       result: null,
       error: null,
-      text_buffer: "",
+      text_buffer: "self-attention 计算 QKV 注意力。",
       thinking_buffer: "",
       stage: "",
       open_stages: [],
     };
     // While the job is non-terminal, ChatMessages renders the live
-    // streaming view. textBuffer lives on activeTurn (the event
-    // handler keeps it in lockstep with the WS) and must be visible.
+    // streaming view. The per-job buffer is authoritative and must be visible.
     mockStoreState({
       activeTurn: {
         turn_id: "t1",
         phase: "streaming",
         started_at: now - 1000,
-        text_buffer: "self-attention 计算 QKV 注意力。",
+        text_buffer: "",
         thinking_buffer: "",
         events: [],
         result: null,
@@ -235,4 +335,83 @@ describe("ChatMessages — terminal state", () => {
     expect(screen.getByText("检查内容")).toBeInTheDocument();
     expect(screen.queryByText("quality_review_inner")).not.toBeInTheDocument();
   });
+
+  it("renders a structured live-job error without coercing it to an object string", () => {
+    const job = runningJob("job-structured-error", "");
+    job.error = {
+      code: "INVALID_SCOPE",
+      message: "请选择检索范围",
+      details: { kind: null },
+    };
+    mockStoreState({
+      jobs: { jobsById: { [job.job_id]: job }, jobOrder: [job.job_id] },
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText("请选择检索范围")).toBeInTheDocument();
+    expect(screen.getByText("错误编号：INVALID_SCOPE")).toBeInTheDocument();
+  });
+
+  it("shows recovery warnings as non-blocking dismissible notices", () => {
+    const dismiss = vi.fn();
+    mockStoreState({
+      recoveryWarnings: [
+        { code: "missing_artifact", message: "资源文件缺失，可重新生成。" },
+      ],
+      dismissRecoveryWarning: dismiss,
+    });
+
+    render(<ChatMessages />);
+
+    expect(screen.getByText("资源文件缺失，可重新生成。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭恢复提示" }));
+    expect(dismiss).toHaveBeenCalledWith(0);
+  });
 });
+
+function baseTerminalJob(jobId: string): ClientJob {
+  const now = Date.now();
+  return {
+    job_id: jobId,
+    capability: "tutoring",
+    status: "succeeded",
+    message_preview: "hello",
+    submitted_at: now - 1000,
+    started_at: now - 1000,
+    finished_at: now,
+    last_seq: 1,
+    event_count: 1,
+    seen_event_ids: new Set(),
+    events: [
+      {
+        type: "job_terminal",
+        source: "job_runner",
+        stage: "terminal",
+        content: "done",
+        metadata: { job_id: jobId },
+        session_id: "s1",
+        turn_id: "",
+        seq: 1,
+        timestamp: now / 1000,
+        event_id: `terminal-${jobId}`,
+      },
+    ],
+    result: null,
+    error: null,
+    text_buffer: "",
+    thinking_buffer: "",
+    stage: "",
+    open_stages: [],
+  };
+}
+
+function runningJob(jobId: string, text: string): ClientJob {
+  return {
+    ...baseTerminalJob(jobId),
+    status: "running",
+    finished_at: null,
+    events: [],
+    text_buffer: text,
+  };
+}

@@ -37,6 +37,8 @@ import {
 import { useJobQueue } from "@/hooks/useJobQueue";
 import { useTutorStore } from "@/lib/store";
 import type { JobStatus, JobSummary } from "@/lib/types";
+import { isJobTerminal, isTerminal } from "@/lib/job-reducer";
+import { formatStructuredError } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 
 const STATUS_META: Record<
@@ -85,21 +87,67 @@ const CAPABILITY_META: Record<string, { icon: any; color: string; label: string 
   resource_generation: {
     icon: Files,
     color: "text-accent",
-    label: "资源生成",
+    label: "整理学习资料",
   },
   tutoring: { icon: MessageCircle, color: "text-brand-600 dark:text-fg-muted", label: "问题讲解" },
-  assessment: { icon: BarChart3, color: "text-brand-600 dark:text-fg-muted", label: "效果评估" },
-  path_planning: { icon: Compass, color: "text-brand-600 dark:text-fg-muted", label: "路径规划" },
+  assessment: { icon: BarChart3, color: "text-brand-600 dark:text-fg-muted", label: "检查掌握情况" },
+  path_planning: { icon: Compass, color: "text-brand-600 dark:text-fg-muted", label: "安排下一步" },
   profile: { icon: Brain, color: "text-brand-600 dark:text-fg-muted", label: "学习状态" },
 };
 
 export function JobTray() {
   const userId = useTutorStore((s) => s.userId);
+  const jobsById = useTutorStore((s) => s.jobsById);
   const queue = useJobQueue(userId);
   const [open, setOpen] = useState(false);
 
-  const active = queue.activeJobs.length;
-  const recent = queue.jobs.slice(0, 8);
+  const queueById = new Map(queue.jobs.map((job) => [job.job_id, job]));
+  const mergedJobs: JobSummary[] = [
+    ...Object.values(jobsById).map((durable): JobSummary => {
+      const queued = queueById.get(durable.job_id);
+      const startedAt = durable.started_at
+        ? new Date(durable.started_at).toISOString()
+        : (queued?.started_at ?? null);
+      const finishedAt = durable.finished_at
+        ? new Date(durable.finished_at).toISOString()
+        : (queued?.finished_at ?? null);
+      const durationSeconds =
+        durable.started_at != null && durable.finished_at != null
+          ? (durable.finished_at - durable.started_at) / 1000
+          : (queued?.duration_seconds ?? null);
+
+      return {
+        ...queued,
+        job_id: durable.job_id,
+        user_id: queued?.user_id ?? userId ?? "anonymous",
+        session_id: queued?.session_id ?? "",
+        capability: durable.capability,
+        status: durable.status,
+        message_preview:
+          durable.message_preview || queued?.message_preview || "",
+        language: queued?.language ?? "zh",
+        event_count: durable.event_count,
+        created_at: new Date(durable.submitted_at).toISOString(),
+        started_at: startedAt,
+        finished_at: finishedAt,
+        duration_seconds: durationSeconds,
+        has_result: durable.result != null || (queued?.has_result ?? false),
+        error: durable.error,
+        children: durable.children ?? queued?.children,
+        background_status:
+          durable.background_status ?? queued?.background_status,
+      };
+    }),
+    ...queue.jobs.filter((job) => !jobsById[job.job_id]),
+  ].sort(
+    (left, right) =>
+      Date.parse(right.created_at) - Date.parse(left.created_at),
+  );
+  const recent = mergedJobs.slice(0, 8);
+  const active = mergedJobs.filter((job) => {
+    const durable = jobsById[job.job_id];
+    return durable ? !isJobTerminal(durable) : !isTerminal(job.status);
+  }).length;
 
   return (
     <div className="relative">
@@ -107,12 +155,12 @@ export function JobTray() {
       <button
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "text-[11px] px-1.5 sm:px-2 py-1 rounded-md flex items-center gap-1.5 border transition-colors",
+          "flex min-h-11 items-center gap-1.5 rounded-full border px-3 text-[11px] transition-colors",
           active > 0
             ? "bg-brand-100 border-brand-300 text-brand-700 dark:bg-bg-subtle dark:border-border dark:text-fg animate-pulse"
             : "bg-bg-panel border-fg/10 text-fg-muted hover:text-fg",
         )}
-        title="任务队列"
+        title="任务记录"
       >
         {active > 0 ? (
           <Loader2 className="w-3 h-3 animate-spin" />
@@ -126,7 +174,7 @@ export function JobTray() {
             active > 0 ? "bg-brand-500 text-white" : "bg-bg-card text-fg-muted",
           )}
         >
-          {active > 0 ? active : queue.total}
+          {active > 0 ? active : Math.max(queue.total, mergedJobs.length)}
         </span>
       </button>
 
@@ -140,7 +188,7 @@ export function JobTray() {
           <div className="fixed left-3 right-3 top-[104px] z-50 max-h-[70vh] overflow-hidden rounded-md border border-border bg-bg-panel shadow-lg flex flex-col sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-2 sm:w-[420px]">
             <header className="px-4 py-2.5 border-b border-fg/10 flex items-center gap-2 bg-bg-panel shrink-0">
               <History className="w-3.5 h-3.5 text-fg-muted" />
-              <h3 className="font-semibold text-sm">任务队列</h3>
+              <h3 className="font-semibold text-sm">任务记录</h3>
               {active > 0 && (
                 <span className="px-1.5 py-0.5 rounded bg-brand-100 text-brand-700 dark:bg-bg-subtle dark:text-fg text-[10px] font-mono">
                   {active} 运行中
@@ -180,7 +228,11 @@ export function JobTray() {
                 <JobRow
                   key={job.job_id}
                   job={job}
-                  onSubscribe={() => queue.subscribe(job.job_id, job.capability)}
+                  onSubscribe={() =>
+                    queue.subscribe(job.job_id, job.capability, {
+                      sessionId: job.session_id,
+                    })
+                  }
                   onCancel={() => queue.cancel(job.job_id)}
                   onRemove={() => queue.remove(job.job_id)}
                 />
@@ -255,9 +307,6 @@ function JobRow({
             </span>
             <span className="text-[10px] text-fg-subtle">·</span>
             <span className="text-[10px] text-fg-muted">{cm.label}</span>
-            <span className="ml-auto text-[10px] text-fg-subtle shrink-0 font-mono">
-              {job.event_count} 事件
-            </span>
           </div>
           <div className="text-[11px] text-fg leading-relaxed line-clamp-2">
             {job.message_preview || "(无消息)"}
@@ -281,7 +330,7 @@ function JobRow({
           </div>
           {job.error && (
             <div className="text-[10px] text-red-300 mt-1 line-clamp-2">
-              {job.error}
+              {formatStructuredError(job.error)}
             </div>
           )}
         </div>

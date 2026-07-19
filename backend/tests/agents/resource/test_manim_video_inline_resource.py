@@ -22,7 +22,6 @@ import sys
 from typing import Any
 
 import pytest
-
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
 from tutor.services.resource_package.schema import ResourceType
@@ -43,6 +42,22 @@ class _FakeLLM:
         content = self._script[idx] if idx < len(self._script) else "{}"
         from tutor.services.llm.base import LLMResponse
         return LLMResponse(content=content, model=self.model, finish_reason="stop")
+
+
+def test_codegen_prompt_requires_self_contained_native_manim_primitives() -> None:
+    from tutor.agents.resource.manim_video import ManimVideoAgent
+
+    agent = ManimVideoAgent(llm=_FakeLLM("{}", "{}"))  # type: ignore[arg-type]
+    prompt = agent.get_system_prompt(
+        agent.get_prompt_data("zh"),
+        section="coder",
+        field="system",
+    )
+
+    assert "自包含" in prompt
+    assert "原生 Manim 图元" in prompt
+    assert "不得虚构文件名" in prompt
+    assert "SVGMobject" in prompt and "ImageMobject" in prompt
 
 
 @pytest.mark.asyncio

@@ -9,11 +9,11 @@ even for header-only listings.
 
 from __future__ import annotations
 
-import asyncio
+import sqlite3
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from tutor.services.resource_package.schema import (
     Resource,
     ResourcePackage,
@@ -49,7 +49,7 @@ def _build_pkg(
             title=f"{t.value}-{i}",
             confidence_score=c,
         )
-        for i, (t, c) in enumerate(zip(types, confidences))
+        for i, (t, c) in enumerate(zip(types, confidences, strict=True))
     ]
     pkg = ResourcePackage(
         package_id=f"pkg_{uuid.uuid4().hex[:12]}",
@@ -141,3 +141,89 @@ async def test_list_respects_limit_and_topic_filter(fresh_store) -> None:
     for p in items:
         assert "Transformer" in p["topic"]
         assert p["types"] == ["document"]
+
+
+@pytest.mark.asyncio
+async def test_list_for_session_keeps_newest_window_in_chronological_order(
+    fresh_store,
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    for index in range(25):
+        pkg = _build_pkg(
+            "u1", topic=f"topic-{index:02d}", types=[ResourceType.DOCUMENT]
+        )
+        pkg.package_id = f"package-{index:02d}"
+        pkg.metadata["session_id"] = "window-session"
+        pkg.created_at = base + timedelta(minutes=index)
+        await fresh_store.save(pkg, user_id="u1")
+
+    packages = await fresh_store.list_for_session("window-session", limit=20)
+
+    assert [package.package_id for package in packages] == [
+        f"package-{index:02d}" for index in range(5, 25)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_store_normalizes_persisted_marker_and_backfills_legacy_rows(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "resource_packages.db"
+    store = ResourcePackageStore(db_path)
+    await store.init()
+    package = _build_pkg(
+        "alice",
+        topic="legacy package",
+        types=[ResourceType.EXERCISE],
+    )
+    resource = package.resources[0]
+    try:
+        await store.save(package, user_id="alice")
+        assert resource.metadata["package_persisted"] is True
+
+        resource.metadata["package_persisted"] = False
+        await store.update_resource(package.package_id, resource, user_id="alice")
+        assert resource.metadata["package_persisted"] is True
+    finally:
+        await store.close()
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE resources SET resource_metadata = ? WHERE resource_id = ?",
+            ('{"package_id":"legacy-package"}', resource.resource_id),
+        )
+        connection.commit()
+
+    restarted = ResourcePackageStore(db_path)
+    await restarted.init()
+    try:
+        restored = await restarted.get_for_user(package.package_id, "alice")
+        assert restored is not None
+        assert restored.resources[0].metadata["package_persisted"] is True
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_package_row_owner_overrides_stale_metadata_owner(tmp_path) -> None:
+    db_path = tmp_path / "resource_packages.db"
+    store = ResourcePackageStore(db_path)
+    await store.init()
+    package = _build_pkg(
+        "historical-owner",
+        topic="migrated package",
+        types=[ResourceType.DOCUMENT],
+    )
+    try:
+        await store.save(package, user_id="local-user")
+    finally:
+        await store.close()
+
+    restarted = ResourcePackageStore(db_path)
+    await restarted.init()
+    try:
+        restored = await restarted.get(package.package_id)
+        assert restored is not None
+        assert restored.metadata["user_id"] == "local-user"
+    finally:
+        await restarted.close()

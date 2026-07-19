@@ -28,14 +28,16 @@ Phase 5.2 design notes:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from tutor.services.resource_package.schema import ArtifactRef
 
-class JobStatus(str, Enum):
+
+class JobStatus(str, Enum):  # noqa: UP042 - persisted enum compatibility
     """Lifecycle state of a :class:`Job`."""
 
     PENDING = "pending"        # accepted, not yet started
@@ -78,16 +80,25 @@ class Job(BaseModel):
     user_id: str = "anonymous"
     session_id: str = ""
     capability: str = "resource_generation"
+    parent_job_id: str | None = None
+    task_kind: str | None = None
+    dedupe_key: str | None = None
+    claim_owner: str | None = None
+    claim_expires_at: datetime | None = None
+    claim_generation: int = 0
 
     # Inputs
     message: str = ""
     language: str = "zh"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    web_search_enabled: bool = False
 
     # Lifecycle
     status: JobStatus = JobStatus.PENDING
     error: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    error_log_ref: ArtifactRef | None = None
+    terminal_event_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
@@ -109,9 +120,14 @@ class Job(BaseModel):
             "user_id": self.user_id,
             "session_id": self.session_id,
             "capability": self.capability,
+            "parent_job_id": self.parent_job_id,
+            "task_kind": self.task_kind,
+            "dedupe_key": self.dedupe_key,
             "status": self.status.value,
             "message_preview": (self.message[:60] + "…") if len(self.message) > 60 else self.message,
             "language": self.language,
+            "web_search_enabled": self.web_search_enabled,
+            "web_search_requested": self.web_search_enabled,
             "event_count": self.event_count,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
@@ -123,6 +139,12 @@ class Job(BaseModel):
             ),
             "has_result": self.result is not None,
             "error": self.error,
+            "error_log_ref": (
+                self.error_log_ref.model_dump(mode="json")
+                if self.error_log_ref is not None
+                else None
+            ),
+            "terminal_event_id": self.terminal_event_id,
         }
 
     def to_full_dict(self) -> dict[str, Any]:

@@ -58,10 +58,15 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
     name: string;
     children?: string[];
   }>) || [];
+  const outline = (resource.format_specific?.outline as Array<{
+    depth: number;
+    label: string;
+  }>) || [];
 
   useEffect(() => {
     ensureMermaid();
     const el = containerRef.current;
+    setError(null);
     if (!el || !dsl.trim()) return;
 
     let cancelled = false;
@@ -82,10 +87,11 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
         const { svg } = await mermaid.render(id, finalDsl);
         if (!cancelled && el) {
           el.innerHTML = svg;
+          setError(null);
         }
       } catch (e: any) {
         if (!cancelled) {
-          setError(e?.message || String(e));
+          setError("思维导图暂时无法显示。");
         }
       }
     })();
@@ -150,10 +156,7 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
         <div className="p-3 bg-red-50 dark:bg-bg-subtle border border-red-200 dark:border-border rounded flex gap-2 text-xs text-red-700 dark:text-fg">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <div>
-            <div className="font-medium">Mermaid 渲染失败</div>
-            <div className="mt-0.5 text-[10px] opacity-70 font-mono">
-              {error}
-            </div>
+            <div className="font-medium">{error}</div>
           </div>
         </div>
       )}
@@ -170,6 +173,16 @@ export function MindMapViewer({ resource }: { resource: Resource }) {
           style={{ transform: `scale(${zoom})` }}
         />
       </div>
+
+      {error && outline.length > 0 && (
+        <ul className="space-y-1 text-xs text-fg-muted" aria-label="思维导图文字版">
+          {outline.map((item, index) => (
+            <li key={`${item.depth}-${index}`} style={{ marginLeft: `${item.depth * 16}px` }}>
+              {item.label}
+            </li>
+          ))}
+        </ul>
+      )}
 
       {/* Fallback: flat branch list (also useful for accessibility) */}
       {branches.length > 0 && (

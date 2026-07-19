@@ -20,6 +20,8 @@ import json
 from collections import Counter
 from typing import Any
 
+from loguru import logger
+
 from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
@@ -31,7 +33,6 @@ from tutor.services.resource_package.schema import (
     ResourceType,
     build_resource,
 )
-
 
 EXERCISE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -69,8 +70,50 @@ EXERCISE_OUTPUT_SCHEMA: dict[str, Any] = {
                         },
                     },
                     "answer": {},
+                    "accepted_answers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
                     "explanation": {"type": "string"},
                     "estimated_seconds": {"type": "integer"},
+                    "code_spec": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "language": {"const": "python"},
+                            "starter_code": {"type": "string"},
+                            "tests": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 50,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "call": {"type": "string"},
+                                        "expected_json": {
+                                            "type": [
+                                                "null",
+                                                "boolean",
+                                                "number",
+                                                "string",
+                                                "array",
+                                                "object",
+                                            ]
+                                        },
+                                    },
+                                    "required": ["name", "call", "expected_json"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "time_limit_seconds": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 10,
+                            },
+                        },
+                        "required": ["language", "starter_code", "tests"],
+                        "additionalProperties": False,
+                    },
                 },
                 "required": ["id", "type", "question", "answer"],
             },
@@ -155,20 +198,40 @@ class ExerciseGeneratorAgent(BaseAgent):
                     for o in (q.get("options") or [])
                     if isinstance(o, dict)
                 ]
+                question_type = str(q.get("type", "single_choice"))
+                question_text = str(q.get("question") or "")
+                answer = q.get("answer")
+                open_short_answer = question_type == "short_answer" and (
+                    "用自己的话" in question_text
+                    or str(answer).strip() == "(开放式回答)"
+                )
+                accepted_answers = (
+                    [
+                        item.strip()
+                        for item in (q.get("accepted_answers") or [])
+                        if isinstance(item, str) and item.strip()
+                    ]
+                    if question_type == "short_answer" and not open_short_answer
+                    else []
+                )
                 eq = ExerciseQuestion(
                     id=str(q.get("id") or f"q-{len(questions) + 1}"),
-                    type=str(q.get("type", "single_choice")),
+                    type=question_type,
                     difficulty=int(q.get("difficulty") or 3),
                     knowledge_point=str(q.get("knowledge_point") or ""),
-                    question=str(q.get("question") or ""),
+                    question=question_text,
                     options=options,
-                    answer=q.get("answer"),
+                    answer=answer,
+                    accepted_answers=accepted_answers,
                     explanation=str(q.get("explanation") or ""),
                     estimated_seconds=int(q.get("estimated_seconds") or 60),
+                    code_spec=q.get("code_spec"),
                 )
+                if eq.type == "code" and eq.code_spec is None:
+                    raise ValueError("generated code question requires code_spec")
                 questions.append(eq)
-            except Exception as exc:
-                logger.warning(f"Skipping malformed exercise: {exc!r}")
+            except Exception:
+                logger.warning("EXERCISE_ITEM_INVALID skipped=true")
                 continue
 
         if not questions:
@@ -180,6 +243,7 @@ class ExerciseGeneratorAgent(BaseAgent):
                     difficulty=2,
                     question=f"请用自己的话总结「{topic}」的核心概念。",
                     answer="(开放式回答)",
+                    accepted_answers=[],
                     explanation="这是开放性问题，没有标准答案。",
                     estimated_seconds=120,
                 )

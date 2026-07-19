@@ -26,6 +26,7 @@ from loguru import logger
 
 from tutor.core.tool_protocol import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from tutor.services.config.settings import get_settings
+from tutor.services.logging import redact_sensitive
 from tutor.services.mcp import MCPRegistry, get_mcp_registry
 
 
@@ -107,17 +108,35 @@ class MCPWebSearchTool(BaseTool):
             result = await registry.call_tool(server_name, tool_name, arguments)
         except Exception as exc:
             logger.error(
-                f"MCPWebSearchTool: call {server_name}.{tool_name} failed: {exc!r}"
+                "MCP_WEB_SEARCH_FAILED details={details}",
+                details=redact_sensitive(
+                    {
+                        "error_code": "MCP_WEB_SEARCH_FAILED",
+                        "provider": server_name,
+                        "tool": tool_name,
+                        "exception_type": type(exc).__name__,
+                    }
+                ),
             )
             return ToolResult(
                 success=False,
-                error=f"MCP web search failed: {exc}",
+                error="MCP web search unavailable",
             )
 
         if result.is_error:
+            logger.warning(
+                "MCP_WEB_SEARCH_PROVIDER_ERROR details={details}",
+                details=redact_sensitive(
+                    {
+                        "error_code": "MCP_WEB_SEARCH_PROVIDER_ERROR",
+                        "provider": server_name,
+                        "tool": tool_name,
+                    }
+                ),
+            )
             return ToolResult(
                 success=False,
-                error=f"MCP web search returned an error: {result.text or result.raw}",
+                error="MCP web search unavailable",
             )
 
         results = self._parse_content(result.text, result.raw)

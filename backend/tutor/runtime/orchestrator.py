@@ -14,8 +14,7 @@ Design inspired by DeepTutor's :class:`ChatOrchestrator`.
 from __future__ import annotations
 
 import asyncio
-import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Any
 
@@ -23,11 +22,11 @@ from loguru import logger
 
 from tutor.core.context import UnifiedContext
 from tutor.core.stream import StreamEvent
-from tutor.core.stream_bus import StreamBus
 from tutor.runtime.registry.capability_registry import (
     CapabilityRegistry,
     get_capability_registry,
 )
+from tutor.services.intent.router import classify
 
 
 class MainOrchestrator:
@@ -63,40 +62,13 @@ class MainOrchestrator:
     def route(self, context: UnifiedContext) -> str:
         """Pick a capability for the given context (cheap, no LLM call).
 
-        Strategy:
-        1. If ``context.capability`` is explicit, honour it.
-        2. Else, simple keyword-based heuristic (placeholder until the
-           router LLM is implemented).
+        Explicit hints stay explicit. Otherwise the shared deterministic
+        intent router is the only capability selector.
         """
-        if context.capability:
-            return context.capability
-
-        msg = (context.user_message or "").lower()
-        # 简单关键词路由 — 后续会用 Router Agent 替换
-        if any(kw in msg for kw in ["学习画像", "我的画像", "了解我", "learner profile", "who am i"]):
-            return "profile"
-        if any(
-            kw in msg
-            for kw in [
-                "系统学习",
-                "学习资源",
-                "学习一下",
-                "讲解",
-                "解释",
-                "学习路径",
-                "生成资源",
-                "learn",
-                "study",
-                "explain",
-            ]
-        ):
-            return "resource_generation"
-        if any(kw in msg for kw in ["计划", "路径", "下一步", "path", "plan", "next"]):
-            return "path_planning"
-        if any(kw in msg for kw in ["评估", "测试结果", "测验", "assessment", "evaluate"]):
-            return "assessment"
-        # 默认：资源生成（Tutor 的核心用例）
-        return "resource_generation"
+        return classify(
+            context.user_message or "",
+            explicit_capability=context.capability,
+        ).capability
 
     # ------------------------------------------------------------------
     # Execution
@@ -142,7 +114,7 @@ class MainOrchestrator:
             if not run_task.done():
                 try:
                     await asyncio.wait_for(run_task, timeout=2.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("Capability did not finish promptly after stream close")
                     run_task.cancel()
                 except Exception as exc:  # noqa: BLE001

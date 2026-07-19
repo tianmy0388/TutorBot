@@ -1,0 +1,853 @@
+"""Deterministic validation for complete LLM-generated Manim candidates."""
+
+from __future__ import annotations
+
+import ast
+import inspect
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from tutor.services.manim_render.static_guard import StaticGuard
+
+_ALLOWED_IMPORT_ROOTS = {"manim", "math", "numpy"}
+_DANGEROUS_NAMES = {
+    "__builtins__",
+    "__import__",
+    "breakpoint",
+    "compile",
+    "delattr",
+    "dir",
+    "eval",
+    "exec",
+    "getattr",
+    "globals",
+    "help",
+    "input",
+    "locals",
+    "memoryview",
+    "object",
+    "open",
+    "setattr",
+    "type",
+    "vars",
+}
+_SAFE_BUILTINS = {
+    "abs",
+    "all",
+    "any",
+    "bool",
+    "dict",
+    "enumerate",
+    "filter",
+    "float",
+    "int",
+    "isinstance",
+    "len",
+    "list",
+    "map",
+    "max",
+    "min",
+    "next",
+    "range",
+    "reversed",
+    "round",
+    "set",
+    "sorted",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "zip",
+}
+_FORBIDDEN_IO_ROOTS = {
+    "httpx",
+    "os",
+    "pathlib",
+    "requests",
+    "shutil",
+    "socket",
+    "subprocess",
+    "urllib",
+}
+_FORBIDDEN_FILE_METHODS = {
+    "dump",
+    "glob",
+    "iterdir",
+    "mkdir",
+    "open",
+    "read_bytes",
+    "read_text",
+    "rename",
+    "rglob",
+    "rmdir",
+    "tofile",
+    "touch",
+    "unlink",
+    "write_bytes",
+    "write_text",
+}
+_ALLOWED_NUMPY_CALLS = {
+    "numpy.abs",
+    "numpy.arange",
+    "numpy.array",
+    "numpy.asarray",
+    "numpy.clip",
+    "numpy.column_stack",
+    "numpy.concatenate",
+    "numpy.cos",
+    "numpy.cross",
+    "numpy.dot",
+    "numpy.exp",
+    "numpy.hstack",
+    "numpy.linalg.norm",
+    "numpy.linspace",
+    "numpy.log",
+    "numpy.max",
+    "numpy.maximum",
+    "numpy.mean",
+    "numpy.min",
+    "numpy.minimum",
+    "numpy.ones",
+    "numpy.ones_like",
+    "numpy.random.choice",
+    "numpy.random.default_rng",
+    "numpy.random.normal",
+    "numpy.random.permutation",
+    "numpy.random.rand",
+    "numpy.random.randint",
+    "numpy.random.randn",
+    "numpy.random.random",
+    "numpy.random.random_sample",
+    "numpy.random.seed",
+    "numpy.random.shuffle",
+    "numpy.random.uniform",
+    "numpy.reshape",
+    "numpy.sin",
+    "numpy.sqrt",
+    "numpy.stack",
+    "numpy.std",
+    "numpy.sum",
+    "numpy.tan",
+    "numpy.vstack",
+    "numpy.zeros",
+    "numpy.zeros_like",
+}
+_ALLOWED_NUMPY_CONSTANTS = {
+    "numpy.e",
+    "numpy.inf",
+    "numpy.nan",
+    "numpy.pi",
+}
+_ALLOWED_NUMPY_ATTRIBUTES = {
+    ".".join(parts[:index])
+    for call_name in _ALLOWED_NUMPY_CALLS
+    for parts in (call_name.split("."),)
+    for index in range(2, len(parts) + 1)
+} | _ALLOWED_NUMPY_CONSTANTS
+_ALLOWED_NUMPY_NAMESPACES = {
+    attribute
+    for attribute in _ALLOWED_NUMPY_ATTRIBUTES
+    if any(call.startswith(f"{attribute}.") for call in _ALLOWED_NUMPY_CALLS)
+}
+_ALLOWED_CONFIG_READS = {
+    "manim.config.frame_height",
+    "manim.config.frame_rate",
+    "manim.config.frame_width",
+    "manim.config.pixel_height",
+    "manim.config.pixel_width",
+}
+_FORBIDDEN_ASSET_CALLS = {"ImageMobject", "SVGMobject", "add_sound"}
+_FORBIDDEN_NUMPY_IO = {
+    "fromfile",
+    "genfromtxt",
+    "load",
+    "loadtxt",
+    "memmap",
+    "save",
+    "savetxt",
+    "savez",
+    "savez_compressed",
+}
+
+
+@dataclass(frozen=True)
+class CandidateValidationIssue:
+    code: str
+    message: str
+    line: int | None = None
+
+
+@dataclass(frozen=True)
+class CandidateValidation:
+    valid: bool
+    issues: tuple[CandidateValidationIssue, ...] = ()
+
+
+def validate_manim_candidate(
+    code: str,
+    *,
+    workdir: Path,
+    runtime_namespace: Mapping[str, object],
+) -> CandidateValidation:
+    """Reject deterministic source defects before spending a render attempt."""
+    if not isinstance(runtime_namespace, Mapping):
+        return CandidateValidation(
+            valid=False,
+            issues=(
+                CandidateValidationIssue(
+                    code="INVALID_RUNTIME_NAMESPACE",
+                    message="Manim runtime namespace must map names to runtime objects",
+                ),
+            ),
+        )
+    issues: list[CandidateValidationIssue] = []
+    try:
+        tree = ast.parse(code)
+        compile(code, "<manim-candidate>", "exec")
+    except (SyntaxError, ValueError, TypeError) as exc:
+        return CandidateValidation(
+            valid=False,
+            issues=(
+                CandidateValidationIssue(
+                    code="SYNTAX_ERROR",
+                    message=str(exc)[:500],
+                    line=getattr(exc, "lineno", None),
+                ),
+            ),
+        )
+
+    guard = StaticGuard().check(code, workdir=workdir)
+    if not guard.passed:
+        guard_code = {
+            "syntax_error": "SYNTAX_ERROR",
+            "compile_error": "COMPILE_ERROR",
+            "missing_external_asset": "MISSING_EXTERNAL_ASSET",
+            "dynamic_external_asset": "MISSING_EXTERNAL_ASSET",
+        }.get(guard.error_code, "STATIC_GUARD_REJECTED")
+        issues.append(
+            CandidateValidationIssue(
+                code=guard_code,
+                message=(guard.summary or "; ".join(guard.errors))[:500],
+            )
+        )
+    if guard.external_assets or guard.error_code in {
+        "dynamic_external_asset",
+        "missing_external_asset",
+    }:
+        issues.append(
+            CandidateValidationIssue(
+                code="EXTERNAL_ASSET",
+                message="Repair candidates must be self-contained without external assets",
+            )
+        )
+
+    main_scene = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "MainScene"
+        ),
+        None,
+    )
+    has_scene_base = bool(
+        main_scene
+        and any(
+            _call_name(base).rsplit(".", 1)[-1] == "Scene"
+            for base in main_scene.bases
+        )
+    )
+    has_construct = bool(
+        main_scene
+        and any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "construct"
+            for node in main_scene.body
+        )
+    )
+    if main_scene is None or not has_scene_base or not has_construct:
+        issues.append(
+            CandidateValidationIssue(
+                code="MISSING_MAIN_SCENE",
+                message="Candidate must define MainScene.construct",
+                line=getattr(main_scene, "lineno", None),
+            )
+        )
+
+    runtime_names = set(runtime_namespace)
+    aliases = _import_aliases(tree)
+    issues.extend(_validate_imports(tree, runtime_names))
+    issues.extend(_validate_manim_aliases(tree, aliases, runtime_names))
+    issues.extend(_validate_external_io(tree, aliases))
+    issues.extend(_validate_asset_references(tree, aliases))
+    locally_defined = _defined_names(tree)
+    issues.extend(
+        _validate_python_surface(tree, runtime_names, locally_defined)
+    )
+    bound_mobject_methods = _runtime_mobject_methods(runtime_namespace)
+    parents = _parent_map(tree)
+    issues.extend(_validate_numpy_references(tree, aliases, parents))
+    issues.extend(_validate_config_references(tree, aliases, parents))
+    issues.extend(
+        _validate_bound_method_references(
+            tree,
+            parents,
+            bound_mobject_methods,
+        )
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _call_name(node.func)
+        if call_name.rsplit(".", 1)[-1] == "VGroup":
+            for argument in node.args:
+                if (
+                    isinstance(argument, ast.Attribute)
+                    and argument.attr in bound_mobject_methods
+                ):
+                    issues.append(
+                        CandidateValidationIssue(
+                            code="BOUND_METHOD_IN_VGROUP",
+                            message="VGroup arguments must be Mobjects, not bound methods",
+                            line=argument.lineno,
+                        )
+                    )
+        for keyword in node.keywords:
+            if keyword.arg != "run_time":
+                continue
+            value = _numeric_constant(keyword.value)
+            if value is not None and value <= 0:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="NON_POSITIVE_RUN_TIME",
+                        message="run_time must be greater than zero",
+                        line=keyword.value.lineno,
+                    )
+                )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+            continue
+        if not node.id[:1].isupper():
+            continue
+        if node.id in runtime_names or node.id in locally_defined:
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="UNAVAILABLE_MANIM_SYMBOL",
+                message=f"{node.id} is not available in this Manim runtime",
+                line=node.lineno,
+            )
+        )
+
+    unique: list[CandidateValidationIssue] = []
+    seen: set[tuple[str, int | None, str]] = set()
+    for issue in issues:
+        key = (issue.code, issue.line, issue.message)
+        if key not in seen:
+            seen.add(key)
+            unique.append(issue)
+    return CandidateValidation(valid=not unique, issues=tuple(unique))
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _call_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+
+def _is_direct_attribute_base(node: ast.AST, parent: ast.AST | None) -> bool:
+    return isinstance(parent, ast.Attribute) and parent.value is node
+
+
+def _is_direct_call_target(node: ast.AST, parent: ast.AST | None) -> bool:
+    return isinstance(parent, ast.Call) and parent.func is node
+
+
+def _normalize_config_name(name: str) -> str:
+    if name == "config" or name.startswith("config."):
+        return f"manim.{name}"
+    return name
+
+
+def _validate_numpy_references(
+    tree: ast.AST,
+    aliases: dict[str, str],
+    parents: dict[ast.AST, ast.AST],
+) -> list[CandidateValidationIssue]:
+    """Keep NumPy modules, namespaces, and callables from becoming values."""
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Name, ast.Attribute)) or not isinstance(
+            node.ctx, ast.Load
+        ):
+            continue
+        resolved = _resolve_alias(_call_name(node), aliases)
+        if resolved != "numpy" and not resolved.startswith("numpy."):
+            continue
+        parent = parents.get(node)
+        allowed = False
+        if resolved == "numpy" or resolved in _ALLOWED_NUMPY_NAMESPACES:
+            allowed = _is_direct_attribute_base(node, parent)
+        elif resolved in _ALLOWED_NUMPY_CONSTANTS:
+            allowed = True
+        elif resolved in _ALLOWED_NUMPY_CALLS:
+            allowed = _is_direct_call_target(node, parent)
+        if allowed:
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="UNSAFE_NUMPY_REFERENCE",
+                message=f"NumPy reference {resolved} cannot be captured or passed",
+                line=node.lineno,
+            )
+        )
+    return issues
+
+
+def _validate_config_references(
+    tree: ast.AST,
+    aliases: dict[str, str],
+    parents: dict[ast.AST, ast.AST],
+) -> list[CandidateValidationIssue]:
+    """Permit only scalar reads from Manim's process-global config."""
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript):
+            value_name = _normalize_config_name(
+                _resolve_alias(_call_name(node.value), aliases)
+            )
+            if value_name == "manim.config" or value_name.startswith(
+                "manim.config."
+            ):
+                issues.append(
+                    CandidateValidationIssue(
+                        code="UNSAFE_MANIM_CONFIG",
+                        message="Manim config subscript access is not allowed",
+                        line=node.lineno,
+                    )
+                )
+            continue
+        if not isinstance(node, (ast.Name, ast.Attribute)):
+            continue
+        resolved = _normalize_config_name(
+            _resolve_alias(_call_name(node), aliases)
+        )
+        if resolved != "manim.config" and not resolved.startswith(
+            "manim.config."
+        ):
+            continue
+        parent = parents.get(node)
+        allowed = False
+        if resolved == "manim.config":
+            allowed = (
+                isinstance(node.ctx, ast.Load)
+                and _is_direct_attribute_base(node, parent)
+                and _normalize_config_name(
+                    _resolve_alias(_call_name(parent), aliases)
+                )
+                in _ALLOWED_CONFIG_READS
+            )
+        elif resolved in _ALLOWED_CONFIG_READS:
+            allowed = (
+                isinstance(node.ctx, ast.Load)
+                and not _is_direct_call_target(node, parent)
+                and not _is_direct_attribute_base(node, parent)
+                and not (
+                    isinstance(parent, ast.Subscript) and parent.value is node
+                )
+            )
+        if allowed:
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="UNSAFE_MANIM_CONFIG",
+                message="Only allowlisted scalar Manim config reads are allowed",
+                line=node.lineno,
+            )
+        )
+    return issues
+
+
+def _validate_bound_method_references(
+    tree: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+    bound_mobject_methods: set[str],
+) -> list[CandidateValidationIssue]:
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Attribute)
+            or not isinstance(node.ctx, ast.Load)
+            or node.attr not in bound_mobject_methods
+            or _is_direct_call_target(node, parents.get(node))
+        ):
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="BOUND_METHOD_CAPTURE",
+                message="Mobject bound methods must be called directly",
+                line=node.lineno,
+            )
+        )
+    return issues
+
+
+def _numeric_constant(node: ast.AST) -> float | None:
+    if isinstance(node, ast.Constant) and type(node.value) in {int, float}:
+        return float(node.value)
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.USub, ast.UAdd))
+        and isinstance(node.operand, ast.Constant)
+        and type(node.operand.value) in {int, float}
+    ):
+        value = float(node.operand.value)
+        return -value if isinstance(node.op, ast.USub) else value
+    return None
+
+
+def _defined_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.Import):
+            names.update(alias.asname or alias.name.split(".", 1)[0] for alias in node.names)
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").split(".", 1)[0] != "manim"
+        ):
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name != "*"
+            )
+    return names
+
+
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".", 1)[0]
+                aliases[local] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                if alias.name != "*":
+                    aliases[alias.asname or alias.name] = (
+                        f"{node.module}.{alias.name}"
+                    )
+    return aliases
+
+
+def _validate_imports(
+    tree: ast.AST,
+    runtime_names: set[str],
+) -> list[CandidateValidationIssue]:
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root not in _ALLOWED_IMPORT_ROOTS:
+                    issues.append(
+                        CandidateValidationIssue(
+                            code="DISALLOWED_IMPORT",
+                            message=f"Import of {root} is not allowed in Manim repair",
+                            line=node.lineno,
+                        )
+                    )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            root = module.split(".", 1)[0]
+            if root not in _ALLOWED_IMPORT_ROOTS:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="DISALLOWED_IMPORT",
+                        message=f"Import from {root or '<relative>'} is not allowed",
+                        line=node.lineno,
+                    )
+                )
+                continue
+            if any(alias.name == "*" for alias in node.names) and root != "manim":
+                issues.append(
+                    CandidateValidationIssue(
+                        code="DISALLOWED_IMPORT",
+                        message=f"Wildcard import from {root} is not allowed",
+                        line=node.lineno,
+                    )
+                )
+            if root == "manim":
+                for alias in node.names:
+                    if alias.name != "*" and alias.name not in runtime_names:
+                        issues.append(
+                            CandidateValidationIssue(
+                                code="UNAVAILABLE_MANIM_SYMBOL",
+                                message=(
+                                    f"{alias.name} is not available in this "
+                                    "Manim runtime"
+                                ),
+                                line=node.lineno,
+                            )
+                        )
+            if root == "numpy":
+                for alias in node.names:
+                    if alias.name in _FORBIDDEN_NUMPY_IO:
+                        issues.append(
+                            CandidateValidationIssue(
+                                code="EXTERNAL_IO",
+                                message=f"numpy.{alias.name} file I/O is not allowed",
+                                line=node.lineno,
+                            )
+                        )
+    return issues
+
+
+def _validate_manim_aliases(
+    tree: ast.AST,
+    aliases: dict[str, str],
+    runtime_names: set[str],
+) -> list[CandidateValidationIssue]:
+    issues: list[CandidateValidationIssue] = []
+    manim_aliases = {
+        alias for alias, target in aliases.items() if target == "manim"
+    }
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Attribute)
+            or not isinstance(node.value, ast.Name)
+            or node.value.id not in manim_aliases
+            or node.attr in runtime_names
+        ):
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="UNAVAILABLE_MANIM_SYMBOL",
+                message=f"{node.attr} is not available in this Manim runtime",
+                line=node.lineno,
+            )
+        )
+    return issues
+
+
+def _validate_python_surface(
+    tree: ast.AST,
+    runtime_names: set[str],
+    locally_defined: set[str],
+) -> list[CandidateValidationIssue]:
+    """Allow only explicit runtime/local names and a small pure-builtin set."""
+    issues: list[CandidateValidationIssue] = []
+    allowed_names = runtime_names | locally_defined | _SAFE_BUILTINS
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and _is_dunder(node.attr):
+            issues.append(
+                CandidateValidationIssue(
+                    code="UNSAFE_PYTHON_SURFACE",
+                    message="Python dunder object-model access is not allowed",
+                    line=node.lineno,
+                )
+            )
+        elif (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and (
+                node.id in _DANGEROUS_NAMES
+                or _is_dunder(node.id)
+                or node.id not in allowed_names
+            )
+        ):
+            issues.append(
+                CandidateValidationIssue(
+                    code="UNSAFE_PYTHON_SURFACE",
+                    message=f"Python name {node.id!r} is not allowed in repair code",
+                    line=node.lineno,
+                )
+            )
+    return issues
+
+
+def _is_dunder(name: str) -> bool:
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _runtime_mobject_methods(
+    runtime_namespace: Mapping[str, object],
+) -> set[str]:
+    mobject = runtime_namespace.get("Mobject")
+    if not inspect.isclass(mobject):
+        return set()
+    methods: set[str] = set()
+    for value in runtime_namespace.values():
+        if not inspect.isclass(value):
+            continue
+        try:
+            if not issubclass(value, mobject):
+                continue
+        except TypeError:
+            continue
+        methods.update(
+            name
+            for name in dir(value)
+            if not _is_dunder(name) and callable(getattr(value, name, None))
+        )
+    return methods
+
+
+def _validate_external_io(
+    tree: ast.AST,
+    aliases: dict[str, str],
+) -> list[CandidateValidationIssue]:
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if _is_dynamic_import_call(node):
+                issues.append(
+                    CandidateValidationIssue(
+                        code="DYNAMIC_IMPORT",
+                        message="Dynamic imports are not allowed",
+                        line=node.lineno,
+                    )
+                )
+                continue
+            raw_name = _call_name(node.func)
+            name = _resolve_alias(raw_name, aliases)
+            root = name.split(".", 1)[0]
+            terminal = name.rsplit(".", 1)[-1]
+            if raw_name == "open" or raw_name == "Path":
+                issues.append(
+                    CandidateValidationIssue(
+                        code="EXTERNAL_IO",
+                        message=f"{raw_name} filesystem access is not allowed",
+                        line=node.lineno,
+                    )
+                )
+            elif root in _FORBIDDEN_IO_ROOTS:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="EXTERNAL_IO",
+                        message=f"External I/O call {name} is not allowed",
+                        line=node.lineno,
+                    )
+                )
+            elif root == "numpy" and name not in _ALLOWED_NUMPY_CALLS:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="DISALLOWED_NUMPY_CALL",
+                        message=f"NumPy call {name} is outside the computation allowlist",
+                        line=node.lineno,
+                    )
+                )
+            elif terminal in _FORBIDDEN_FILE_METHODS:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="EXTERNAL_IO",
+                        message=f"Filesystem method {terminal} is not allowed",
+                        line=node.lineno,
+                    )
+                )
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            name = _resolve_alias(_call_name(node), aliases)
+            root = name.split(".", 1)[0]
+            terminal = node.attr
+            if terminal in {"dump", "tofile"}:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="EXTERNAL_IO",
+                        message=f"Filesystem method {terminal} is not allowed",
+                        line=node.lineno,
+                    )
+                )
+            elif root == "numpy" and name not in _ALLOWED_NUMPY_ATTRIBUTES:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="DISALLOWED_NUMPY_ATTRIBUTE",
+                        message=(
+                            f"NumPy attribute {name} is outside the computation "
+                            "allowlist"
+                        ),
+                        line=node.lineno,
+                    )
+                )
+            elif root in _FORBIDDEN_IO_ROOTS:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="EXTERNAL_IO",
+                        message=f"External I/O namespace {root} is not allowed",
+                        line=node.lineno,
+                    )
+                )
+    return issues
+
+
+def _validate_asset_references(
+    tree: ast.AST,
+    import_aliases: dict[str, str],
+) -> list[CandidateValidationIssue]:
+    """Reject every expression reference to an external asset callable."""
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, (ast.Name, ast.Attribute))
+            and isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        raw_name = _call_name(node)
+        resolved = _resolve_alias(raw_name, import_aliases)
+        if resolved.rsplit(".", 1)[-1] not in _FORBIDDEN_ASSET_CALLS:
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="EXTERNAL_ASSET",
+                message="Repair candidates cannot reference external asset constructors",
+                line=node.lineno,
+            )
+        )
+    return issues
+
+
+def _resolve_alias(name: str, aliases: dict[str, str]) -> str:
+    if not name:
+        return ""
+    root, separator, remainder = name.partition(".")
+    target = aliases.get(root, root)
+    return f"{target}.{remainder}" if separator else target
+
+
+def _is_dynamic_import_call(node: ast.Call) -> bool:
+    name = _call_name(node.func)
+    if name.rsplit(".", 1)[-1] in {"__import__", "import_module"}:
+        return True
+    if not isinstance(node.func, ast.Call):
+        return False
+    inner = node.func
+    return (
+        isinstance(inner.func, ast.Name)
+        and inner.func.id == "getattr"
+        and len(inner.args) >= 2
+        and isinstance(inner.args[1], ast.Constant)
+        and inner.args[1].value == "__import__"
+    )
+
+
+__all__ = [
+    "CandidateValidation",
+    "CandidateValidationIssue",
+    "validate_manim_candidate",
+]

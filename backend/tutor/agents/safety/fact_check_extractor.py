@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import json
-
 from loguru import logger
 
 from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
-from tutor.services.llm.base import LLMMessage, LLMRequest
-
 
 EXTRACTOR_OUTPUT_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -66,8 +62,8 @@ class FactCheckExtractor(BaseAgent):
                 temperature=self.default_temperature,
                 response_format={"type": "json_object"},
             )
-        except Exception as exc:
-            logger.warning(f"FactCheckExtractor LLM failed: {exc!r}")
+        except Exception:
+            logger.warning("FACT_CHECK_EXTRACTION_FAILED")
             return []
 
         data = self.parse_json_response(resp.content, fallback={})

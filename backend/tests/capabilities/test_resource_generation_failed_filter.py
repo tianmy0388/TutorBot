@@ -27,9 +27,9 @@ from __future__ import annotations
 import sys
 
 import pytest
-
 from tutor.capabilities.resource_generation import (
     _is_failed_resource,
+    _is_malformed_resource,
 )
 from tutor.services.resource_package.schema import (
     CodeResource,
@@ -97,6 +97,42 @@ def test_successful_code_is_not_filtered() -> None:
 def test_resource_without_format_specific_is_not_filtered() -> None:
     r = Resource(type=ResourceType.VIDEO, title="x", content="y", format_specific={})
     assert _is_failed_resource(r) is False
+
+
+def test_pending_video_without_executable_manim_contract_is_malformed() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="empty video",
+        content="storyboard only",
+        format_specific={"render_status": "pending"},
+    )
+
+    assert _is_malformed_resource(resource) is True
+
+
+def test_resource_with_blank_public_content_is_malformed() -> None:
+    resource = Resource(
+        type=ResourceType.DOCUMENT,
+        title="blank",
+        content="   ",
+    )
+
+    assert _is_malformed_resource(resource) is True
+
+
+def test_pending_video_with_executable_manim_contract_is_usable() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="usable video",
+        content="storyboard",
+        format_specific={
+            "render_status": "pending",
+            "manim_code": "class MainScene(Scene): pass",
+            "scene_class": "MainScene",
+        },
+    )
+
+    assert _is_malformed_resource(resource) is False
 
 
 if __name__ == "__main__":

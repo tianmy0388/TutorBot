@@ -22,9 +22,9 @@ from loguru import logger
 
 from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
+from tutor.core.redaction import redact_text
 from tutor.core.stream_bus import StreamBus
 from tutor.services.llm.base import LLMMessage, LLMRequest
-
 
 # ---------------------------------------------------------------------------
 # Keyword blacklist (Chinese + English)
@@ -64,8 +64,8 @@ class SafetyReport:
             "category": self.category,
             "matched_keywords": list(self.matched_keywords),
             "llm_verdict": self.llm_verdict,
-            "llm_reason": self.llm_reason[:500],
-            "notes": self.notes,
+            "llm_reason": redact_text(self.llm_reason[:500]),
+            "notes": redact_text(self.notes),
         }
 
 
@@ -145,9 +145,9 @@ class ContentSafetyAgent(BaseAgent):
                 report.is_safe = False
                 report.category = cat or "unspecified"
                 report.notes = f"LLM flagged as unsafe: {report.category}"
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"Safety LLM failed (defaulting to safe): {exc!r}")
-            report.notes = f"safety LLM failed: {exc}"
+        except Exception:  # noqa: BLE001
+            logger.warning("CONTENT_SAFETY_CHECK_FAILED policy=failed_open")
+            report.notes = "CONTENT_SAFETY_CHECK_FAILED: safety classification failed"
 
         return report
 

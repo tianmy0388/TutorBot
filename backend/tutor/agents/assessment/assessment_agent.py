@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -26,6 +25,7 @@ from loguru import logger
 from tutor.agents.base_agent import BaseAgent
 from tutor.core.context import UnifiedContext
 from tutor.core.stream_bus import StreamBus
+from tutor.services.learner_profile.schema import LearnerProfile
 from tutor.services.learning_events.schema import (
     AssessmentDimension,
     AssessmentReport,
@@ -34,8 +34,6 @@ from tutor.services.learning_events.schema import (
     LearningEvent,
     TrajectoryTrend,
 )
-from tutor.services.learner_profile.schema import LearnerProfile
-
 
 ASSESSMENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -173,8 +171,8 @@ class AssessmentAgent(BaseAgent):
                 temperature=self.default_temperature,
                 response_format={"type": "json_object"},
             )
-        except Exception as exc:
-            logger.warning(f"AssessmentAgent LLM failed: {exc!r}")
+        except Exception:
+            logger.warning("ASSESSMENT_LLM_FAILED")
             return {}
 
         data = self.parse_json_response(resp.content, fallback={})

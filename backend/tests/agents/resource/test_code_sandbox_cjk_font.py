@@ -25,15 +25,15 @@ escalated to a hard error).
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-
-from tutor.agents.resource.code_sandbox import _wrap_user_code
+from tutor.agents.resource import code_sandbox
+from tutor.agents.resource.code_sandbox import _safe_run_python, _wrap_user_code
+from tutor.services.config.settings import Settings
 
 
 def _pick_cjk_font() -> str:
@@ -164,6 +164,34 @@ def test_wrap_user_code_font_list_prefers_known_cjk_fonts() -> None:
         f"font.sans-serif list does not include any known CJK font: "
         f"{block!r}"
     )
+
+
+def test_cjk_prelude_runs_before_user_plotting_and_warm_cache_is_reused(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = Settings(env="test", data_dir=tmp_path, execution_python=sys.executable)
+    monkeypatch.setattr(code_sandbox, "get_settings", lambda: settings)
+    snippet = (
+        "import os\n"
+        "import matplotlib as mpl\n"
+        "assert mpl.rcParams['axes.unicode_minus'] is False\n"
+        "assert 'Noto Sans CJK SC' in mpl.rcParams['font.sans-serif']\n"
+        "print(os.environ['MPLCONFIGDIR'])\n"
+        "import matplotlib.pyplot as plt\n"
+        "plt.plot([1, 2])\n"
+    )
+
+    first = _safe_run_python(
+        snippet, interpreter=sys.executable, timeout=30, settings=settings
+    )
+    second = _safe_run_python(
+        snippet, interpreter=sys.executable, timeout=30, settings=settings
+    )
+
+    assert first[0] == second[0] == "success"
+    assert first[1].strip() == second[1].strip() == "<sandbox>"
+    assert "Matplotlib is building the font cache" not in second[2]
 
 
 if __name__ == "__main__":

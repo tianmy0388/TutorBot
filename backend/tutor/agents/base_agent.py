@@ -34,17 +34,16 @@ import asyncio
 import json
 import time
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
 
 from tutor.core.context import UnifiedContext
-from tutor.core.stream import StreamEvent, StreamEventType
+from tutor.core.redaction import failure_category, public_failure
 from tutor.core.stream_bus import StreamBus
 from tutor.services.llm.base import (
-    LLMChunk,
     LLMMessage,
     LLMProvider,
     LLMRequest,
@@ -52,7 +51,6 @@ from tutor.services.llm.base import (
 )
 from tutor.services.llm.provider_factory import get_runtime_provider
 from tutor.services.prompt.manager import PromptManager, get_prompt_manager
-
 
 TraceCallback = Callable[[dict[str, Any]], None]
 
@@ -218,10 +216,22 @@ class BaseAgent(ABC):
         try:
             resp = await self.resolved_llm.call(req)
         except Exception as exc:
-            logger.exception(f"LLM call failed for {self.agent_name}: {exc!r}")
+            category = failure_category(exc)
+            logger.error(
+                "AGENT_LLM_CALL_FAILED agent={} category={}",
+                self.agent_name,
+                category,
+            )
             if stream is not None:
                 await stream.error(
-                    f"LLM call failed: {exc}", source=source or self.agent_name, stage=stage
+                    "LLM request failed",
+                    source=source or self.agent_name,
+                    stage=stage,
+                    metadata=public_failure(
+                        "AGENT_LLM_CALL_FAILED",
+                        "LLM request failed",
+                        retryable=category in {"timeout", "connection"},
+                    ),
                 )
             raise
 
@@ -311,8 +321,8 @@ class BaseAgent(ABC):
         # → ``openai.exceptions.APITimeoutError``), and some
         # installations don't expose them at all (e.g. proxied / patched
         # openai-compat clients that re-raise httpx errors directly).
-        APITimeoutError = None  # type: ignore
-        APIConnectionError = None  # type: ignore
+        api_timeout_error = None  # type: ignore
+        api_connection_error = None  # type: ignore
         for _mod_path, _names in (
             ("openai", ("APITimeoutError", "APIConnectionError")),
             ("openai.exceptions", ("APITimeoutError", "APIConnectionError")),
@@ -321,12 +331,12 @@ class BaseAgent(ABC):
             try:
                 _mod = __import__(_mod_path, fromlist=_names)
                 for _n in _names:
-                    if APITimeoutError is None and hasattr(_mod, "APITimeoutError"):
-                        APITimeoutError = getattr(_mod, "APITimeoutError")
-                    if APIConnectionError is None and hasattr(_mod, "APIConnectionError"):
-                        APIConnectionError = getattr(_mod, "APIConnectionError")
-                    if APITimeoutError is None and _n == "Timeout" and hasattr(_mod, "Timeout"):
-                        APITimeoutError = getattr(_mod, "Timeout")
+                    if api_timeout_error is None and hasattr(_mod, "APITimeoutError"):
+                        api_timeout_error = _mod.APITimeoutError
+                    if api_connection_error is None and hasattr(_mod, "APIConnectionError"):
+                        api_connection_error = _mod.APIConnectionError
+                    if api_timeout_error is None and _n == "Timeout" and hasattr(_mod, "Timeout"):
+                        api_timeout_error = _mod.Timeout
             except ImportError:
                 continue
 
@@ -334,11 +344,11 @@ class BaseAgent(ABC):
         # the underlying httpx error without wrapping it.
         try:
             import httpx as _httpx
-            ReadTimeout = _httpx.ReadTimeout
-            ConnectError = _httpx.ConnectError
-            ConnectTimeout = _httpx.ConnectTimeout
+            read_timeout = _httpx.ReadTimeout
+            connect_error = _httpx.ConnectError
+            connect_timeout = _httpx.ConnectTimeout
         except ImportError:  # pragma: no cover
-            ReadTimeout = ConnectError = ConnectTimeout = None  # type: ignore
+            read_timeout = connect_error = connect_timeout = None  # type: ignore
 
         transient_errors: tuple[type[BaseException], ...] = (
             asyncio.TimeoutError,
@@ -346,23 +356,22 @@ class BaseAgent(ABC):
             TimeoutError,
             OSError,  # socket.timeout, ConnectionResetError — older openai
         )
-        if APITimeoutError is not None:
-            transient_errors = transient_errors + (APITimeoutError,)
-        if APIConnectionError is not None:
-            transient_errors = transient_errors + (APIConnectionError,)
-        if ReadTimeout is not None:
-            transient_errors = transient_errors + (ReadTimeout,)
-        if ConnectError is not None:
-            transient_errors = transient_errors + (ConnectError,)
-        if ConnectTimeout is not None:
-            transient_errors = transient_errors + (ConnectTimeout,)
+        if api_timeout_error is not None:
+            transient_errors = transient_errors + (api_timeout_error,)
+        if api_connection_error is not None:
+            transient_errors = transient_errors + (api_connection_error,)
+        if read_timeout is not None:
+            transient_errors = transient_errors + (read_timeout,)
+        if connect_error is not None:
+            transient_errors = transient_errors + (connect_error,)
+        if connect_timeout is not None:
+            transient_errors = transient_errors + (connect_timeout,)
 
         # Local mutable copy so we can append feedback between attempts
         # without mutating the caller's list.
         msgs: list[LLMMessage] = list(messages)
 
         last_resp: LLMResponse | None = None
-        last_exc: BaseException | None = None
         for attempt in range(max_attempts):
             mt = max_tokens * (2 ** attempt)
             try:
@@ -376,16 +385,19 @@ class BaseAgent(ABC):
                     response_format=response_format,
                 )
             except transient_errors as exc:
-                last_exc = exc
+                category = failure_category(exc)
                 if attempt < max_attempts - 1:
                     # Small backoff so we don't hammer the provider if
                     # the issue is rate-limit-driven. 1s, 2s for the
                     # next attempts — exponential.
                     backoff = 2 ** attempt
                     logger.warning(
-                        f"{self.agent_name} attempt {attempt + 1}/{max_attempts}: "
-                        f"transient error {type(exc).__name__}: {exc}; "
-                        f"retrying in {backoff}s"
+                        "AGENT_LLM_RETRY agent={} attempt={}/{} category={} backoff_seconds={}",
+                        self.agent_name,
+                        attempt + 1,
+                        max_attempts,
+                        category,
+                        backoff,
                     )
                     await asyncio.sleep(backoff)
                     continue
@@ -393,8 +405,10 @@ class BaseAgent(ABC):
                 # wrapper sees the real exception (it logs + emits a
                 # stream.error + returns None).
                 logger.error(
-                    f"{self.agent_name}: all {max_attempts} attempts hit "
-                    f"transient error {type(exc).__name__}: {exc}"
+                    "AGENT_LLM_RETRIES_EXHAUSTED agent={} attempts={} category={}",
+                    self.agent_name,
+                    max_attempts,
+                    category,
                 )
                 raise
             except Exception:
@@ -499,9 +513,21 @@ class BaseAgent(ABC):
                 if chunk.usage:
                     final_usage = chunk.usage
         except Exception as exc:
-            logger.exception(f"LLM stream failed for {self.agent_name}: {exc!r}")
+            category = failure_category(exc)
+            logger.error(
+                "AGENT_LLM_STREAM_FAILED agent={} category={}",
+                self.agent_name,
+                category,
+            )
             await stream.error(
-                f"LLM stream failed: {exc}", source=source or self.agent_name, stage=stage
+                "LLM stream failed",
+                source=source or self.agent_name,
+                stage=stage,
+                metadata=public_failure(
+                    "AGENT_LLM_STREAM_FAILED",
+                    "LLM stream failed",
+                    retryable=category in {"timeout", "connection"},
+                ),
             )
             raise
 
@@ -594,7 +620,7 @@ class BaseAgent(ABC):
                     continue
 
         if strict:
-            raise ValueError(f"Could not parse JSON from LLM response: {content[:200]!r}")
+            raise ValueError("AGENT_LLM_RESPONSE_INVALID_JSON")
         return fallback
 
     # ------------------------------------------------------------------
@@ -605,8 +631,8 @@ class BaseAgent(ABC):
         if self.trace_callback is not None:
             try:
                 self.trace_callback(payload)
-            except Exception as exc:
-                logger.warning(f"trace_callback raised: {exc!r}")
+            except Exception:
+                logger.warning("AGENT_TRACE_CALLBACK_FAILED agent={}", self.agent_name)
 
     # ------------------------------------------------------------------
     # Subclass hook

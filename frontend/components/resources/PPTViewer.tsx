@@ -19,12 +19,19 @@ interface PPTViewerProps {
 
 export function PPTViewer({ resource }: PPTViewerProps) {
   const userId = useTutorStore((s) => s.userId);
+  const latestPackageId = useTutorStore(
+    (s) => s.latestPackage?.package_id ?? null,
+  );
   const fs = resource.format_specific || {};
   const slideTitles: string[] = Array.isArray(fs.slide_titles)
     ? (fs.slide_titles as string[])
     : [];
   const slideCount: number = Number(fs.slide_count ?? slideTitles.length ?? 0);
   const pptxPath: string | null = (fs.pptx_path as string) || null;
+  const artifactKey: string | null = (fs.artifact_key as string) || null;
+  const artifactRef = artifactKey || pptxPath;
+  const packageId =
+    (resource.metadata?.package_id as string | undefined) || latestPackageId;
   const error: string | null = (fs.error as string) || null;
   const filename: string =
     (resource.metadata?.pptx_filename as string) || `${resource.title}.pptx`;
@@ -41,22 +48,15 @@ export function PPTViewer({ resource }: PPTViewerProps) {
       process.env?.NEXT_PUBLIC_API_BASE) ||
     "/api/v1";
 
-  const downloadUrl = pptxPath
+  const downloadUrl = artifactRef && packageId
     ? `${apiBase}/resources/packages/${encodeURIComponent(userId)}/` +
-      `${encodeURIComponent(
-        // We don't know package_id here, but the endpoint needs it; the
-        // server routes via resource_id, so we look up package via store.
-        // Easiest: include it from resource.metadata if available; else
-        // fall back to the global "latest" package which the caller
-        // knows. Resource.metadata.package_id is set by the capability
-        // (we can rely on it).
-        (resource.metadata?.package_id as string) || "_",
-      )}/resources/${encodeURIComponent(resource.resource_id)}/download`
+      `${encodeURIComponent(packageId)}/resources/` +
+      `${encodeURIComponent(resource.resource_id)}/download`
     : "";
 
   const triggerDownload = async () => {
-    if (!pptxPath) {
-      setDownloadErr("PPT 文件路径缺失");
+    if (!artifactRef || !packageId) {
+      setDownloadErr("PPT 文件或资源包信息缺失");
       return;
     }
     setDownloading(true);
@@ -144,17 +144,18 @@ export function PPTViewer({ resource }: PPTViewerProps) {
       <div className="flex items-center gap-2">
         <button
           onClick={triggerDownload}
-          disabled={!pptxPath || downloading}
+          disabled={!artifactRef || !packageId || downloading}
           className={cn(
             "btn-primary px-4 h-9 text-sm",
-            (!pptxPath || downloading) && "opacity-50 cursor-not-allowed",
+            (!artifactRef || !packageId || downloading) &&
+              "opacity-50 cursor-not-allowed",
           )}
         >
           <Download className="w-4 h-4" />
           {downloading ? "下载中…" : "下载 .pptx"}
         </button>
         <span className="text-[10px] text-fg-subtle truncate flex-1">
-          {pptxPath ? pptxPath.split(/[\\/]/).pop() : "(无文件)"}
+          {artifactRef ? artifactRef.split(/[\\/]/).pop() : "(无文件)"}
         </span>
       </div>
       {downloadErr && (

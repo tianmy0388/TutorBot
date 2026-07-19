@@ -9,9 +9,16 @@ import type {
   AssessmentReport,
   CapabilitiesResponse,
   ConfigTestResult,
+  ConversationMessageInput,
   CourseGraph,
   CourseListResponse,
+  CourseListResponseV2,
   EmbeddingSectionPatch,
+  ExerciseAttempt,
+  ExerciseAttemptListResponse,
+  ExerciseResponseAnswer,
+  ExerciseResponseState,
+  ExerciseSubmission,
   HealthResponse,
   JobDetail,
   JobListResponse,
@@ -35,7 +42,9 @@ import type {
   RuntimeConfig,
   StrategyDecision,
   WebSearchSectionPatch,
+  VideoRetryResponse,
 } from "./types";
+import { normalizeStructuredError } from "./errors";
 
 const API_BASE =
   (typeof window !== "undefined" && (window as any).__TUTOR_API__) ||
@@ -191,8 +200,14 @@ export const getProfileSummary = (userId: string) =>
 
 export const getProfile = (userId: string) =>
   request<LearnerProfileDetail>(
-    `/profile/${encodeURIComponent(userId)}`,
+    `/learning/profile/${encodeURIComponent(userId)}`,
   ).catch((e) => {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  });
+
+export const getLearningPath = (userId: string) =>
+  request<PlannedPath>(`/learning/path/${encodeURIComponent(userId)}`).catch((e) => {
     if (e instanceof ApiError && e.status === 404) return null;
     throw e;
   });
@@ -206,24 +221,7 @@ export const listCourses = () => request<CourseListResponse>("/kg/courses");
 // 2026-06-21 plan: Courses API (Part D). Distinct from /kg/courses
 // which returns course names from the knowledge graph YAML — this
 // endpoint returns the persistent Course rows with aggregate counts.
-export interface CourseResponse {
-  id: string;
-  name: string;
-  description: string;
-  knowledge_graph_id: string;
-  is_seeded: boolean;
-  library_count: number;
-  document_count: number;
-  ready_count: number;
-  total_chunks: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CourseListResponseV2 {
-  items: CourseResponse[];
-  total: number;
-}
+export type { CourseResponse } from "./types";
 
 export const listAppCourses = () =>
   request<CourseListResponseV2>("/courses");
@@ -314,9 +312,95 @@ export const deleteResourcePackage = (userId: string, packageId: string) =>
     { method: "DELETE" },
   );
 
+export const listExerciseAttempts = (
+  packageId: string,
+  questionId: string,
+  userId: string,
+  signal?: AbortSignal,
+) => {
+  const params = new URLSearchParams({ user_id: userId, limit: "20", offset: "0" });
+  return request<ExerciseAttemptListResponse>(
+    `/exercises/${encodeURIComponent(packageId)}/${encodeURIComponent(questionId)}/attempts?${params}`,
+    { signal },
+  );
+};
+
+export const submitExerciseAttempt = (
+  packageId: string,
+  questionId: string,
+  payload: {
+    user_id: string;
+    session_id: string;
+    source_code: string;
+    client_attempt_id?: string;
+  },
+  signal?: AbortSignal,
+) =>
+  request<ExerciseAttempt>(
+    `/exercises/${encodeURIComponent(packageId)}/${encodeURIComponent(questionId)}/attempts`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
+
+export const getExerciseResponseState = (
+  packageId: string,
+  resourceId: string,
+  questionId: string,
+  userId: string,
+  signal?: AbortSignal,
+) => {
+  const params = new URLSearchParams({ question_id: questionId, user_id: userId });
+  return request<ExerciseResponseState>(
+    `/exercises/${encodeURIComponent(packageId)}/resources/${encodeURIComponent(resourceId)}`
+      + `/responses?${params.toString()}`,
+    { signal },
+  );
+};
+
+export const putExerciseDraft = (
+  packageId: string,
+  resourceId: string,
+  questionId: string,
+  payload: { user_id: string; answer_json: ExerciseResponseAnswer },
+  signal?: AbortSignal,
+) =>
+  request<unknown>(
+    `/exercises/${encodeURIComponent(packageId)}/resources/${encodeURIComponent(resourceId)}`
+      + `/questions/${encodeURIComponent(questionId)}/draft`,
+    { method: "PUT", body: JSON.stringify(payload), signal },
+  );
+
+export const submitExerciseResponse = (
+  packageId: string,
+  resourceId: string,
+  questionId: string,
+  payload: {
+    user_id: string;
+    session_id: string;
+    answer_json: ExerciseResponseAnswer;
+    client_submission_id?: string;
+    linked_code_attempt_id?: string;
+  },
+  signal?: AbortSignal,
+) =>
+  request<ExerciseSubmission>(
+    `/exercises/${encodeURIComponent(packageId)}/resources/${encodeURIComponent(resourceId)}`
+      + `/questions/${encodeURIComponent(questionId)}/submit`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  );
+
 // ---------------------------------------------------------------------------
 // Jobs (Phase 5.2)
 // ---------------------------------------------------------------------------
+
+type JobSummaryWire = Omit<JobSummary, "error"> & { error?: unknown };
+type JobDetailWire = Omit<JobDetail, "error"> & { error?: unknown };
+type JobListResponseWire = Omit<JobListResponse, "items"> & {
+  items: JobSummaryWire[];
+};
+
+function adaptJobSummary(job: JobSummaryWire): JobSummary {
+  return { ...job, error: normalizeStructuredError(job.error) };
+}
 
 export const listJobs = (
   userId: string,
@@ -327,18 +411,24 @@ export const listJobs = (
   if (opts.limit) params.set("limit", String(opts.limit));
   if (opts.offset) params.set("offset", String(opts.offset));
   const qs = params.toString();
-  return request<JobListResponse>(
+  return request<JobListResponseWire>(
     `/jobs/${encodeURIComponent(userId)}${qs ? `?${qs}` : ""}`,
-  );
+  ).then((response) => ({
+    ...response,
+    items: response.items.map(adaptJobSummary),
+  }));
 };
 
 export const getJobStats = (userId: string) =>
   request<JobStatsResponse>(`/jobs/${encodeURIComponent(userId)}/stats`);
 
 export const getJobDetail = (userId: string, jobId: string) =>
-  request<JobDetail>(
+  request<JobDetailWire>(
     `/jobs/${encodeURIComponent(userId)}/${encodeURIComponent(jobId)}`,
-  );
+  ).then((detail) => ({
+    ...detail,
+    error: normalizeStructuredError(detail.error),
+  }));
 
 export const cancelJob = (userId: string, jobId: string) =>
   request<{ cancelled: boolean; job_id: string }>(
@@ -477,6 +567,17 @@ export const retryJob = (userId: string, jobId: string, resourceTypes: string[])
     },
   );
 
+export const retryVideoRender = (
+  userId: string,
+  packageId: string,
+  resourceId: string,
+) =>
+  request<VideoRetryResponse>(
+    `/resources/packages/${encodeURIComponent(userId)}/${encodeURIComponent(packageId)}`
+      + `/resources/${encodeURIComponent(resourceId)}/retry-video`,
+    { method: "POST" },
+  );
+
 // ---------------------------------------------------------------------------
 // Re-exports
 // ---------------------------------------------------------------------------
@@ -506,6 +607,7 @@ export interface ConversationSummary {
   title: string;
   message_count: number;
   last_message_preview: string;
+  web_search_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -559,20 +661,47 @@ export const getConversation = (userId: string, sessionId: string) =>
 export interface ConversationAggregate {
   conversation: ConversationDetail;
   jobs: JobSummary[];
-  packages: ResourcePackageSummary[];
+  packages: ResourcePackage[];
+  profile_summary: Record<string, unknown>;
+  path_summary: Record<string, unknown>;
+  recovery_warnings: RecoveryWarning[];
+}
+
+type ConversationAggregateWire = Omit<ConversationAggregate, "jobs"> & {
+  jobs: JobSummaryWire[];
+};
+
+export interface RecoveryWarning {
+  code:
+    | "migrated_ownership"
+    | "interrupted_job_repaired"
+    | "missing_artifact"
+    | "recovery_association_missing";
+  message: string;
+  job_id?: string | null;
+  package_id?: string | null;
+  resource_id?: string | null;
+  artifact_key?: string | null;
 }
 
 export const getConversationAggregate = (
   userId: string,
   sessionId: string,
 ) =>
-  request<ConversationAggregate>(
+  request<ConversationAggregateWire>(
     `/conversations/${encodeURIComponent(sessionId)}/aggregate?user_id=${encodeURIComponent(userId)}`,
-  );
+  ).then((aggregate) => ({
+    ...aggregate,
+    jobs: aggregate.jobs.map(adaptJobSummary),
+  }));
 
 export const createConversation = (
   userId: string,
-  opts: { session_id?: string; title?: string } = {},
+  opts: {
+    session_id?: string;
+    title?: string;
+    web_search_enabled?: boolean;
+  } = {},
 ) =>
   request<ConversationSummary>("/conversations", {
     method: "POST",
@@ -592,6 +721,19 @@ export const renameConversation = (
     },
   );
 
+export const setConversationWebSearch = (
+  userId: string,
+  sessionId: string,
+  enabled: boolean,
+) =>
+  request<ConversationSummary>(
+    `/conversations/${encodeURIComponent(sessionId)}/settings?user_id=${encodeURIComponent(userId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ web_search_enabled: enabled }),
+    },
+  );
+
 export const deleteConversation = (userId: string, sessionId: string) =>
   request<{ deleted: boolean; session_id: string }>(
     `/conversations/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}`,
@@ -601,13 +743,7 @@ export const deleteConversation = (userId: string, sessionId: string) =>
 export const appendConversationMessage = (
   userId: string,
   sessionId: string,
-  msg: {
-    role: "user" | "assistant" | "system";
-    content: string;
-    job_id?: string | null;
-    capability?: string | null;
-    metadata?: Record<string, unknown>;
-  },
+  msg: ConversationMessageInput,
 ) =>
   request<ConversationMessage>(
     `/conversations/${encodeURIComponent(sessionId)}/messages?user_id=${encodeURIComponent(userId)}`,

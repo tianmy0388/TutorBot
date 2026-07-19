@@ -19,21 +19,24 @@ that produced it.
 
 from __future__ import annotations
 
+import json
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from tutor.services.artifacts import UnsafeArtifactKey, resolve_artifact_key
 
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
 
-class ResourceType(str, Enum):
+class ResourceType(str, Enum):  # noqa: UP042 - persisted enum compatibility
     """All supported resource types (≥6 per idea.md)."""
 
     DOCUMENT = "document"      # 课程讲解文档 (Markdown)
@@ -45,12 +48,41 @@ class ResourceType(str, Enum):
     PPT = "ppt"                # PPT 教案 (optional, Phase 5)
 
 
-class ReviewVerdict(str, Enum):
+class ReviewVerdict(str, Enum):  # noqa: UP042 - persisted enum compatibility
     """Outcome of a quality review."""
 
     PASS = "pass"
     REVISE = "revise"
     REJECT = "reject"
+
+
+class ArtifactRef(BaseModel):
+    """Portable artifact manifest entry.
+
+    ``path`` is accepted only as a backward-compatible input alias. Relative
+    legacy values are promoted to ``artifact_key`` and are never emitted.
+    Absolute legacy values remain readable by the resource endpoint, which has
+    the data-directory context required to validate them safely.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    artifact_key: str | None = None
+    kind: str = ""
+    path: str | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _promote_legacy_relative_path(self) -> ArtifactRef:
+        if self.artifact_key is None and self.path:
+            try:
+                candidate = resolve_artifact_key(self.path, Path("."))
+            except UnsafeArtifactKey:
+                return self
+            self.artifact_key = candidate.relative_to(Path(".").resolve()).as_posix()
+        if self.artifact_key is not None:
+            resolve_artifact_key(self.artifact_key, Path("."))
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +109,16 @@ class MindMapResource(BaseModel):
     mermaid_dsl: str = ""  # raw ```mermaid ...``` block (without fences)
     central_topic: str = ""
     branch_count: int = 0
+    outline: list[MindMapOutlineItem] = Field(default_factory=list)
+
+
+class MindMapOutlineItem(BaseModel):
+    """One accessible, indentation-derived item in a Mermaid mind map."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    depth: int = Field(ge=0)
+    label: str
 
 
 class ExerciseOption(BaseModel):
@@ -86,6 +128,74 @@ class ExerciseOption(BaseModel):
 
     label: str  # "A" / "B" / ...
     text: str
+
+
+class CodeTestCase(BaseModel):
+    """One server-owned test for a generated Python code question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    call: str = Field(min_length=1, max_length=2000)
+    expected_json: Any
+
+    @field_validator("expected_json")
+    @classmethod
+    def _expected_must_be_standard_json(cls, value: Any) -> Any:
+        _validate_standard_json_value(value)
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        try:
+            encoded.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("expected_json strings must be valid UTF-8") from exc
+        decoded = json.loads(encoded)
+        if json.dumps(
+            decoded,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) != encoded:
+            raise ValueError("expected_json must round-trip deterministically")
+        return value
+
+
+def _validate_standard_json_value(value: Any) -> None:
+    """Reject Python-only values before tests reach the subprocess wrapper."""
+    if value is None or type(value) in {bool, int, str}:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("expected_json numbers must be finite")
+        return
+    if type(value) is list:
+        for item in value:
+            _validate_standard_json_value(item)
+        return
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("expected_json object keys must be strings")
+            _validate_standard_json_value(item)
+        return
+    raise ValueError("expected_json must contain only standard JSON values")
+
+
+class CodeSpec(BaseModel):
+    """Executable contract persisted with a Python code question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    language: Literal["python"] = "python"
+    starter_code: str = Field(max_length=131072)
+    tests: list[CodeTestCase] = Field(min_length=1, max_length=50)
+    time_limit_seconds: int = Field(default=5, ge=1, le=10)
 
 
 class ExerciseQuestion(BaseModel):
@@ -100,8 +210,12 @@ class ExerciseQuestion(BaseModel):
     question: str
     options: list[ExerciseOption] = Field(default_factory=list)
     answer: Any = None  # string, list[str], bool, or code string
+    accepted_answers: list[str] = Field(default_factory=list)
     explanation: str = ""
     estimated_seconds: int = 60
+    # Optional keeps legacy packages readable. Submission validates the
+    # executable contract and returns CODE_SPEC_UNAVAILABLE when absent.
+    code_spec: CodeSpec | None = None
 
     @field_validator("difficulty")
     @classmethod
@@ -132,6 +246,24 @@ class ReadingResource(BaseModel):
     estimated_reading_minutes: int = 5
 
 
+class RepairCandidateFailure(BaseModel):
+    """Bounded diagnostic retained for the next private repair attempt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error_code: str = Field(max_length=120)
+    summary: str = Field(max_length=240)
+    traceback_tail: list[str] = Field(default_factory=list, max_length=40)
+    log_artifact_key: str | None = Field(default=None, max_length=500)
+
+    @field_validator("traceback_tail")
+    @classmethod
+    def _bound_traceback_lines(cls, lines: list[str]) -> list[str]:
+        if any(len(line) > 500 for line in lines):
+            raise ValueError("repair candidate traceback lines must be at most 500 characters")
+        return lines
+
+
 class VideoResource(BaseModel):
     """Payload for ``type=video``. Holds Manim source + (optional) render result.
 
@@ -146,12 +278,23 @@ class VideoResource(BaseModel):
     manim_code: str = ""
     scene_class: str = "GeneratedScene"
     video_url: str | None = None
+    artifact_key: str | None = None
     # Local filesystem path (2026-06-21 plan, for archival / download).
     mp4_path: str | None = None
     thumbnail_url: str | None = None
     duration_seconds: int = 0
     render_status: Literal["pending", "rendering", "ready", "failed"] = "pending"
+    render_job_id: str | None = None
     render_error: str | None = None
+    render_error_code: str | None = None
+    render_failure: dict[str, Any] | None = None
+    source_revision: int = Field(default=0, ge=0)
+    repair_status: Literal["pending", "running", "ready", "failed"] | None = None
+    repair_job_id: str | None = None
+    repair_history: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
+    repair_candidate_code: str | None = Field(default=None, max_length=100_000)
+    repair_candidate_failure: RepairCandidateFailure | None = None
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
 
 
 class CodeResource(BaseModel):
@@ -175,6 +318,7 @@ class CodeResource(BaseModel):
     language: str = "python"
     code: str = ""
     explanation: str = ""
+    output_kind: Literal["text", "figure"] = "text"
     execution_status: Literal["not_run", "pending", "success", "failed", "timeout"] = "not_run"
     stdout: str = ""
     stderr: str = ""
@@ -183,7 +327,7 @@ class CodeResource(BaseModel):
     execution_python: str = ""
     dependency_versions: dict[str, str] = Field(default_factory=dict)
     duration_seconds: float = 0.0
-    artifacts: list[dict[str, str]] = Field(default_factory=dict)  # type: ignore[type-arg]
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
 
 
 class PPTResource(BaseModel):
@@ -193,6 +337,7 @@ class PPTResource(BaseModel):
 
     slide_count: int = 0
     pptx_path: str | None = None
+    artifact_key: str | None = None
     slide_titles: list[str] = Field(default_factory=list)
 
 
@@ -224,7 +369,7 @@ class Resource(BaseModel):
     confidence_score: float = 0.7
     topic: str = ""
     tags: list[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------
@@ -272,7 +417,7 @@ class Resource(BaseModel):
         return max(0.0, min(1.0, float(v)))
 
     @model_validator(mode="after")
-    def _validate_format_specific(self) -> "Resource":
+    def _validate_format_specific(self) -> Resource:
         expected_type = self.type
         expected_key = _format_specific_key(expected_type)
         if not self.format_specific:
@@ -318,7 +463,7 @@ class ResourceReview(BaseModel):
     issues: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     reviewer: str = "QualityReviewerAgent"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_validator("quality_score")
     @classmethod
@@ -344,9 +489,20 @@ class ResourcePackage(BaseModel):
     target_profile_snapshot: dict[str, Any] = Field(default_factory=dict)
     # ^ snapshot of LearnerProfile.to_summary() at generation time
     learning_path_summary: dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     generated_by: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def originating_job_id(self) -> str | None:
+        """Return the generation job explicitly associated with this package."""
+        value = self.metadata.get("job_id")
+        return str(value) if value else None
+
+    def associate_originating_job(self, job_id: str | None) -> None:
+        """Persist a typed association using the compatible metadata field."""
+        if job_id:
+            self.metadata["job_id"] = str(job_id)
 
     # ------------------------------------------------------------------
     # Convenience
@@ -434,15 +590,173 @@ def build_resource(
     )
 
 
+def public_resource_dump(resource: Resource) -> dict[str, Any]:
+    """Return the browser-safe projection of one resource.
+
+    Persisted code specs remain complete for server-side judging. Browser
+    projections intentionally omit reference answers, test expressions and
+    expected values while retaining enough metadata to render the editor.
+    """
+    data = resource.model_dump(mode="json")
+    if resource.type == ResourceType.VIDEO:
+        from tutor.services.manim_render.executor import (
+            safe_failure_summary,
+            sanitize_public_diagnostic,
+            tail_lines,
+        )
+
+        format_specific = dict(data.get("format_specific") or {})
+        format_specific.pop("repair_candidate_code", None)
+        format_specific.pop("repair_candidate_failure", None)
+        format_specific["repair_history"] = _public_repair_history(
+            format_specific.get("repair_history")
+        )
+        failure = format_specific.get("render_failure")
+        if isinstance(failure, dict):
+            fallback = "渲染流程未生成可播放视频。"
+            summary = safe_failure_summary(
+                str(failure.get("summary") or fallback),
+                fallback=fallback,
+            )
+            raw_tail = failure.get("traceback_tail")
+            diagnostic_text = "\n".join(
+                str(line) for line in raw_tail
+            ) if isinstance(raw_tail, list) else str(raw_tail or "")
+            error_code = sanitize_public_diagnostic(
+                str(failure.get("error_code") or "internal_error")
+            )[:120]
+            public_failure: dict[str, Any] = {
+                "error_code": error_code,
+                "summary": summary,
+                "traceback_tail": list(tail_lines(diagnostic_text)),
+            }
+            log_key = _safe_manim_log_artifact_key(
+                failure.get("log_artifact_key")
+            )
+            if log_key:
+                public_failure["log_artifact_key"] = log_key
+            format_specific["render_failure"] = public_failure
+            format_specific["render_error_code"] = error_code
+            format_specific["render_error"] = summary
+        elif format_specific.get("render_status") == "failed":
+            # Pre-structured Manim records stored the complete host traceback
+            # in render_error. Never expose that legacy blob to a browser.
+            format_specific["render_error_code"] = sanitize_public_diagnostic(
+                str(
+                    format_specific.get("render_error_code")
+                    or "legacy_render_failure"
+                )
+            )[:120]
+            format_specific["render_error"] = "渲染流程未生成可播放视频。"
+        data["format_specific"] = format_specific
+        return data
+    if resource.type != ResourceType.EXERCISE:
+        return data
+    format_specific = dict(data.get("format_specific") or {})
+    questions = format_specific.get("questions")
+    if not isinstance(questions, list):
+        data["content"] = ""
+        return data
+    public_questions: list[Any] = []
+    for raw in questions:
+        if not isinstance(raw, dict):
+            public_questions.append(raw)
+            continue
+        question = dict(raw)
+        question.pop("answer", None)
+        question.pop("accepted_answers", None)
+        question.pop("explanation", None)
+        if raw.get("type") != "code":
+            public_questions.append(question)
+            continue
+        spec = question.get("code_spec")
+        if isinstance(spec, dict):
+            tests = spec.get("tests")
+            question["code_spec"] = {
+                "language": spec.get("language", "python"),
+                "starter_code": spec.get("starter_code", ""),
+                "time_limit_seconds": spec.get("time_limit_seconds", 5),
+                "test_count": len(tests) if isinstance(tests, list) else 0,
+            }
+        public_questions.append(question)
+    format_specific["questions"] = public_questions
+    data["format_specific"] = format_specific
+    # Generated exercise Markdown historically embeds answers and explanations.
+    # The structured question/options projection is the only browser surface.
+    data["content"] = ""
+    return data
+
+
+def _public_repair_history(value: Any) -> list[dict[str, Any]]:
+    """Project persisted repair attempts to a bounded browser-safe shape."""
+    from tutor.services.manim_render.executor import sanitize_public_diagnostic
+
+    if not isinstance(value, list):
+        return []
+    projected: list[dict[str, Any]] = []
+    for raw in value[-10:]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            failed_revision = max(0, int(raw.get("failed_revision") or 0))
+        except (TypeError, ValueError):
+            failed_revision = 0
+        record: dict[str, Any] = {
+            "job_id": sanitize_public_diagnostic(
+                str(raw.get("job_id") or "")
+            )[:96],
+            "failed_revision": failed_revision,
+            "status": sanitize_public_diagnostic(
+                str(raw.get("status") or "failed")
+            )[:20],
+        }
+        if raw.get("error_code"):
+            record["error_code"] = sanitize_public_diagnostic(
+                str(raw["error_code"])
+            )[:120]
+        if raw.get("summary"):
+            record["summary"] = sanitize_public_diagnostic(
+                str(raw["summary"])
+            )[:200]
+        log_key = _safe_manim_log_artifact_key(raw.get("log_artifact_key"))
+        if log_key:
+            record["log_artifact_key"] = log_key
+        projected.append(record)
+    return projected
+
+
+def _safe_manim_log_artifact_key(value: Any) -> str:
+    key = str(value or "")
+    if not key.startswith("manim_logs/"):
+        return ""
+    try:
+        resolve_artifact_key(key, Path("."))
+    except UnsafeArtifactKey:
+        return ""
+    return key
+
+
+def public_package_dump(package: ResourcePackage) -> dict[str, Any]:
+    """Return a package with every child passed through public projection."""
+    data = package.model_dump(mode="json", exclude={"resources"})
+    data["resources"] = [public_resource_dump(resource) for resource in package.resources]
+    return data
+
+
 __all__ = [
+    "ArtifactRef",
     "CodeResource",
+    "CodeSpec",
+    "CodeTestCase",
     "DocumentResource",
     "ExerciseOption",
     "ExerciseQuestion",
     "ExerciseResource",
+    "MindMapOutlineItem",
     "MindMapResource",
     "PPTResource",
     "ReadingResource",
+    "RepairCandidateFailure",
     "Resource",
     "ResourcePackage",
     "ResourceReview",
@@ -450,4 +764,6 @@ __all__ = [
     "ReviewVerdict",
     "VideoResource",
     "build_resource",
+    "public_package_dump",
+    "public_resource_dump",
 ]

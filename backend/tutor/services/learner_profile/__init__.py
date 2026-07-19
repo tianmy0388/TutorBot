@@ -16,6 +16,11 @@ Modules
 - :mod:`tutor.services.learner_profile.builder`  — High-level orchestration
 """
 
+from tutor.services.learner_profile.builder import (
+    ProfileBuilder,
+    get_profile_builder,
+    reset_profile_builder,
+)
 from tutor.services.learner_profile.schema import (
     CognitiveStyle,
     ErrorPattern,
@@ -26,6 +31,7 @@ from tutor.services.learner_profile.schema import (
     ModalityPreferences,
     MotivationProfile,
     PaceProfile,
+    PersistedLearningPath,
     ProfileDiff,
     Urgency,
 )
@@ -36,11 +42,6 @@ from tutor.services.learner_profile.store import (
     _close_profile_store_sync,
     get_profile_store,
     reset_profile_store,
-)
-from tutor.services.learner_profile.builder import (
-    ProfileBuilder,
-    get_profile_builder,
-    reset_profile_builder,
 )
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "ModalityPreferences",
     "MotivationProfile",
     "PaceProfile",
+    "PersistedLearningPath",
     "ProfileBuilder",
     "ProfileDiff",
     "ProfileEvent",

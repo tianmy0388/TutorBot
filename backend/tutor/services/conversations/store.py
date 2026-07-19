@@ -17,13 +17,12 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from loguru import logger
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
     DateTime,
     Integer,
@@ -51,6 +50,7 @@ class ConversationRow(_Base):  # type: ignore[misc]
     last_message_preview = Column(String(280), nullable=False, default="")
     created_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
+    web_search_enabled = Column(Boolean, nullable=False, default=False)
 
 
 class MessageRow(_Base):  # type: ignore[misc]
@@ -110,6 +110,17 @@ class ConversationStore:
             self._write_lock = asyncio.Lock()
         async with engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
+            columns = {
+                str(row[1])
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA table_info(conversations)")
+                ).fetchall()
+            }
+            if "web_search_enabled" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE conversations ADD COLUMN "
+                    "web_search_enabled BOOLEAN NOT NULL DEFAULT 0"
+                )
 
     async def close(self) -> None:
         if self._engine is not None:
@@ -131,6 +142,7 @@ class ConversationStore:
         session_id: str,
         user_id: str,
         title: str | None = None,
+        web_search_enabled: bool = False,
     ) -> Conversation:
         await self.init()
         async with self._session() as session:
@@ -141,13 +153,14 @@ class ConversationStore:
                         f"session {session_id} belongs to a different user"
                     )
                 return _row_to_conversation(row)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             row = ConversationRow(
                 session_id=session_id,
                 user_id=user_id,
                 title=title or "",
                 message_count=0,
                 last_message_preview="",
+                web_search_enabled=bool(web_search_enabled),
                 created_at=now,
                 updated_at=now,
             )
@@ -180,7 +193,6 @@ class ConversationStore:
                 .offset(offset)
             )
             rows = (await session.execute(stmt)).scalars().all()
-            has_more = len(rows) > limit
             rows = rows[:limit]
             count_stmt = select(ConversationRow).where(
                 ConversationRow.user_id == user_id
@@ -198,31 +210,44 @@ class ConversationStore:
                 return None
             if title is not None:
                 row.title = title
-            row.updated_at = datetime.now(timezone.utc)
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+            return _row_to_conversation(row)
+
+    async def update_web_search_enabled(
+        self, session_id: str, *, enabled: bool
+    ) -> Conversation | None:
+        """Persist only the web-search setting for one conversation."""
+        await self.init()
+        async with self._session() as session:
+            row = await session.get(ConversationRow, session_id)
+            if row is None:
+                return None
+            row.web_search_enabled = bool(enabled)
+            row.updated_at = datetime.now(UTC)
             await session.commit()
             return _row_to_conversation(row)
 
     async def delete(self, session_id: str) -> bool:
         await self.init()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._session() as session:
-                row = await session.get(ConversationRow, session_id)
-                if row is None:
-                    return False
-                # Cascade messages manually.
-                msgs = (
-                    await session.execute(
-                        select(MessageRow).where(
-                            MessageRow.session_id == session_id
-                        )
+        async with self._write_lock, self._session() as session:
+            row = await session.get(ConversationRow, session_id)
+            if row is None:
+                return False
+            # Cascade messages manually.
+            msgs = (
+                await session.execute(
+                    select(MessageRow).where(
+                        MessageRow.session_id == session_id
                     )
-                ).scalars().all()
-                for m in msgs:
-                    await session.delete(m)
-                await session.delete(row)
-                await session.commit()
-                return True
+                )
+            ).scalars().all()
+            for m in msgs:
+                await session.delete(m)
+            await session.delete(row)
+            await session.commit()
+            return True
 
     # ---- messages -------------------------------------------------------
 
@@ -234,40 +259,39 @@ class ConversationStore:
         the conversation does not exist."""
         await self.init()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._session() as session:
-                conv = await session.get(ConversationRow, session_id)
-                if conv is None:
-                    return None
-                if not msg.id:
-                    msg = msg.model_copy(update={"id": uuid.uuid4().hex})
-                if msg.created_at is None:
-                    msg = msg.model_copy(
-                        update={"created_at": datetime.now(timezone.utc)}
-                    )
-                m = MessageRow(
-                    id=msg.id,
-                    session_id=session_id,
-                    role=msg.role,
-                    content=msg.content,
-                    job_id=msg.job_id,
-                    capability=msg.capability,
-                    created_at=msg.created_at,
-                    msg_metadata=msg.metadata,
+        async with self._write_lock, self._session() as session:
+            conv = await session.get(ConversationRow, session_id)
+            if conv is None:
+                return None
+            if not msg.id:
+                msg = msg.model_copy(update={"id": uuid.uuid4().hex})
+            if msg.created_at is None:
+                msg = msg.model_copy(
+                    update={"created_at": datetime.now(UTC)}
                 )
-                session.add(m)
-                conv.message_count = (conv.message_count or 0) + 1
-                conv.last_message_preview = (msg.content or "")[:280]
-                # Auto-title from the first user message.
-                if (
-                    not conv.title
-                    and msg.role == "user"
-                    and msg.content.strip()
-                ):
-                    conv.title = msg.content.strip()[:60]
-                conv.updated_at = datetime.now(timezone.utc)
-                await session.commit()
-                return _to_message(m)
+            m = MessageRow(
+                id=msg.id,
+                session_id=session_id,
+                role=msg.role,
+                content=msg.content,
+                job_id=msg.job_id,
+                capability=msg.capability,
+                created_at=msg.created_at,
+                msg_metadata=msg.metadata,
+            )
+            session.add(m)
+            conv.message_count = (conv.message_count or 0) + 1
+            conv.last_message_preview = (msg.content or "")[:280]
+            # Auto-title from the first user message.
+            if (
+                not conv.title
+                and msg.role == "user"
+                and msg.content.strip()
+            ):
+                conv.title = msg.content.strip()[:60]
+            conv.updated_at = datetime.now(UTC)
+            await session.commit()
+            return _to_message(m)
 
     async def list_messages(
         self, session_id: str
@@ -339,6 +363,7 @@ def _row_to_conversation(row: ConversationRow) -> Conversation:
         title=row.title or "",
         message_count=row.message_count or 0,
         last_message_preview=row.last_message_preview or "",
+        web_search_enabled=bool(row.web_search_enabled),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

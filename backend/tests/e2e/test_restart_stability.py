@@ -15,30 +15,33 @@ the on-disk SQLite files.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 from httpx import ASGITransport
-
 from tutor.api.main import create_app
+from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
+from tutor.core.context import UnifiedContext
+from tutor.core.stream_bus import StreamBus
 from tutor.services.config.settings import reset_settings_cache
 from tutor.services.conversations import reset_conversation_store
 from tutor.services.jobs import (
     JobStatus,
-    get_job_runner,
     get_job_store,
     reset_job_runner,
     reset_job_store,
 )
 from tutor.services.jobs.contracts import JobResultContract
+from tutor.services.jobs.follow_up import FollowUpScheduler
+from tutor.services.jobs.runner import JobRunner
 from tutor.services.jobs.schema import Job
+from tutor.services.jobs.store import JobStore
 from tutor.services.knowledge_base import (
     KnowledgeBaseService,
     seed_default_libraries,
 )
 from tutor.services.knowledge_base.store import (
-    get_kb_store,
     reset_kb_store,
 )
 
@@ -48,6 +51,78 @@ def _app_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     )
+
+
+class _RestartedVideoCapability:
+    async def run(
+        self, context: UnifiedContext, bus: StreamBus
+    ) -> CapabilityResult:
+        return CapabilityResult(
+            assistant_message="恢复后视频完成",
+            payload={"resource_id": context.metadata["resource_id"]},
+        )
+
+
+class _RestartCapabilities:
+    def get(self, name: str):
+        return _RestartedVideoCapability() if name == "video_render" else None
+
+
+@pytest.mark.asyncio
+async def test_queued_follow_up_child_resumes_after_fresh_runner(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "restart-child.db"
+    first_store = JobStore(db_path)
+    await first_store.init()
+    parent = Job(
+        job_id="restart-parent",
+        user_id="local-user",
+        session_id="restart-session",
+        status=JobStatus.SUCCEEDED,
+    )
+    await first_store.save(parent)
+    child = (
+        await FollowUpScheduler(first_store).enqueue(
+            parent.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="video_render",
+                    payload={"package_id": "pkg-r", "resource_id": "video-r"},
+                    dedupe_key="video:pkg-r:video-r",
+                ),
+            ),
+        )
+    )[0]
+    await first_store.close()
+
+    fresh_store = JobStore(db_path)
+    await fresh_store.init()
+    runner = JobRunner(
+        job_store=fresh_store,
+        capability_registry=_RestartCapabilities(),  # type: ignore[arg-type]
+    )
+    from tutor.services.jobs import follow_up as follow_up_module
+
+    monkeypatch.setattr(
+        follow_up_module,
+        "build_follow_up_capability",
+        lambda kind: _RestartedVideoCapability(),
+    )
+    assert await runner.resume_pending() == 1
+    for _ in range(100):
+        durable = await fresh_store.get(child.job_id)
+        if durable is not None and durable.status == JobStatus.SUCCEEDED:
+            break
+        import asyncio
+
+        await asyncio.sleep(0.02)
+    else:
+        raise AssertionError("durable child was not resumed")
+    assert durable.result["assistant_message"] == "恢复后视频完成"
+    assert (await fresh_store.get(parent.job_id)).status == JobStatus.SUCCEEDED
+    await fresh_store.close()
 
 
 @pytest.mark.asyncio
@@ -69,7 +144,7 @@ async def test_jobs_kb_and_conversations_survive_restart(
     # ---- Phase 1: write everything -------------------------------
     seed_default_libraries(KnowledgeBaseService())
     job_id = f"job_{uuid.uuid4().hex[:12]}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     contract = JobResultContract(
         job_id=job_id,
         capability="tutoring",
@@ -78,7 +153,7 @@ async def test_jobs_kb_and_conversations_survive_restart(
     )
     job = Job(
         job_id=job_id,
-        user_id="u1",
+        user_id="local-user",
         session_id="sess_restart",
         capability="tutoring",
         status=JobStatus.SUCCEEDED,

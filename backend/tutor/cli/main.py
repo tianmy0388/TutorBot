@@ -15,6 +15,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -23,6 +24,7 @@ from rich.table import Table
 from tutor import __version__
 from tutor.runtime import get_capability_registry, get_tool_registry
 from tutor.services.config.settings import get_settings
+from tutor.services.migration.local_single_user import run_local_migration
 
 app = typer.Typer(
     name="tutor",
@@ -139,6 +141,67 @@ def system_check_cmd() -> None:
     for k, v in rows:
         table.add_row(k, v)
     console.print(table)
+
+
+@app.command("migrate-local-data")
+def migrate_local_data_cmd(
+    repo_root: Path = typer.Option(
+        Path.cwd(),
+        "--repo-root",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="TutorBot 仓库根目录。",
+    ),
+    target_user_id: str = typer.Option(
+        "local-user",
+        "--target-user-id",
+        help="本地数据迁移后的规范用户 ID。",
+    ),
+    source_user_id: str | None = typer.Option(
+        None,
+        "--source-user-id",
+        help="仅迁移这个历史用户及其关联数据。",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="只列出源数据，不创建备份或写入文件。",
+    ),
+    relocate_from: list[Path] = typer.Option(
+        [],
+        "--relocate-from",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+        help="允许恢复绝对产物路径的旧仓库根目录；可重复指定。",
+    ),
+) -> None:
+    """盘点或安全合并历史本地数据目录。"""
+    try:
+        report = run_local_migration(
+            repo_root,
+            target_user_id,
+            dry_run=dry_run,
+            source_user_id=source_user_id,
+            relocate_from=relocate_from,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    console.print(f"mode: {'dry-run' if dry_run else 'write'}")
+    for source_dir in report.source_dirs:
+        console.print(f"source: {source_dir}")
+    for relocation_root in report.relocation_roots:
+        console.print(f"relocate_from: {relocation_root}")
+    console.print(f"target: {report.target_dir}")
+    console.print(f"users: {', '.join(report.discovered_users) or '(none)'}")
+    console.print(f"selected_user: {report.source_user_id or '(all discovered users)'}")
+    for unresolved_path in report.unresolved_paths:
+        console.print(f"unresolved_path: {unresolved_path}")
+    console.print(f"backup: {report.backup_dir or '(none)'}")
+    console.print(f"written_files: {report.written_files}")
 
 
 @app.command("chat")

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock
+import re
+from unittest.mock import MagicMock
 
 import pytest
-
 from tutor.agents.resource.code_sandbox import CodeSandboxAgent
 from tutor.agents.resource.content_expert import ContentExpertAgent
 from tutor.agents.resource.exercise_generator import ExerciseGeneratorAgent
@@ -159,13 +159,33 @@ async def test_exercise_generator_produces_tiered_questions():
             {"id": "q2", "tier": "advanced", "type": "short_answer",
              "difficulty": 3, "question": "解释 LSTM 的遗忘门",
              "answer": "控制上一时刻信息保留多少",
+             "accepted_answers": [
+                 "控制上一时刻信息保留多少",
+                 "决定保留多少过去信息",
+             ],
              "explanation": "f_t = σ(W_f · [h_{t-1}, x_t] + b_f)",
              "estimated_seconds": 120},
             {"id": "q3", "tier": "challenge", "type": "code",
-             "difficulty": 4, "question": "用 PyTorch 实现一个 LSTM 层",
-             "answer": "nn.LSTM(input_size, hidden_size)",
-             "explanation": "PyTorch 提供 nn.LSTM",
-             "estimated_seconds": 300},
+             "difficulty": 4, "question": "实现函数返回 LSTM 的门数量",
+             "answer": "def lstm_gate_count(): return 3",
+             "explanation": "遗忘门、输入门和输出门共三个门",
+             "estimated_seconds": 300,
+             "code_spec": {
+                 "language": "python",
+                 "starter_code": "def lstm_gate_count():\n    pass",
+                 "tests": [{
+                     "name": "返回三个门",
+                     "call": "lstm_gate_count()",
+                     "expected_json": 3,
+                 }],
+                 "time_limit_seconds": 5,
+             }},
+            {"id": "q4", "tier": "challenge", "type": "short_answer",
+             "difficulty": 4, "question": "请用自己的话解释 LSTM 的价值",
+             "answer": "(开放式回答)",
+             "accepted_answers": ["模型不应把开放题自动判分"],
+             "explanation": "根据学习者自己的表述人工评阅",
+             "estimated_seconds": 180},
         ]
     }, ensure_ascii=False))
     agent = ExerciseGeneratorAgent(llm=llm)
@@ -173,11 +193,20 @@ async def test_exercise_generator_produces_tiered_questions():
     resource = await agent.process(ctx, topic="LSTM")
     assert resource.type == ResourceType.EXERCISE
     assert "LSTM" in resource.title
-    assert len(resource.format_specific.get("questions", [])) == 3
+    assert len(resource.format_specific.get("questions", [])) == 4
     breakdown = resource.format_specific["difficulty_breakdown"]
     assert breakdown.get("basic") == 1
     assert breakdown.get("advanced") == 1
-    assert breakdown.get("challenge") == 1
+    assert breakdown.get("challenge") == 2
+    closed_short = resource.format_specific["questions"][1]
+    assert closed_short["accepted_answers"] == [
+        "控制上一时刻信息保留多少",
+        "决定保留多少过去信息",
+    ]
+    code_question = resource.format_specific["questions"][2]
+    assert code_question["code_spec"]["tests"][0]["expected_json"] == 3
+    open_short = resource.format_specific["questions"][3]
+    assert open_short["accepted_answers"] == []
 
 
 @pytest.mark.asyncio
@@ -568,6 +597,82 @@ async def test_code_sandbox_returns_failed_resource_when_empty():
 # ---------------------------------------------------------------------------
 
 
+def test_mindmap_normaliser_rewrites_bare_quoted_siblings():
+    """Bare quoted labels are invalid mindmap siblings in Mermaid 11."""
+    from tutor.agents.resource.multimedia import normalise_mindmap_dsl
+
+    reported_dsl = (
+        "mindmap\n"
+        "  root((反向传播))\n"
+        "    前向传播\n"
+        '    "激活函数 a=σ(z)"\n'
+        '    "计算损失 C"\n'
+    )
+
+    fixed, outline = normalise_mindmap_dsl(reported_dsl)
+
+    assert "root((反向传播))" in fixed
+    assert 'node_4["激活函数 a=σ(z)"]' in fixed
+    assert not re.search(r'^\s*"', fixed, re.MULTILINE)
+    assert [item.label for item in outline][-2:] == ["激活函数 a=σ(z)", "计算损失 C"]
+
+
+def test_mindmap_normaliser_derives_hierarchy_from_indent_transitions():
+    from tutor.agents.resource.multimedia import normalise_mindmap_dsl
+
+    fixed, outline = normalise_mindmap_dsl(
+        "mindmap\n"
+        "    root((Topic))\n"
+        "        Four-space child\n"
+        "            Wide grandchild\n"
+        "        Sibling\n"
+    )
+
+    assert fixed.splitlines() == [
+        "mindmap",
+        "  root((Topic))",
+        '    node_3["Four-space child"]',
+        '      node_4["Wide grandchild"]',
+        '    node_5["Sibling"]',
+    ]
+    assert [(item.depth, item.label) for item in outline] == [
+        (0, "Topic"),
+        (1, "Four-space child"),
+        (2, "Wide grandchild"),
+        (1, "Sibling"),
+    ]
+
+
+def test_mindmap_normaliser_preserves_supported_shapes_and_disambiguates_ids():
+    from tutor.agents.resource.multimedia import normalise_mindmap_dsl
+
+    fixed, outline = normalise_mindmap_dsl(
+        "mindmap\n"
+        "  root((Topic))\n"
+        '    node_9["Existing"]\n'
+        "    rounded(Rounded)\n"
+        "    circle((Circle))\n"
+        "    bang))Bang((\n"
+        "    cloud)Cloud(\n"
+        "    hex{{Hexagon}}\n"
+        '    "Quoted \\"label\\" and \\\\ slash"\n'
+        "    arbitrary --> expression\n"
+    )
+
+    assert "node_9[\"Existing\"]" in fixed
+    assert "rounded(Rounded)" in fixed
+    assert "circle((Circle))" in fixed
+    assert "bang))Bang((" in fixed
+    assert "cloud)Cloud(" in fixed
+    assert "hex{{Hexagon}}" in fixed
+    assert 'node_9_9["Quoted \\\"label\\\" and \\\\ slash"]' in fixed
+    assert 'node_10["arbitrary --> expression"]' in fixed
+    assert [item.label for item in outline][-2:] == [
+        'Quoted "label" and \\ slash',
+        "arbitrary --> expression",
+    ]
+
+
 def test_sanitize_mermaid_dsl_does_not_wrap_parens():
     """2026-06-22 fix (Task 8): the previous sanitizer over-wrapped
     any line containing parens — including valid mindmap root nodes
@@ -658,6 +763,7 @@ async def test_code_sandbox_runs_simple_code():
     # Code was executed (since short)
     assert resource.format_specific["execution_status"] in ("success", "failed")
     assert "print" in resource.format_specific["code"]
+    assert resource.format_specific["output_kind"] == "text"
 
 
 @pytest.mark.asyncio

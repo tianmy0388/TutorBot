@@ -14,7 +14,6 @@ This is the entry point the rest of Tutor should use:
 from __future__ import annotations
 
 import threading
-from functools import lru_cache
 from typing import Any
 
 import networkx as nx
@@ -40,9 +39,12 @@ class KnowledgeGraphService:
         self,
         loader: KnowledgeGraphLoader | None = None,
         planner: KGPathPlanner | None = None,
+        *,
+        default_course: str | None = None,
     ) -> None:
         self.loader = loader or KnowledgeGraphLoader()
         self.planner = planner or KGPathPlanner()
+        self._default_course = default_course
 
     # ------------------------------------------------------------------
     # Course discovery
@@ -56,9 +58,13 @@ class KnowledgeGraphService:
 
     def default_course(self) -> str:
         """Return the configured default course (or first available)."""
-        settings = get_settings()
-        if self.has_course(settings.kb_default):
-            return settings.kb_default
+        configured = (
+            self._default_course
+            if self._default_course is not None
+            else get_settings().kb_default
+        )
+        if self.has_course(configured):
+            return configured
         courses = self.list_courses()
         return courses[0] if courses else ""
 

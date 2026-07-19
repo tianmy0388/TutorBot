@@ -12,6 +12,7 @@ the package can be persisted (Phase 5) and streamed to the frontend.
 """
 
 from tutor.services.resource_package.schema import (
+    ArtifactRef,
     CodeResource,
     DocumentResource,
     ExerciseOption,
@@ -20,6 +21,7 @@ from tutor.services.resource_package.schema import (
     MindMapResource,
     PPTResource,
     ReadingResource,
+    RepairCandidateFailure,
     Resource,
     ResourcePackage,
     ResourceReview,
@@ -35,6 +37,7 @@ from tutor.services.resource_package.store import (
 )
 
 __all__ = [
+    "ArtifactRef",
     "CodeResource",
     "DocumentResource",
     "ExerciseOption",
@@ -43,6 +46,7 @@ __all__ = [
     "MindMapResource",
     "PPTResource",
     "ReadingResource",
+    "RepairCandidateFailure",
     "Resource",
     "ResourcePackage",
     "ResourcePackageStore",

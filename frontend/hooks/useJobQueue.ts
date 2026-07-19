@@ -41,6 +41,11 @@ export interface SubmitJobResult {
   created_at: string;
 }
 
+export interface SubmitJobContext {
+  sessionId?: string;
+  webSearchRequested?: boolean;
+}
+
 export interface UseJobQueueState {
   jobs: JobSummary[];
   total: number;
@@ -49,8 +54,16 @@ export interface UseJobQueueState {
   stats: JobStatsResponse | null;
   activeJobs: JobSummary[];
   refresh: () => Promise<void>;
-  submit: (text: string, capability?: string) => Promise<SubmitJobResult | null>;
-  subscribe: (jobId: string, capabilityHint?: string) => void;
+  submit: (
+    text: string,
+    capability?: string,
+    context?: SubmitJobContext,
+  ) => Promise<SubmitJobResult | null>;
+  subscribe: (
+    jobId: string,
+    capabilityHint?: string,
+    context?: Pick<SubmitJobContext, "sessionId">,
+  ) => void;
   cancel: (jobId: string) => Promise<boolean>;
   remove: (jobId: string) => Promise<boolean>;
 }
@@ -62,6 +75,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<JobStatsResponse | null>(null);
   const [tick, setTick] = useState(0); // bump on optimistic updates to re-render
+  const jobsRef = useRef<JobSummary[]>([]);
 
   // In-flight subscribers (so we can tear them down on unmount)
   const liveClients = useRef<Map<string, WsClient>>(new Map());
@@ -75,8 +89,12 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         listJobs(userId, { limit: 50 }),
         getJobStats(userId).catch(() => null),
       ]);
+      jobsRef.current = listResp.items;
       setJobs(listResp.items);
       setTotal(listResp.total);
+      for (const item of listResp.items) {
+        useTutorStore.getState().rehydrateJobFromDetail(item);
+      }
       if (statsResp) setStats(statsResp);
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -89,15 +107,29 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
     async (
       text: string,
       capability?: string,
+      context?: SubmitJobContext,
     ): Promise<SubmitJobResult | null> => {
       if (!text.trim() || typeof window === "undefined") return null;
+
+      // Freeze the turn context before the asynchronous WebSocket handshake.
+      // Navigation may change the global store before onOpen fires, but the
+      // submitted job must remain attached to the conversation it came from.
+      const stateAtSubmit = useTutorStore.getState();
+      const submittedSessionId =
+        context?.sessionId ?? stateAtSubmit.sessionId ?? "";
+      const submittedWebSearch =
+        context?.webSearchRequested ?? Boolean(stateAtSubmit.webSearchEnabled);
+      const submittedLanguage = stateAtSubmit.language || "zh";
+      const submittedKnowledgeBaseId =
+        stateAtSubmit.activeKnowledgeBaseId || "ai_introduction";
+      const submittedRagEnabled = stateAtSubmit.ragEnabled !== false;
+      const submittedRetrievalScope = stateAtSubmit.retrievalScope;
 
       return new Promise<SubmitJobResult | null>((resolve) => {
         const url = resolveWebSocketUrl();
         const client = new WsClient({
           url,
           onOpen: () => {
-            const state = useTutorStore.getState();
             // 2026-06-21 plan (D10): the new TutoringCapability /
             // RetrievalService pair reads ``retrieval_scope`` from the
             // job metadata. The shape is the canonical
@@ -109,45 +141,45 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
             // searching the entire corpus. The user-facing toggle
             // in the chat composer is the only place that should
             // resolve "none" → a real scope.
-            const ragEnabled = state.ragEnabled !== false;
-            const scopeObj = state.retrievalScope;
+            const ragEnabled = submittedRagEnabled;
+            const scopeObj = submittedRetrievalScope;
             let scopeWire: string;
             if (!ragEnabled) {
               scopeWire = "none";
             } else if (
-              scopeObj &&
-              (scopeObj.kind === "course" || scopeObj.kind === "library")
+              scopeObj?.kind === "course" ||
+              scopeObj?.kind === "library"
             ) {
               scopeWire = `${scopeObj.kind}:${scopeObj.id}`;
-            } else if (scopeObj && scopeObj.kind === "all") {
+            } else if (scopeObj?.kind === "all") {
               scopeWire = "all";
+            } else if (scopeObj?.kind === "none") {
+              scopeWire = "none";
             } else {
               scopeWire = "all";
             }
             // 2026-06-21 plan: the Job must carry the same session_id as
             // the active conversation so right-pane resources, jobs, and
             // messages are joined correctly when the user switches
-            // history. Read the latest value from the store inside the
-            // submit closure (not via a captured hook value, which would
-            // be stale on the second submit) and surface it both in the
+            // history. Capture the value for this turn before the async
+            // WebSocket handshake and surface it both in the
             // top-level ``session_id`` field (consumed by JobSubmit on
             // the backend) and in ``metadata.session_id`` for legacy
             // callers that read it from the envelope.
-            const currentSessionId = state.sessionId || "";
-            const activeKbId = state.activeKnowledgeBaseId || "ai_introduction";
             client.send(
               startJobMessage({
                 message: text,
                 userId: userId || "anonymous",
                 capability: capability || undefined,
-                sessionId: currentSessionId,
-                language: state.language || "zh",
+                sessionId: submittedSessionId,
+                language: submittedLanguage,
                 metadata: {
-                  knowledge_base_id: activeKbId,
+                  knowledge_base_id: submittedKnowledgeBaseId,
                   plan_id: "",
-                  session_id: currentSessionId,
+                  session_id: submittedSessionId,
                   retrieval_scope: scopeWire,
                   rag_enabled: ragEnabled,
+                  web_search_requested: submittedWebSearch,
                 },
               }),
             );
@@ -163,13 +195,15 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
               // Insert the job into the per-job reducer state so the
               // chat can immediately show a pending card and any
               // streamed events know where to land.
-              useTutorStore.getState().applyReducerEvent({
-                type: "submit",
-                job_id: result.job_id,
-                capability: result.capability,
-                message_preview:
-                  text.length > 60 ? text.slice(0, 60) + "…" : text,
-              });
+              if (useTutorStore.getState().sessionId === submittedSessionId) {
+                useTutorStore.getState().applyReducerEvent({
+                  type: "submit",
+                  job_id: result.job_id,
+                  capability: result.capability,
+                  message_preview:
+                    text.length > 60 ? text.slice(0, 60) + "…" : text,
+                });
+              }
               // Optimistic insert into local list (so the JobTray shows
               // the new pending job immediately, before refresh() runs).
               setJobs((prev) => {
@@ -177,12 +211,14 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
                 const optimistic: JobSummary = {
                   job_id: result.job_id,
                   user_id: userId || "anonymous",
-                  session_id: ev.session_id || "",
+                  session_id: ev.session_id || submittedSessionId,
                   capability: result.capability,
                   status: "pending",
                   message_preview:
                     text.length > 60 ? text.slice(0, 60) + "…" : text,
-                  language: useTutorStore.getState().language || "zh",
+                  language: submittedLanguage,
+                  web_search_enabled: submittedWebSearch,
+                  web_search_requested: submittedWebSearch,
                   event_count: 0,
                   created_at: result.created_at,
                   started_at: null,
@@ -191,7 +227,9 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
                   has_result: false,
                   error: null,
                 };
-                return [optimistic, ...prev];
+                const next = [optimistic, ...prev];
+                jobsRef.current = next;
+                return next;
               });
               setTotal((t) => t + 1);
               setTick((x) => x + 1);
@@ -217,7 +255,11 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
   );
 
   const subscribe = useCallback(
-    (jobId: string, _capabilityHint?: string) => {
+    (
+      jobId: string,
+      _capabilityHint?: string,
+      context?: Pick<SubmitJobContext, "sessionId">,
+    ) => {
       if (!jobId) return;
       if (liveClients.current.has(jobId)) return; // already subscribed
       if (typeof window === "undefined") return;
@@ -230,29 +272,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
         try {
           const detail = await getJobDetail(userId || "anonymous", jobId);
           if (detail) {
-            useTutorStore.getState().applyReducerEvent({
-              type: "snapshot",
-              job: {
-                job_id: detail.job_id,
-                capability: detail.capability,
-                status: detail.status,
-                message_preview: detail.message_preview,
-                submitted_at: detail.created_at
-                  ? Date.parse(detail.created_at)
-                  : Date.now(),
-                started_at: detail.started_at
-                  ? Date.parse(detail.started_at)
-                  : null,
-                finished_at: detail.finished_at
-                  ? Date.parse(detail.finished_at)
-                  : null,
-                last_seq: detail.events?.length ?? 0,
-                events: detail.events ?? [],
-                result: (detail.result as any) ?? null,
-                error: detail.error,
-                event_count: detail.event_count,
-              },
-            });
+            useTutorStore.getState().rehydrateJobFromDetail(detail);
           }
         } catch (e) {
           // snapshot fetch is best-effort; the WS replay will still
@@ -278,10 +298,13 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
           if (!derivedJobId && streamEv.metadata) {
             streamEv.metadata = { ...streamEv.metadata, job_id: jobId };
           }
-          dispatchStreamEvent(streamEv);
+          dispatchStreamEvent(streamEv, {
+            sessionId: context?.sessionId,
+            userId: userId || "anonymous",
+          });
           if (streamEv.type === "stage_start") {
-            setJobs((prev) =>
-              prev.map((j) =>
+            setJobs((prev) => {
+              const next: JobSummary[] = prev.map((j) =>
                 j.job_id === jobId && j.status === "pending"
                   ? {
                       ...j,
@@ -289,8 +312,10 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
                       started_at: new Date().toISOString(),
                     }
                   : j,
-              ),
-            );
+              );
+              jobsRef.current = next;
+              return next;
+            });
           } else if (
             streamEv.type === "job_terminal" ||
             streamEv.type === "done" ||
@@ -337,12 +362,24 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
   const remove = useCallback(
     async (jobId: string): Promise<boolean> => {
       if (!userId) return false;
+      const removeFromQueue = () => {
+        const existed = jobsRef.current.some((job) => job.job_id === jobId);
+        const next = jobsRef.current.filter((job) => job.job_id !== jobId);
+        jobsRef.current = next;
+        setJobs(next);
+        if (existed) setTotal((total) => Math.max(0, total - 1));
+      };
       try {
         await apiDeleteJob(userId, jobId);
-        setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
-        setTotal((t) => Math.max(0, t - 1));
+        removeFromQueue();
+        useTutorStore.getState().removeJob(jobId);
         return true;
       } catch (e) {
+        if ((e as { status?: number }).status === 404) {
+          removeFromQueue();
+          useTutorStore.getState().removeJob(jobId);
+          return true;
+        }
         console.warn(`[useJobQueue] remove(${jobId}) failed`, e);
         return false;
       }

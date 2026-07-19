@@ -40,11 +40,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterable
-from datetime import datetime, timezone
-from functools import lru_cache
+from collections.abc import Callable, Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from loguru import logger
 from sqlalchemy import (
@@ -58,6 +58,7 @@ from sqlalchemy import (
     Integer,
     String,
     select,
+    text,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -68,6 +69,11 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.types import Integer as SqlInteger
 
+from tutor.services.artifacts import (
+    UnsafeArtifactKey,
+    resolve_artifact_key,
+    to_artifact_key,
+)
 from tutor.services.config.settings import get_settings
 from tutor.services.resource_package.schema import Resource, ResourcePackage
 
@@ -209,18 +215,18 @@ class ResourcePackageStore:
         store = self
 
         class _Ctx:
-            async def __aenter__(self_):
-                self_._s = store._sessionmaker()  # type: ignore[union-attr]
-                return self_._s
+            async def __aenter__(self):
+                self._s = store._sessionmaker()  # type: ignore[union-attr]
+                return self._s
 
-            async def __aexit__(self_, exc_type, exc, tb):
+            async def __aexit__(self, exc_type, exc, tb):
                 try:
                     if exc_type is None:
-                        await self_._s.commit()
+                        await self._s.commit()
                     else:
-                        await self_._s.rollback()
+                        await self._s.rollback()
                 finally:
-                    await self_._s.close()
+                    await self._s.close()
 
         return _Ctx()
 
@@ -241,68 +247,63 @@ class ResourcePackageStore:
         # Persist user_id in metadata for cross-system queries (read-only
         # round-trip — we don't expose it on the wire).
         package.metadata.setdefault("user_id", uid)
+        for resource in package.resources:
+            resource.metadata["package_id"] = package.package_id
+            resource.metadata["package_persisted"] = True
         summary = package.summary()
 
-        async with self._write_lock:
-            async with self._with_session() as session:
-                # Wipe any existing package with the same id (cascade kills
-                # children).
-                existing = await session.execute(
-                    select(PackageRow).where(
-                        PackageRow.package_id == package.package_id
+        async with self._write_lock, self._with_session() as session:
+            # Wipe any existing package with the same id (cascade kills
+            # children).
+            existing = await session.execute(
+                select(PackageRow).where(
+                    PackageRow.package_id == package.package_id
+                )
+            )
+            existing_row = existing.scalar_one_or_none()
+            if existing_row is not None:
+                await session.delete(existing_row)
+                await session.flush()
+
+            pkg_row = PackageRow(
+                package_id=package.package_id,
+                user_id=uid,
+                topic=package.topic or "",
+                resource_count=summary["resource_count"],
+                total_minutes=summary["total_minutes"],
+                avg_confidence=summary["avg_confidence"],
+                generated_by=list(package.generated_by or []),
+                target_profile_snapshot=dict(package.target_profile_snapshot or {}),
+                learning_path_summary=dict(package.learning_path_summary or {}),
+                package_metadata=dict(package.metadata or {}),
+                created_at=package.created_at,
+            )
+            session.add(pkg_row)
+
+            for r in package.resources:
+                format_specific = _portable_format_specific(
+                    r.format_specific, get_settings().data_dir
+                )
+                session.add(
+                    ResourceRow(
+                        resource_id=r.resource_id,
+                        package_id=package.package_id,
+                        user_id=uid,
+                        type=r.type.value,
+                        title=r.title,
+                        content=r.content or "",
+                        format_specific=format_specific,
+                        difficulty=r.difficulty,
+                        estimated_minutes=r.estimated_minutes,
+                        prerequisites=list(r.prerequisites or []),
+                        generated_by=list(r.generated_by or []),
+                        confidence_score=float(r.confidence_score),
+                        topic=r.topic or "",
+                        tags=list(r.tags or []),
+                        resource_metadata=_resource_metadata(r),
+                        created_at=r.created_at,
                     )
                 )
-                existing_row = existing.scalar_one_or_none()
-                if existing_row is not None:
-                    await session.delete(existing_row)
-                    await session.flush()
-
-                pkg_row = PackageRow(
-                    package_id=package.package_id,
-                    user_id=uid,
-                    topic=package.topic or "",
-                    resource_count=summary["resource_count"],
-                    total_minutes=summary["total_minutes"],
-                    avg_confidence=summary["avg_confidence"],
-                    generated_by=list(package.generated_by or []),
-                    target_profile_snapshot=dict(package.target_profile_snapshot or {}),
-                    learning_path_summary=dict(package.learning_path_summary or {}),
-                    package_metadata=dict(package.metadata or {}),
-                    created_at=package.created_at,
-                )
-                session.add(pkg_row)
-
-                for r in package.resources:
-                    resource_metadata = dict(r.metadata or {})
-                    resource_metadata.setdefault(
-                        "_evidence",
-                        {
-                            "citations": list(r.citations or []),
-                            "review": dict(r.review or {}),
-                            "safety": dict(r.safety or {}),
-                            "unverified_claims": list(r.unverified_claims or []),
-                        },
-                    )
-                    session.add(
-                        ResourceRow(
-                            resource_id=r.resource_id,
-                            package_id=package.package_id,
-                            user_id=uid,
-                            type=r.type.value,
-                            title=r.title,
-                            content=r.content or "",
-                            format_specific=dict(r.format_specific or {}),
-                            difficulty=r.difficulty,
-                            estimated_minutes=r.estimated_minutes,
-                            prerequisites=list(r.prerequisites or []),
-                            generated_by=list(r.generated_by or []),
-                            confidence_score=float(r.confidence_score),
-                            topic=r.topic or "",
-                            tags=list(r.tags or []),
-                            resource_metadata=resource_metadata,
-                            created_at=r.created_at,
-                        )
-                    )
 
         logger.info(
             f"ResourcePackageStore.save pkg={package.package_id[:12]}… "
@@ -320,38 +321,170 @@ class ResourcePackageStore:
             count += 1
         return count
 
+    async def update_resource(
+        self,
+        package_id: str,
+        resource: Resource,
+        *,
+        user_id: str,
+    ) -> Resource:
+        """Atomically replace one resource row without rewriting siblings."""
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(ResourceRow).where(
+                        ResourceRow.package_id == package_id,
+                        ResourceRow.resource_id == resource.resource_id,
+                        ResourceRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise KeyError(
+                    f"resource not found: {package_id}/{resource.resource_id}"
+                )
+            row.type = resource.type.value
+            row.title = resource.title
+            row.content = resource.content or ""
+            row.format_specific = _portable_format_specific(
+                resource.format_specific,
+                get_settings().data_dir,
+            )
+            row.difficulty = resource.difficulty
+            row.estimated_minutes = resource.estimated_minutes
+            row.prerequisites = list(resource.prerequisites or [])
+            row.generated_by = list(resource.generated_by or [])
+            row.confidence_score = float(resource.confidence_score)
+            row.topic = resource.topic or ""
+            row.tags = list(resource.tags or [])
+            resource.metadata["package_id"] = package_id
+            resource.metadata["package_persisted"] = True
+            row.resource_metadata = _resource_metadata(resource)
+            row.created_at = resource.created_at
+        return resource
+
+    async def mutate_video_repair_if_current(
+        self,
+        *,
+        package_id: str,
+        resource_id: str,
+        user_id: str,
+        expected_source_revision: int,
+        expected_repair_job_id: str | None,
+        mutation: Callable[[dict[str, Any]], None],
+    ) -> Resource | None:
+        """Conditionally mutate repair payload in one resources DB transaction.
+
+        ``BEGIN IMMEDIATE`` serializes independent store instances before the
+        row is read. The source revision and repair owner are checked against
+        that transactional read, so a stale child can never overwrite a newer
+        source or another repair job.
+        """
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(ResourceRow).where(
+                        ResourceRow.package_id == package_id,
+                        ResourceRow.resource_id == resource_id,
+                        ResourceRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            payload = dict(row.format_specific or {})
+            try:
+                source_revision = int(payload.get("source_revision") or 0)
+            except (TypeError, ValueError):
+                return None
+            repair_job_id = payload.get("repair_job_id")
+            if (
+                source_revision != expected_source_revision
+                or repair_job_id != expected_repair_job_id
+            ):
+                return None
+            mutation(payload)
+            row.format_specific = _portable_format_specific(
+                payload,
+                get_settings().data_dir,
+            )
+            await session.flush()
+            return self._row_to_resource(row)
+
+    async def get_for_user(
+        self,
+        package_id: str,
+        user_id: str,
+    ) -> ResourcePackage | None:
+        """Load a package only when it belongs to the requested user."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(PackageRow).where(
+                        PackageRow.package_id == package_id,
+                        PackageRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return self._row_to_package(row) if row is not None else None
+
+    async def owns_resource(
+        self,
+        package_id: str,
+        resource_id: str,
+        user_id: str,
+    ) -> bool:
+        """Return whether one resource and its package share the user owner."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(ResourceRow.id).where(
+                        ResourceRow.package_id == package_id,
+                        ResourceRow.resource_id == resource_id,
+                        ResourceRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return row is not None
+
     async def delete(self, package_id: str) -> bool:
         """Delete a package by id. Returns True if a row was removed."""
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                row = (
-                    await session.execute(
-                        select(PackageRow).where(
-                            PackageRow.package_id == package_id
-                        )
+        async with self._write_lock, self._with_session() as session:
+            row = (
+                await session.execute(
+                    select(PackageRow).where(
+                        PackageRow.package_id == package_id
                     )
-                ).scalar_one_or_none()
-                if row is None:
-                    return False
-                await session.delete(row)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            await session.delete(row)
         return True
 
     async def delete_user(self, user_id: str) -> int:
         """Delete all packages for a user. Returns count removed."""
         self._ensure_engine()
         assert self._write_lock is not None
-        async with self._write_lock:
-            async with self._with_session() as session:
-                rows = (
-                    await session.execute(
-                        select(PackageRow).where(PackageRow.user_id == user_id)
-                    )
-                ).scalars().all()
-                count = len(rows)
-                for r in rows:
-                    await session.delete(r)
+        async with self._write_lock, self._with_session() as session:
+            rows = (
+                await session.execute(
+                    select(PackageRow).where(PackageRow.user_id == user_id)
+                )
+            ).scalars().all()
+            count = len(rows)
+            for r in rows:
+                await session.delete(r)
         return count
 
     # ---- reads ------------------------------------------------------------
@@ -451,6 +584,27 @@ class ResourcePackageStore:
                 for r in rows
             ]
 
+    async def list_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int = 20,
+    ) -> list[ResourcePackage]:
+        """Load full packages for an already-authorized conversation."""
+        self._ensure_engine()
+        async with self._with_session() as session:
+            stmt = (
+                select(PackageRow)
+                .where(
+                    PackageRow.package_metadata["session_id"].as_string()
+                    == session_id
+                )
+                .order_by(PackageRow.created_at.desc(), PackageRow.id.desc())
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._row_to_package(row) for row in reversed(rows)]
+
     async def count(self, user_id: str) -> int:
         self._ensure_engine()
         async with self._with_session() as session:
@@ -518,7 +672,13 @@ class ResourcePackageStore:
     @staticmethod
     def _row_to_resource(row: ResourceRow) -> Resource:
         metadata = dict(row.resource_metadata or {})
-        evidence = metadata.get("_evidence") if isinstance(metadata.get("_evidence"), dict) else {}
+        metadata["package_id"] = row.package_id
+        metadata["package_persisted"] = True
+        evidence = (
+            metadata.get("_evidence")
+            if isinstance(metadata.get("_evidence"), dict)
+            else {}
+        )
         return Resource(
             resource_id=row.resource_id,
             type=row.type,  # ResourceType enum is str-typed
@@ -547,8 +707,9 @@ class ResourcePackageStore:
     @classmethod
     def _row_to_package(cls, row: PackageRow) -> ResourcePackage:
         resources = [cls._row_to_resource(r) for r in row.resources]
-        # Read user_id from metadata (denormalized); fall back to the row
-        user_id = (row.package_metadata or {}).get("user_id", row.user_id)
+        # The indexed row owner is authoritative. Old local migrations can
+        # leave a stale user_id inside the denormalized metadata JSON.
+        user_id = row.user_id
         return ResourcePackage(
             package_id=row.package_id,
             topic=row.topic or "",
@@ -613,10 +774,132 @@ def reset_resource_package_store() -> None:
     _store = None
 
 
+def _resource_metadata(resource: Resource) -> dict[str, Any]:
+    metadata = dict(resource.metadata or {})
+    metadata["_evidence"] = {
+        "citations": list(resource.citations or []),
+        "review": dict(resource.review or {}),
+        "safety": dict(resource.safety or {}),
+        "unverified_claims": list(resource.unverified_claims or []),
+    }
+    return metadata
+
+
+def _portable_format_specific(
+    value: dict[str, Any] | None,
+    data_dir: Path,
+) -> dict[str, Any]:
+    """Normalize known local-file fields before a new database write."""
+    payload = dict(value or {})
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, list):
+        payload["artifacts"] = [
+            normalized
+            for entry in artifacts
+            if isinstance(entry, dict)
+            for normalized in [_portable_artifact_entry(entry, data_dir)]
+            if normalized is not None
+        ]
+
+    for legacy_name in ("path", "mp4_path", "pptx_path"):
+        legacy_value = payload.pop(legacy_name, None)
+        if legacy_value and not payload.get("artifact_key"):
+            key = _path_value_to_key(str(legacy_value), data_dir)
+            if key is not None:
+                payload["artifact_key"] = key
+            else:
+                payload["artifact_unresolved"] = True
+
+    legacy_url = payload.get("url")
+    if legacy_url and not payload.get("artifact_key"):
+        parsed = urlsplit(str(legacy_url))
+        if parsed.scheme not in {"http", "https"}:
+            raw_url = unquote(parsed.path) if parsed.scheme == "file" else str(legacy_url)
+            if raw_url.startswith("/static/manim/"):
+                raw_url = f"manim_videos/{raw_url.removeprefix('/static/manim/')}"
+            key = _path_value_to_key(raw_url, data_dir)
+            payload.pop("url", None)
+            if key is not None:
+                payload["artifact_key"] = key
+            else:
+                payload["artifact_unresolved"] = True
+
+    key = payload.get("artifact_key")
+    if key:
+        try:
+            resolve_artifact_key(str(key), data_dir)
+        except UnsafeArtifactKey:
+            payload.pop("artifact_key", None)
+            payload["artifact_unresolved"] = True
+    return payload
+
+
+def _portable_artifact_entry(
+    entry: dict[str, Any],
+    data_dir: Path,
+) -> dict[str, Any] | None:
+    result = {
+        key: entry[key]
+        for key in ("name", "kind")
+        if key in entry and entry[key] is not None
+    }
+    raw = entry.get("artifact_key") or entry.get("path") or entry.get("url")
+    if not raw:
+        return result or None
+    parsed = urlsplit(str(raw))
+    if parsed.scheme in {"http", "https"}:
+        result["url"] = str(raw)
+        return result
+    if parsed.scheme == "file":
+        raw = unquote(parsed.path)
+    elif "url" in entry and str(raw).startswith("/static/manim/"):
+        raw = f"manim_videos/{str(raw).removeprefix('/static/manim/')}"
+    key = _path_value_to_key(str(raw), data_dir, already_key="artifact_key" in entry)
+    if key is None:
+        result["unresolved"] = True
+    else:
+        result["artifact_key"] = key
+    return result
+
+
+def portable_format_specific(
+    value: dict[str, Any] | None,
+    data_dir: Path,
+) -> dict[str, Any]:
+    """Return a wire-safe resource payload with canonical artifact keys."""
+    return _portable_format_specific(value, data_dir)
+
+
+def _path_value_to_key(
+    value: str,
+    data_dir: Path,
+    *,
+    already_key: bool = False,
+) -> str | None:
+    if already_key:
+        try:
+            resolve_artifact_key(value, data_dir)
+            return value
+        except UnsafeArtifactKey:
+            return None
+    path = Path(value)
+    if path.is_absolute():
+        try:
+            return to_artifact_key(path, data_dir)
+        except UnsafeArtifactKey:
+            return None
+    try:
+        resolve_artifact_key(value, data_dir)
+    except UnsafeArtifactKey:
+        return None
+    return value.replace("\\", "/")
+
+
 __all__ = [
     "PackageRow",
     "ResourcePackageStore",
     "ResourceRow",
+    "portable_format_specific",
     "get_resource_package_store",
     "reset_resource_package_store",
 ]

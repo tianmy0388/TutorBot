@@ -20,13 +20,10 @@ so concurrent updates are merged deterministically.
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -39,10 +36,10 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
-    Text,
     select,
+    text,
 )
-from sqlalchemy.types import Integer as SqlInteger
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -50,10 +47,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.types import Integer as SqlInteger
 
 from tutor.services.config.settings import get_settings
 from tutor.services.learner_profile.schema import (
     LearnerProfile,
+    PersistedLearningPath,
     ProfileDiff,
     apply_diff,
     empty_profile,
@@ -136,6 +135,31 @@ class ProfileEventRow(Base):
     )
 
 
+class LearningPathRow(Base):
+    __tablename__ = "learning_paths"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(128), nullable=False, index=True)
+    profile_version = Column(Integer, nullable=False)
+    path_data = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    __table_args__ = (
+        Index(
+            "uq_learning_paths_user_profile_version",
+            "user_id",
+            "profile_version",
+            unique=True,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class ProfileCasResult:
+    profile: LearnerProfile
+    applied: bool
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -216,15 +240,18 @@ class _SessionMixin:
 
 
 # Attach mixin methods to ProfileStore
-async def _get_or_create(self: "ProfileStore", user_id: str) -> LearnerProfile:
+async def _get_or_create(self: ProfileStore, user_id: str) -> LearnerProfile:
     async def op(session: AsyncSession) -> LearnerProfile:
         row = await session.get(ProfileRow, user_id)
         if row is not None:
-            data = row.profile_data or {}
-            data.setdefault("user_id", user_id)
+            data = dict(row.profile_data or {})
+            # The indexed row owner is authoritative. Historical local-data
+            # migrations may leave a stale owner inside the JSON snapshot.
+            data["user_id"] = user_id
+            data["version"] = int(row.version)
             return LearnerProfile.model_validate(data)
         # Create new
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         prof = empty_profile(user_id=user_id)
         prof.created_at = now
         prof.updated_at = now
@@ -252,13 +279,26 @@ async def _get_or_create(self: "ProfileStore", user_id: str) -> LearnerProfile:
     return await self._with_session(op)
 
 
+async def _get(self: ProfileStore, user_id: str) -> LearnerProfile | None:
+    async def op(session: AsyncSession) -> LearnerProfile | None:
+        row = await session.get(ProfileRow, user_id)
+        if row is None:
+            return None
+        data = dict(row.profile_data or {})
+        data["user_id"] = user_id
+        data["version"] = int(row.version)
+        return LearnerProfile.model_validate(data)
+
+    return await self._with_session(op)
+
+
 async def _save_profile(
-    self: "ProfileStore",
+    self: ProfileStore,
     profile: LearnerProfile,
     source: str = "system",
     event_type: ProfileEventType = ProfileEventType.UPDATED,
 ) -> LearnerProfile:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if profile.updated_at < now and event_type != ProfileEventType.CREATED:
         profile.updated_at = now
 
@@ -297,7 +337,7 @@ async def _save_profile(
 
 
 async def _apply_diff(
-    self: "ProfileStore",
+    self: ProfileStore,
     user_id: str,
     diff: ProfileDiff,
     *,
@@ -324,8 +364,150 @@ async def _apply_diff(
         )
 
 
+async def _save_event_profile(
+    self: ProfileStore,
+    candidate: LearnerProfile,
+    *,
+    expected_watermark: int,
+) -> ProfileCasResult:
+    """CAS a deterministic event window into the current profile."""
+    self._ensure_engine()
+    assert self._write_lock is not None
+    async with self._write_lock, self._sessionmaker() as session:
+        try:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = await session.get(ProfileRow, candidate.user_id)
+            if row is not None:
+                current_data = dict(row.profile_data or {})
+                current_data["user_id"] = candidate.user_id
+                current_data["version"] = int(row.version)
+                current = LearnerProfile.model_validate(current_data)
+            else:
+                current = empty_profile(candidate.user_id)
+            if (
+                current.event_watermark != expected_watermark
+                or current.version != candidate.version
+            ):
+                await session.rollback()
+                return ProfileCasResult(profile=current, applied=False)
+            saved = candidate.model_copy(deep=True)
+            saved.version = current.version + 1
+            saved.created_at = current.created_at
+            saved.updated_at = datetime.now(UTC)
+            payload = saved.model_dump(mode="json")
+            if row is None:
+                session.add(
+                    ProfileRow(
+                        user_id=saved.user_id,
+                        version=saved.version,
+                        profile_data=payload,
+                        created_at=saved.created_at,
+                        updated_at=saved.updated_at,
+                    )
+                )
+            else:
+                row.version = saved.version
+                row.profile_data = payload
+                row.updated_at = saved.updated_at
+            session.add(
+                ProfileEventRow(
+                    user_id=saved.user_id,
+                    event_type=ProfileEventType.DIFF_APPLIED.value,
+                    payload={"version": saved.version, "event_watermark": saved.event_watermark},
+                    source="learning_events",
+                    created_at=saved.updated_at,
+                )
+            )
+            await session.commit()
+            return ProfileCasResult(profile=saved, applied=True)
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _save_path(
+    self: ProfileStore, path: PersistedLearningPath
+) -> PersistedLearningPath:
+    self._ensure_engine()
+    assert self._write_lock is not None
+    assert self._sessionmaker is not None
+    async with self._write_lock, self._sessionmaker() as session:
+        try:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            await session.execute(
+                sqlite_insert(LearningPathRow)
+                .values(
+                    user_id=path.user_id,
+                    profile_version=path.profile_version,
+                    path_data=path.model_dump(mode="json"),
+                    created_at=path.created_at,
+                )
+                .on_conflict_do_nothing(index_elements=["user_id", "profile_version"])
+            )
+            row = (
+                await session.execute(
+                    select(LearningPathRow).where(
+                        LearningPathRow.user_id == path.user_id,
+                        LearningPathRow.profile_version == path.profile_version,
+                    )
+                )
+            ).scalar_one()
+            await session.commit()
+            data = dict(row.path_data or {})
+            data["user_id"] = row.user_id
+            data["profile_version"] = int(row.profile_version)
+            return PersistedLearningPath.model_validate(data)
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _get_path(
+    self: ProfileStore, user_id: str, profile_version: int
+) -> PersistedLearningPath | None:
+    async def op(session: AsyncSession) -> PersistedLearningPath | None:
+        row = (
+            await session.execute(
+                select(LearningPathRow).where(
+                    LearningPathRow.user_id == user_id,
+                    LearningPathRow.profile_version == profile_version,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        data = dict(row.path_data or {})
+        data["user_id"] = row.user_id
+        data["profile_version"] = int(row.profile_version)
+        return PersistedLearningPath.model_validate(data)
+
+    return await self._with_session(op)
+
+
+async def _get_latest_path(
+    self: ProfileStore, user_id: str
+) -> PersistedLearningPath | None:
+    async def op(session: AsyncSession) -> PersistedLearningPath | None:
+        row = (
+            await session.execute(
+                select(LearningPathRow)
+                .where(LearningPathRow.user_id == user_id)
+                .order_by(LearningPathRow.profile_version.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        data = dict(row.path_data or {})
+        data["user_id"] = row.user_id
+        data["profile_version"] = int(row.profile_version)
+        return PersistedLearningPath.model_validate(data)
+
+    return await self._with_session(op)
+
+
 async def _replace(
-    self: "ProfileStore",
+    self: ProfileStore,
     profile: LearnerProfile,
     *,
     source: str = "system",
@@ -334,7 +516,7 @@ async def _replace(
 
     Caller is responsible for setting the version they want stored.
     """
-    profile.updated_at = datetime.now(timezone.utc)
+    profile.updated_at = datetime.now(UTC)
     return await _save_profile(
         self,
         profile,
@@ -343,7 +525,7 @@ async def _replace(
     )
 
 
-async def _delete(self: "ProfileStore", user_id: str) -> bool:
+async def _delete(self: ProfileStore, user_id: str) -> bool:
     async def op(session: AsyncSession) -> bool:
         row = await session.get(ProfileRow, user_id)
         if row is None:
@@ -355,7 +537,7 @@ async def _delete(self: "ProfileStore", user_id: str) -> bool:
                 event_type=ProfileEventType.DELETED.value,
                 payload={},
                 source="ProfileStore",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
         )
         return True
@@ -364,7 +546,7 @@ async def _delete(self: "ProfileStore", user_id: str) -> bool:
 
 
 async def _history(
-    self: "ProfileStore",
+    self: ProfileStore,
     user_id: str,
     *,
     limit: int = 20,
@@ -394,7 +576,7 @@ async def _history(
     return await self._with_session(op)
 
 
-async def _list_users(self: "ProfileStore") -> list[str]:
+async def _list_users(self: ProfileStore) -> list[str]:
     async def op(session: AsyncSession) -> list[str]:
         stmt = select(ProfileRow.user_id).order_by(ProfileRow.updated_at.desc())
         return list((await session.execute(stmt)).scalars().all())
@@ -402,7 +584,7 @@ async def _list_users(self: "ProfileStore") -> list[str]:
     return await self._with_session(op)
 
 
-async def _stats(self: "ProfileStore", user_id: str) -> dict[str, Any]:
+async def _stats(self: ProfileStore, user_id: str) -> dict[str, Any]:
     profile = await _get_or_create(self, user_id)
     history = await _history(self, user_id, limit=1)
     return {
@@ -414,8 +596,13 @@ async def _stats(self: "ProfileStore", user_id: str) -> dict[str, Any]:
 
 # Bind methods to ProfileStore
 ProfileStore.get_or_create = _get_or_create  # type: ignore[attr-defined]
+ProfileStore.get = _get  # type: ignore[attr-defined]
 ProfileStore.save = _save_profile  # type: ignore[attr-defined]
 ProfileStore.apply_diff = _apply_diff  # type: ignore[attr-defined]
+ProfileStore.save_event_profile = _save_event_profile  # type: ignore[attr-defined]
+ProfileStore.save_path = _save_path  # type: ignore[attr-defined]
+ProfileStore.get_path = _get_path  # type: ignore[attr-defined]
+ProfileStore.get_latest_path = _get_latest_path  # type: ignore[attr-defined]
 ProfileStore.replace = _replace  # type: ignore[attr-defined]
 ProfileStore.delete = _delete  # type: ignore[attr-defined]
 ProfileStore.history = _history  # type: ignore[attr-defined]
@@ -467,19 +654,20 @@ def _close_profile_store_sync() -> None:
     global _store
     if _store is None:
         return
-    try:
-        import asyncio
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(_store.close())
-        loop.close()
-    except Exception:
-        pass
+    store = _store
     _store = None
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(store.close())
+    else:
+        running_loop.create_task(store.close())
 
 
 __all__ = [
     "ProfileEvent",
     "ProfileEventType",
+    "ProfileCasResult",
     "ProfileStore",
     "get_profile_store",
     "reset_profile_store",
