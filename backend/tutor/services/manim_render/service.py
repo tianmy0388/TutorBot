@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shutil
 import threading
 import traceback
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -216,7 +218,51 @@ class ManimRenderService:
             scene_class,
             invocation_id,
         )
-        success, failure_or_error = await render_fn(cleaned)
+        try:
+            success, failure_or_error = await render_fn(cleaned)
+        except Exception:
+            message = "Manim executor failed internally"
+            log_key = self._write_current_exception_log_artifact(
+                invocation_id,
+                attempt_label="executor-exception",
+                public_stderr=message,
+            )
+            failure = RenderFailure(
+                error_code="executor_exception",
+                summary=message,
+                traceback_tail=(message,),
+                log_artifact_key=log_key,
+            )
+            return RenderedVideo(
+                success=False,
+                code=cleaned,
+                attempts=1,
+                error=failure.summary,
+                static_guard=sg,
+                failure=failure,
+            )
+        if not render_history:
+            message = "Manim executor returned no render result"
+            log_key = self._write_log_artifact(
+                invocation_id,
+                attempt_label="missing-render-result",
+                stdout="",
+                stderr=message,
+            )
+            failure = RenderFailure(
+                error_code="missing_render_result",
+                summary=message,
+                traceback_tail=(message,),
+                log_artifact_key=log_key,
+            )
+            return RenderedVideo(
+                success=False,
+                code=cleaned,
+                attempts=1,
+                error=failure.summary,
+                static_guard=sg,
+                failure=failure,
+            )
         final_render = render_history[-1]
         failure = (
             failure_or_error
@@ -228,9 +274,34 @@ class ManimRenderService:
         video_path = None
         public_url = ""
         if success and final_render.video_path:
-            video_path, public_url = self._publish(
-                final_render.video_path, scene_class
-            )
+            try:
+                video_path, public_url = self._publish(
+                    final_render.video_path, scene_class
+                )
+                if video_path is None or not public_url:
+                    raise RuntimeError("published video path or URL is missing")
+            except Exception:
+                message = "Rendered video could not be published"
+                log_key = self._write_current_exception_log_artifact(
+                    invocation_id,
+                    attempt_label="publish-failed",
+                    public_stderr=message,
+                )
+                failure = RenderFailure(
+                    error_code="publish_failed",
+                    summary=message,
+                    traceback_tail=(message,),
+                    log_artifact_key=log_key,
+                )
+                return RenderedVideo(
+                    success=False,
+                    code=cleaned,
+                    attempts=1,
+                    error=failure.summary,
+                    static_guard=sg,
+                    final_render=final_render,
+                    failure=failure,
+                )
 
         return RenderedVideo(
             success=success,
@@ -367,15 +438,32 @@ class ManimRenderService:
         video_path: Path,
         scene_class: str,
     ) -> tuple[Path, str]:
-        """Copy ``video_path`` to the public dir. Returns (new_path, url)."""
-        dest = self.public_dir / video_path.name
-        try:
-            shutil.copy2(video_path, dest)
-        except OSError as exc:
-            logger.warning(f"Publish failed: {exc}")
-            return video_path, ""
+        """Publish under an immutable content-addressed filename."""
+        digest = self._file_sha256(video_path)
+        suffix = video_path.suffix.lower()
+        if not suffix or len(suffix) > 10 or not suffix[1:].isalnum():
+            suffix = ".mp4"
+        dest = self.public_dir / f"{digest}{suffix}"
+        if not dest.exists():
+            temporary = self.public_dir / f".{digest}.{uuid.uuid4().hex}.tmp"
+            try:
+                shutil.copy2(video_path, temporary)
+                if self._file_sha256(temporary) != digest:
+                    raise OSError("published video changed while copying")
+                os.replace(temporary, dest)
+            finally:
+                with suppress(OSError):
+                    temporary.unlink(missing_ok=True)
         # URL is relative; the FastAPI app would mount /static → public_dir in production
         return dest, f"/static/manim/{dest.name}"
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import shutil
 from pathlib import Path
@@ -142,7 +143,8 @@ async def test_render_serializes_a_portable_artifact_key(tmp_path, monkeypatch):
     result = await svc.render(code=VALID_CODE, scene_class="HelloScene")
 
     serialized = result.to_dict()
-    assert serialized["artifact_key"] == "manim_videos/fake.mp4"
+    digest = hashlib.sha256(b"FAKE_MP4_DATA").hexdigest()
+    assert serialized["artifact_key"] == f"manim_videos/{digest}.mp4"
     assert "video_path" not in serialized
 
 
@@ -267,6 +269,139 @@ async def test_render_failure_keeps_last_120_lines_and_complete_log_artifact(
     assert lines[0] in log_text
     assert lines[-1] in log_text
     assert result.to_dict()["failure"]["traceback_tail"] == lines[-120:]
+
+
+@pytest.mark.asyncio
+async def test_publish_is_content_addressed_and_never_overwrites_prior_video(tmp_path):
+    first_source = tmp_path / "first" / "MainScene.mp4"
+    second_source = tmp_path / "second" / "MainScene.mp4"
+    first_source.parent.mkdir()
+    second_source.parent.mkdir()
+    first_source.write_bytes(b"first-user-video")
+    second_source.write_bytes(b"second-user-video")
+    executor = MagicMock(spec=ManimExecutor)
+    executor.is_available.return_value = True
+    executor.temp_dir = tmp_path / "work"
+    executor.render.side_effect = [
+        ManimRenderResult(status=RenderStatus.SUCCESS, video_path=first_source),
+        ManimRenderResult(status=RenderStatus.SUCCESS, video_path=second_source),
+    ]
+    service = ManimRenderService(
+        executor=executor,
+        public_dir=tmp_path / "public",
+    )
+
+    first = await service.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="owner-a-resource-a",
+    )
+    first_bytes = first.video_path.read_bytes()
+    second = await service.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="owner-b-resource-b",
+    )
+
+    assert first.success is True and second.success is True
+    assert first.video_path != second.video_path
+    assert first.public_url != second.public_url
+    assert first.video_path.read_bytes() == first_bytes == b"first-user-video"
+    assert second.video_path.read_bytes() == b"second-user-video"
+
+
+@pytest.mark.asyncio
+async def test_publish_copy_failure_returns_structured_terminal_failure(
+    tmp_path,
+    monkeypatch,
+):
+    executor = _mock_executor_success(tmp_path)
+    service = ManimRenderService(
+        executor=executor,
+        public_dir=tmp_path / "public",
+    )
+
+    def fail_copy(*args, **kwargs):
+        raise OSError("provider-token=private-value C:\\private\\video.mp4")
+
+    monkeypatch.setattr("tutor.services.manim_render.service.shutil.copy2", fail_copy)
+    result = await service.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="publish-failure-child",
+    )
+
+    assert result.success is False
+    assert result.video_path is None
+    assert result.public_url == ""
+    assert result.failure.error_code == "publish_failed"
+    assert result.failure.log_artifact_key
+    assert "private-value" not in str(result.to_dict())
+    assert "C:\\private" not in str(result.to_dict())
+
+
+@pytest.mark.asyncio
+async def test_empty_publish_result_is_failure_not_ready(tmp_path, monkeypatch):
+    executor = _mock_executor_success(tmp_path)
+    service = ManimRenderService(executor=executor, public_dir=tmp_path / "public")
+    monkeypatch.setattr(service, "_publish", lambda *args: (None, ""))
+
+    result = await service.render(code=VALID_CODE, scene_class="HelloScene")
+
+    assert result.success is False
+    assert result.failure.error_code == "publish_failed"
+    assert result.video_path is None
+
+
+@pytest.mark.asyncio
+async def test_executor_exception_returns_bounded_structured_failure(tmp_path):
+    executor = MagicMock(spec=ManimExecutor)
+    executor.is_available.return_value = True
+    executor.temp_dir = tmp_path / "work"
+    executor.render.side_effect = RuntimeError(
+        "provider-token=private-value at C:\\private\\scene.py"
+    )
+    service = ManimRenderService(executor=executor, public_dir=tmp_path / "public")
+
+    result = await service.render(
+        code=VALID_CODE,
+        scene_class="HelloScene",
+        job_id="executor-exception-child",
+    )
+
+    assert result.success is False
+    assert result.attempts == 1
+    assert result.final_render is None
+    assert result.failure.error_code == "executor_exception"
+    assert result.failure.log_artifact_key
+    assert len(result.failure.summary) <= 200
+    assert "private-value" not in str(result.to_dict())
+    assert "C:\\private" not in str(result.to_dict())
+
+
+@pytest.mark.asyncio
+async def test_missing_render_history_returns_failure_instead_of_index_error(
+    tmp_path,
+    monkeypatch,
+):
+    executor = _mock_executor_failure()
+    executor.temp_dir = tmp_path / "work"
+    service = ManimRenderService(executor=executor, public_dir=tmp_path / "public")
+
+    async def render_without_history(code):
+        return False, "executor returned no result"
+
+    monkeypatch.setattr(
+        service,
+        "_make_render_fn",
+        lambda *args: (render_without_history, []),
+    )
+    result = await service.render(code=VALID_CODE, scene_class="HelloScene")
+
+    assert result.success is False
+    assert result.final_render is None
+    assert result.failure.error_code == "missing_render_result"
+    assert result.failure.log_artifact_key
 
 
 # ---------------------------------------------------------------------------

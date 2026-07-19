@@ -54,6 +54,42 @@ def test_apply_patches_rejects_token_prefix_match():
     assert out == code
 
 
+def test_apply_patches_rejects_search_inside_string_literal():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = 'message = "self.play(Create(dot))"\n'
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "self.play(Create(dot))", "replace": "self.wait()"}],
+    )
+
+    assert out == code
+
+
+def test_apply_patches_rejects_search_inside_comment():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = "# self.play(Create(dot))\nself.wait()\n"
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "self.play(Create(dot))", "replace": "self.wait()"}],
+    )
+
+    assert out == code
+
+
+def test_apply_patches_accepts_complete_python_token_span():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = "self.play(Create(dot))\n"
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "self.play(Create(dot))", "replace": "self.wait()"}],
+    )
+
+    assert out == "self.wait()\n"
+
+
 def test_apply_patches_skips_unmatched_search():
     cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
     code = "x = 1\n"

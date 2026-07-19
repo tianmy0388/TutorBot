@@ -268,11 +268,18 @@ async def retry_video_render(
         and str((child.metadata or {}).get("package_id") or "") == package_id
         and str((child.metadata or {}).get("resource_id") or "") == resource_id
     ]
+    failed_revision = int(
+        (resource.format_specific or {}).get("source_revision") or 0
+    )
     child = next(
         (
             candidate
             for candidate in reversed(matching)
             if candidate.status in {JobStatus.PENDING, JobStatus.RUNNING}
+            and int((candidate.metadata or {}).get("failed_revision") or 0)
+            == failed_revision
+            and str((candidate.metadata or {}).get("user_id") or "")
+            == parent.user_id
         ),
         None,
     )
@@ -282,9 +289,6 @@ async def retry_video_render(
     if child is None and render_status != "failed":
         raise HTTPException(status_code=409, detail="video is not retryable")
     if child is None:
-        failed_revision = int(
-            (resource.format_specific or {}).get("source_revision") or 0
-        )
         attempt = len(matching) + 1
         child = (
             await FollowUpScheduler(job_store).enqueue(
@@ -310,27 +314,30 @@ async def retry_video_render(
     # Durable child creation is the commit point. The original render failure,
     # source and log manifest remain visible while intelligent repair runs.
     reset_applied = False
+    expected_repair_job_id = (resource.format_specific or {}).get("repair_job_id")
 
     async def reset_resource() -> None:
         nonlocal reset_applied
-        current = await package_store.get_resource(resource_id)
-        if current is None:
-            return
-        current_format = current.format_specific or {}
-        if current_format.get("repair_job_id") == child.job_id:
-            return
-        current.format_specific["repair_status"] = "pending"
-        current.format_specific["repair_job_id"] = child.job_id
-        current.format_specific.setdefault("source_revision", 0)
-        current.format_specific.setdefault("repair_history", [])
-        await package_store.update_resource(
-            package_id,
-            current,
-            user_id=parent.user_id,
-        )
-        reset_applied = True
+        def bind_child(payload: dict[str, Any]) -> None:
+            payload["repair_status"] = "pending"
+            payload["repair_job_id"] = child.job_id
+            payload.setdefault("source_revision", failed_revision)
+            payload.setdefault("repair_history", [])
 
-    await job_store.run_if_child_active(child.job_id, operation=reset_resource)
+        updated = await package_store.mutate_video_repair_if_current(
+            package_id=package_id,
+            resource_id=resource_id,
+            user_id=parent.user_id,
+            expected_source_revision=failed_revision,
+            expected_repair_job_id=(
+                str(expected_repair_job_id) if expected_repair_job_id else None
+            ),
+            mutation=bind_child,
+        )
+        reset_applied = updated is not None
+
+    if str(expected_repair_job_id or "") != child.job_id:
+        await job_store.run_if_child_active(child.job_id, operation=reset_resource)
     current_child = await job_store.get(child.job_id) or child
     if reset_applied and current_child.status in {
         JobStatus.PENDING,

@@ -31,8 +31,10 @@ skipped and the loop continues with the next attempt.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
+import tokenize
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -354,6 +356,35 @@ class CodeRetry:
     def _has_token_boundaries(code: str, start: int, search: str) -> bool:
         """Return whether a substring does not cut through a Python token."""
         end = start + len(search)
+        line_offsets = [0]
+        for line in code.splitlines(keepends=True):
+            line_offsets.append(line_offsets[-1] + len(line))
+
+        def absolute(position: tuple[int, int]) -> int:
+            row, column = position
+            line_index = min(max(row - 1, 0), len(line_offsets) - 1)
+            return min(line_offsets[line_index] + column, len(code))
+
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
+        except (IndentationError, tokenize.TokenError):
+            tokens = []
+        if tokens:
+            token_starts = {absolute(token.start) for token in tokens}
+            token_ends = {absolute(token.end) for token in tokens}
+            if start not in token_starts or end not in token_ends:
+                return False
+            for token in tokens:
+                if token.type not in {tokenize.STRING, tokenize.COMMENT}:
+                    continue
+                protected_start = absolute(token.start)
+                protected_end = absolute(token.end)
+                if start < protected_end and end > protected_start:
+                    return False
+            return True
+
+        # Tokenization can fail on the malformed source that a retry is meant
+        # to repair. Retain the conservative lexical fallback for that case.
         before = code[start - 1] if start else ""
         after = code[end] if end < len(code) else ""
         first = search[0]

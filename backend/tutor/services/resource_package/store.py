@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -365,6 +365,57 @@ class ResourcePackageStore:
             row.resource_metadata = dict(resource.metadata or {})
             row.created_at = resource.created_at
         return resource
+
+    async def mutate_video_repair_if_current(
+        self,
+        *,
+        package_id: str,
+        resource_id: str,
+        user_id: str,
+        expected_source_revision: int,
+        expected_repair_job_id: str | None,
+        mutation: Callable[[dict[str, Any]], None],
+    ) -> Resource | None:
+        """Conditionally mutate repair payload in one resources DB transaction.
+
+        ``BEGIN IMMEDIATE`` serializes independent store instances before the
+        row is read. The source revision and repair owner are checked against
+        that transactional read, so a stale child can never overwrite a newer
+        source or another repair job.
+        """
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(ResourceRow).where(
+                        ResourceRow.package_id == package_id,
+                        ResourceRow.resource_id == resource_id,
+                        ResourceRow.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            payload = dict(row.format_specific or {})
+            try:
+                source_revision = int(payload.get("source_revision") or 0)
+            except (TypeError, ValueError):
+                return None
+            repair_job_id = payload.get("repair_job_id")
+            if (
+                source_revision != expected_source_revision
+                or repair_job_id != expected_repair_job_id
+            ):
+                return None
+            mutation(payload)
+            row.format_specific = _portable_format_specific(
+                payload,
+                get_settings().data_dir,
+            )
+            await session.flush()
+            return self._row_to_resource(row)
 
     async def get_for_user(
         self,

@@ -585,6 +585,9 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
         )
 
         format_specific = dict(data.get("format_specific") or {})
+        format_specific["repair_history"] = _public_repair_history(
+            format_specific.get("repair_history")
+        )
         failure = format_specific.get("render_failure")
         if isinstance(failure, dict):
             fallback = "渲染流程未生成可播放视频。"
@@ -647,6 +650,49 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
     # The structured question/options projection is the only browser surface.
     data["content"] = ""
     return data
+
+
+def _public_repair_history(value: Any) -> list[dict[str, Any]]:
+    """Project persisted repair attempts to a bounded browser-safe shape."""
+    from tutor.services.manim_render.executor import sanitize_public_diagnostic
+
+    if not isinstance(value, list):
+        return []
+    projected: list[dict[str, Any]] = []
+    for raw in value[-10:]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            failed_revision = max(0, int(raw.get("failed_revision") or 0))
+        except (TypeError, ValueError):
+            failed_revision = 0
+        record: dict[str, Any] = {
+            "job_id": sanitize_public_diagnostic(
+                str(raw.get("job_id") or "")
+            )[:96],
+            "failed_revision": failed_revision,
+            "status": sanitize_public_diagnostic(
+                str(raw.get("status") or "failed")
+            )[:20],
+        }
+        if raw.get("error_code"):
+            record["error_code"] = sanitize_public_diagnostic(
+                str(raw["error_code"])
+            )[:120]
+        if raw.get("summary"):
+            record["summary"] = sanitize_public_diagnostic(
+                str(raw["summary"])
+            )[:200]
+        log_key = str(raw.get("log_artifact_key") or "")
+        if log_key.startswith("manim_logs/"):
+            try:
+                resolve_artifact_key(log_key, Path("."))
+            except UnsafeArtifactKey:
+                pass
+            else:
+                record["log_artifact_key"] = log_key
+        projected.append(record)
+    return projected
 
 
 def public_package_dump(package: ResourcePackage) -> dict[str, Any]:

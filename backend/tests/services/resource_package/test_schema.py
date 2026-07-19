@@ -415,3 +415,48 @@ def test_package_avg_confidence():
         ],
     )
     assert pkg.summary()["avg_confidence"] == pytest.approx(0.7)
+
+
+def test_public_video_dump_sanitizes_legacy_repair_history() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "repair_history": [
+                {
+                    "job_id": "legacy-child",
+                    "failed_revision": 1,
+                    "status": "failed",
+                    "error_code": "repair_failed",
+                    "summary": (
+                        "provider-token=private-value at "
+                        "C:\\private\\scene.py "
+                        + ("x" * 1000)
+                    ),
+                    "traceback": "SECRET UNBOUNDED TRACE " + ("y" * 2000),
+                    "log_artifact_key": "C:\\private\\raw.log",
+                    "unexpected": "SECRET EXTRA FIELD",
+                }
+            ],
+        },
+    )
+
+    public = public_resource_dump(resource)
+    history = public["format_specific"]["repair_history"]
+
+    assert len(history) == 1
+    assert set(history[0]) <= {
+        "job_id",
+        "failed_revision",
+        "status",
+        "error_code",
+        "summary",
+        "log_artifact_key",
+    }
+    assert len(history[0]["summary"]) <= 200
+    assert "private-value" not in str(history)
+    assert "C:\\private" not in str(history)
+    assert "UNBOUNDED" not in str(history)
+    assert "EXTRA FIELD" not in str(history)
+    assert "log_artifact_key" not in history[0]

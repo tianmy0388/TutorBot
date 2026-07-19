@@ -191,3 +191,54 @@ Result: `1 passed` using the installed Manim 0.20.1 runtime.
 ## Commit
 
 Commit message: `feat: regenerate failed Manim videos on demand`
+
+## Post-review hardening follow-up
+
+The review findings were reproduced before implementation and fixed with
+adjacent regression coverage:
+
+- Transactional resource CAS: RED `3 failed`; GREEN `3 passed`. A
+  `BEGIN IMMEDIATE` compare-and-swap now checks package/resource/owner plus
+  the expected source revision and repair job in the same SQLite transaction.
+  All repair writers use this API, and stale children cannot mutate resources.
+  The endpoint reuses only an active child for the current owner/resource and
+  failed revision; repeated idempotent requests no longer resume it twice.
+- Immutable publishing and terminal failures: RED `5 failed`; GREEN
+  `5 passed`. Videos are published under SHA-256 content-addressed names via a
+  verified temporary copy and atomic replace. Executor exceptions, missing
+  render history, copy failures, missing paths, and empty URLs return bounded
+  structured failures. Repair publish failures preserve the original visible
+  source and render failure (`5` repair capability tests passed).
+- Candidate isolation: RED `21 failed, 2 passed`; GREEN `23 passed` for the
+  focused additions. Imports are limited to Manim, NumPy, and `math`; explicit
+  missing Manim symbols are rejected against the installed runtime. Dynamic
+  imports plus network, subprocess, environment, filesystem, and NumPy I/O
+  paths are rejected before execution. Bound-method validation now permits
+  known objects such as `axes.x_axis` while rejecting methods such as
+  `dot.rotate` in `VGroup`.
+- Legacy public repair history: RED `2 failed`; GREEN `2 passed`. Every video
+  `public_resource_dump` now projects only the last 10 records, applies a field
+  allowlist and diagnostic redaction/limits, and exposes only safe portable
+  `manim_logs/...` artifact keys, including records written by older versions.
+- Legacy SEARCH/REPLACE safety: RED `2 failed, 2 passed`; GREEN
+  `19 passed` for the complete CodeRetry module. Python token spans are now
+  used when tokenization succeeds, and searches overlapping string or comment
+  tokens are rejected. The conservative lexical fallback remains for malformed
+  code that cannot be tokenized.
+
+Post-review expanded verification:
+
+```powershell
+E:\Anaconda3\anaconda\envs\tutor\python.exe -m pytest backend/tests/agents/resource/test_manim_repair.py backend/tests/services/manim_render backend/tests/capabilities/test_video_render_fire_and_forget.py backend/tests/api/test_resources_artifact_endpoint.py backend/tests/api/test_video_render_retry.py backend/tests/services/resource_package/test_repair_cas.py backend/tests/services/resource_package/test_schema.py -q
+```
+
+The first run was `167 passed, 1 failed` because an old assertion still
+expected the pre-hardening filename `fake.mp4`. It was updated to assert the
+SHA-256 artifact key. Final result: `168 passed, 169 warnings`; warnings are
+the existing Starlette/httpx and pytest-asyncio deprecations.
+
+Ruff covered all 15 changed implementation/test files and finished with
+`All checks passed!`. The installed-runtime smoke
+`test_real_render_full_pipeline` passed in 16.17 seconds and produced a real
+video larger than 1 KiB. `git diff --check` exited 0. The pre-existing
+`frontend/next-env.d.ts` modification remains untouched and unstaged.

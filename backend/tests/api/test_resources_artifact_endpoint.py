@@ -84,6 +84,19 @@ def test_retry_endpoint_enqueues_video_repair_and_preserves_visible_failure(
                     "log_artifact_key": "manim_logs/original/attempt-01.log",
                 },
                 "source_revision": 3,
+                "repair_history": [
+                    {
+                        "job_id": "legacy",
+                        "failed_revision": 2,
+                        "status": "failed",
+                        "summary": (
+                            "api_key=SECRET_VALUE C:\\private\\scene.py "
+                            + ("z" * 1000)
+                        ),
+                        "traceback": "UNBOUNDED PRIVATE TRACE " + ("q" * 1000),
+                        "log_artifact_key": "C:\\private\\raw.log",
+                    }
+                ],
             },
         )
         package = ResourcePackage(
@@ -118,6 +131,12 @@ def test_retry_endpoint_enqueues_video_repair_and_preserves_visible_failure(
     assert second.json()["job_id"] == first.json()["job_id"]
     assert first.json()["resource"]["format_specific"]["render_status"] == "failed"
     assert first.json()["resource"]["format_specific"]["repair_status"] == "pending"
+    public_history = first.json()["resource"]["format_specific"]["repair_history"]
+    assert len(public_history[0]["summary"]) <= 200
+    assert "SECRET_VALUE" not in str(public_history)
+    assert "C:\\private" not in str(public_history)
+    assert "UNBOUNDED" not in str(public_history)
+    assert "log_artifact_key" not in public_history[0]
 
     async def verify() -> None:
         children = await jobs.get_children("repair-parent")

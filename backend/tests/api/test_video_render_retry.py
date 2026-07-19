@@ -324,3 +324,85 @@ def test_video_retry_rejects_ready_resource_without_creating_child(tmp_path):
 
     asyncio.run(verify())
     runner.resume_pending.assert_not_awaited()
+
+
+def test_video_retry_does_not_rebind_stale_active_child_from_old_revision(tmp_path):
+    jobs = JobStore(tmp_path / "jobs.db")
+    packages = ResourcePackageStore(tmp_path / "packages.db")
+
+    async def seed():
+        await jobs.init()
+        await packages.init()
+        parent = Job(
+            job_id="revision-parent",
+            user_id="owner",
+            session_id="session",
+            status=JobStatus.SUCCEEDED,
+        )
+        await jobs.save(parent)
+        stale = (
+            await FollowUpScheduler(jobs).enqueue(
+                parent.job_id,
+                (
+                    FollowUpTaskSpec(
+                        kind="video_repair_render",
+                        dedupe_key="video-repair:revision-package:revision-video:0:1",
+                        payload={
+                            "package_id": "revision-package",
+                            "resource_id": "revision-video",
+                            "user_id": "owner",
+                            "failed_revision": 0,
+                        },
+                    ),
+                ),
+            )
+        )[0]
+        resource = Resource(
+            resource_id="revision-video",
+            type=ResourceType.VIDEO,
+            title="video",
+            format_specific={
+                "manim_code": "current revision source",
+                "render_status": "failed",
+                "render_error": "current revision error",
+                "source_revision": 1,
+            },
+        )
+        package = ResourcePackage(
+            package_id="revision-package",
+            topic="topic",
+            resources=[resource],
+        )
+        package.associate_originating_job(parent.job_id)
+        await packages.save(package, user_id="owner")
+        return stale
+
+    stale = asyncio.run(seed())
+    runner = SimpleNamespace(store=jobs, resume_pending=AsyncMock(return_value=1))
+    app = FastAPI()
+    app.state.settings = SimpleNamespace(multi_user_enabled=True)
+    app.state.resource_package_store = packages
+    app.state.learning_runner = runner
+    app.include_router(router, prefix="/api/v1")
+
+    response = TestClient(app).post(
+        "/api/v1/resources/packages/owner/revision-package/resources/"
+        "revision-video/retry-video"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["job_id"] != stale.job_id
+    assert response.json()["child"]["metadata"]["failed_revision"] == 1
+
+    async def verify():
+        children = await jobs.get_children("revision-parent")
+        resource = await packages.get_resource("revision-video")
+        assert len(children) == 2
+        assert resource is not None
+        assert resource.format_specific["repair_job_id"] == children[-1].job_id
+        assert resource.format_specific["source_revision"] == 1
+        assert resource.format_specific["render_error"] == "current revision error"
+        await jobs.close()
+        await packages.close()
+
+    asyncio.run(verify())

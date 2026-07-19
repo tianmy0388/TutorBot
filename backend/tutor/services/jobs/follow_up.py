@@ -222,17 +222,19 @@ class VideoRepairFollowUpCapability(BaseCapability):
             raise PermissionError("Video repair is no longer current")
 
         async def mark_running() -> None:
-            current = await store.get_resource(resource_id)
-            if current is None:
-                raise RuntimeError("Video resource is unavailable")
-            current_payload = current.format_specific or {}
-            if (
-                current_payload.get("repair_job_id") != context.job_id
-                or int(current_payload.get("source_revision") or 0) != failed_revision
-            ):
+            def mutation(current_payload) -> None:  # type: ignore[no-untyped-def]
+                current_payload["repair_status"] = "running"
+
+            updated = await store.mutate_video_repair_if_current(
+                package_id=package_id,
+                resource_id=resource_id,
+                user_id=context.user_id,
+                expected_source_revision=failed_revision,
+                expected_repair_job_id=context.job_id,
+                mutation=mutation,
+            )
+            if updated is None:
                 raise PermissionError("Video repair is no longer current")
-            current_payload["repair_status"] = "running"
-            await store.update_resource(package_id, current, user_id=context.user_id)
 
         await self._guarded_commit(context, mark_running)
         original_failure = _render_failure_from_payload(payload, RenderFailure)
@@ -330,6 +332,25 @@ class VideoRepairFollowUpCapability(BaseCapability):
                     )
                 raise _VideoRepairError(render_failure)
 
+            if not getattr(render_result, "video_path", None) or not getattr(
+                render_result, "public_url", None
+            ):
+                message = "Video repair produced no publishable video"
+                log_key = ManimRenderService._write_log_artifact(
+                    context.job_id,
+                    attempt_label="repair-publish-missing",
+                    stdout="",
+                    stderr=message,
+                )
+                raise _VideoRepairError(
+                    RenderFailure(
+                        error_code="repair_publish_failed",
+                        summary=message,
+                        traceback_tail=(message,),
+                        log_artifact_key=log_key,
+                    )
+                )
+
             artifact_key = ""
             video_path = getattr(render_result, "video_path", None)
             if video_path:
@@ -341,42 +362,47 @@ class VideoRepairFollowUpCapability(BaseCapability):
                     artifact_key = ""
 
             async def persist_success() -> None:
-                current = await store.get_resource(resource_id)
-                if current is None:
-                    raise RuntimeError("Video resource is unavailable")
-                current_payload = current.format_specific or {}
-                if (
-                    current_payload.get("repair_job_id") != context.job_id
-                    or int(current_payload.get("source_revision") or 0)
-                    != failed_revision
-                ):
+                def mutation(current_payload) -> None:  # type: ignore[no-untyped-def]
+                    current_payload.update(
+                        {
+                            "manim_code": candidate,
+                            "scene_class": "MainScene",
+                            "render_status": "ready",
+                            "repair_status": "ready",
+                            "source_revision": failed_revision + 1,
+                        }
+                    )
+                    current_payload.pop("video_url", None)
+                    current_payload.pop("artifact_key", None)
+                    if getattr(render_result, "public_url", None):
+                        current_payload["video_url"] = render_result.public_url
+                    if artifact_key:
+                        current_payload["artifact_key"] = artifact_key
+                    if getattr(render_result, "duration_seconds", None):
+                        current_payload["duration_seconds"] = render_result.duration_seconds
+                    for key in (
+                        "render_failure",
+                        "render_error_code",
+                        "render_error",
+                    ):
+                        current_payload.pop(key, None)
+                    _append_repair_history(
+                        current_payload,
+                        job_id=context.job_id,
+                        failed_revision=failed_revision,
+                        status="ready",
+                    )
+
+                updated = await store.mutate_video_repair_if_current(
+                    package_id=package_id,
+                    resource_id=resource_id,
+                    user_id=context.user_id,
+                    expected_source_revision=failed_revision,
+                    expected_repair_job_id=context.job_id,
+                    mutation=mutation,
+                )
+                if updated is None:
                     raise PermissionError("Video repair is no longer current")
-                current_payload.update(
-                    {
-                        "manim_code": candidate,
-                        "scene_class": "MainScene",
-                        "render_status": "ready",
-                        "repair_status": "ready",
-                        "source_revision": failed_revision + 1,
-                    }
-                )
-                current_payload.pop("video_url", None)
-                current_payload.pop("artifact_key", None)
-                if getattr(render_result, "public_url", None):
-                    current_payload["video_url"] = render_result.public_url
-                if artifact_key:
-                    current_payload["artifact_key"] = artifact_key
-                if getattr(render_result, "duration_seconds", None):
-                    current_payload["duration_seconds"] = render_result.duration_seconds
-                for key in ("render_failure", "render_error_code", "render_error"):
-                    current_payload.pop(key, None)
-                _append_repair_history(
-                    current_payload,
-                    job_id=context.job_id,
-                    failed_revision=failed_revision,
-                    status="ready",
-                )
-                await store.update_resource(package_id, current, user_id=context.user_id)
 
             await self._guarded_commit(context, persist_success)
         except _VideoRepairError as exc:
@@ -439,40 +465,43 @@ class VideoRepairFollowUpCapability(BaseCapability):
         failure,
     ) -> None:  # type: ignore[no-untyped-def]
         async def persist() -> None:
-            current = await store.get_resource(resource_id)
-            if current is None:
-                raise RuntimeError("Video resource is unavailable")
-            payload = current.format_specific or {}
-            if (
-                payload.get("repair_job_id") != context.job_id
-                or int(payload.get("source_revision") or 0) != failed_revision
-            ):
-                raise PermissionError("Video repair is no longer current")
-            payload["repair_status"] = "failed"
-            _append_repair_history(
-                payload,
-                job_id=context.job_id,
-                failed_revision=failed_revision,
-                status="failed",
-                failure=failure,
-            )
             safe_log_key = _safe_log_artifact_key(failure.log_artifact_key)
-            if safe_log_key:
-                artifacts = list(payload.get("artifacts") or [])
-                if not any(
-                    isinstance(item, dict)
-                    and item.get("artifact_key") == safe_log_key
-                    for item in artifacts
-                ):
-                    artifacts.append(
-                        {
-                            "name": safe_log_key.rsplit("/", 1)[-1],
-                            "kind": "render_log",
-                            "artifact_key": safe_log_key,
-                        }
-                    )
-                payload["artifacts"] = artifacts[-20:]
-            await store.update_resource(package_id, current, user_id=context.user_id)
+
+            def mutation(payload) -> None:  # type: ignore[no-untyped-def]
+                payload["repair_status"] = "failed"
+                _append_repair_history(
+                    payload,
+                    job_id=context.job_id,
+                    failed_revision=failed_revision,
+                    status="failed",
+                    failure=failure,
+                )
+                if safe_log_key:
+                    artifacts = list(payload.get("artifacts") or [])
+                    if not any(
+                        isinstance(item, dict)
+                        and item.get("artifact_key") == safe_log_key
+                        for item in artifacts
+                    ):
+                        artifacts.append(
+                            {
+                                "name": safe_log_key.rsplit("/", 1)[-1],
+                                "kind": "render_log",
+                                "artifact_key": safe_log_key,
+                            }
+                        )
+                    payload["artifacts"] = artifacts[-20:]
+
+            updated = await store.mutate_video_repair_if_current(
+                package_id=package_id,
+                resource_id=resource_id,
+                user_id=context.user_id,
+                expected_source_revision=failed_revision,
+                expected_repair_job_id=context.job_id,
+                mutation=mutation,
+            )
+            if updated is None:
+                raise PermissionError("Video repair is no longer current")
 
         await self._guarded_commit(context, persist)
 

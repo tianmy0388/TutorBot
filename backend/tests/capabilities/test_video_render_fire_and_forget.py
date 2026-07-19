@@ -831,7 +831,7 @@ async def test_video_repair_regenerates_twice_after_validation_then_renders_once
     await store.save(package, user_id="owner")
     invalid = REPAIR_GOOD_CODE.replace("run_time=0.5", "run_time=0")
     agent = _ScriptedRepairAgent([invalid, REPAIR_GOOD_CODE])
-    renderer = _FakeRenderService(success=True, video_path=None)
+    renderer = _FakeRenderService(success=True)
 
     async def claim_guard(operation):
         await operation()
@@ -1011,7 +1011,7 @@ async def test_pending_video_repair_child_resumes_after_runner_refresh(
         "_runtime",
         lambda self: ({"python": "3.11", "manim": "0.20"}, {"Scene", "Dot", "Create"}),
     )
-    module_patch = monkeypatch_for_module(mr_module, _FakeRenderService(success=True, video_path=None))
+    module_patch = monkeypatch_for_module(mr_module, _FakeRenderService(success=True))
     runner = JobRunner(job_store=job_store, capability_registry=_EmptyCapabilities())  # type: ignore[arg-type]
 
     assert await runner.resume_pending() == 1
@@ -1075,3 +1075,78 @@ async def test_video_repair_child_cannot_cross_owner_boundary(tmp_path) -> None:
     assert reloaded.format_specific["manim_code"] == "PRIVATE SOURCE"
     assert reloaded.format_specific["render_error"] == "PRIVATE ERROR"
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_video_repair_empty_publish_preserves_original_failure(tmp_path) -> None:
+    from tutor.services.jobs.follow_up import VideoRepairFollowUpCapability
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    store = ResourcePackageStore(tmp_path / "packages.db")
+    await store.init()
+    resource = Resource(
+        resource_id="empty-publish-video",
+        type=ResourceType.VIDEO,
+        title="repair",
+        format_specific={
+            "manim_code": "ORIGINAL SOURCE",
+            "scene_class": "MainScene",
+            "render_status": "failed",
+            "render_error": "ORIGINAL ERROR",
+            "source_revision": 1,
+            "repair_status": "pending",
+            "repair_job_id": "empty-publish-child",
+        },
+    )
+    package = ResourcePackage(package_id="empty-publish-package", topic="t", resources=[resource])
+    await store.save(package, user_id="owner")
+
+    async def claim_guard(operation):
+        await operation()
+        return True
+
+    capability = VideoRepairFollowUpCapability(
+        package_store=store,
+        repair_agent=_ScriptedRepairAgent([REPAIR_GOOD_CODE]),
+        render_service=_FakeRenderService(success=True, video_path=None),
+        runtime_namespace={"Scene", "Dot", "Create"},
+        runtime_versions={"python": "3.11"},
+    )
+    capability._render_service.render = _empty_publish_render  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="Video repair failed"):
+        await capability.run(
+            UnifiedContext(
+                job_id="empty-publish-child",
+                user_id="owner",
+                metadata={
+                    "package_id": package.package_id,
+                    "resource_id": resource.resource_id,
+                    "failed_revision": 1,
+                    "_claim_validator": lambda: _async_true(),
+                    "_claim_guard": claim_guard,
+                },
+            ),
+            StreamBus(),
+        )
+
+    reloaded = await store.get_resource(resource.resource_id)
+    assert reloaded is not None
+    assert reloaded.format_specific["manim_code"] == "ORIGINAL SOURCE"
+    assert reloaded.format_specific["render_error"] == "ORIGINAL ERROR"
+    assert reloaded.format_specific["render_status"] == "failed"
+    assert reloaded.format_specific["repair_status"] == "failed"
+    assert reloaded.format_specific["repair_history"][-1]["status"] == "failed"
+    await store.close()
+
+
+async def _empty_publish_render(**kwargs):  # type: ignore[no-untyped-def]
+    class Result:
+        success = True
+        public_url = ""
+        video_path = None
+        duration_seconds = 0
+        error = ""
+        failure = None
+
+    return Result()
