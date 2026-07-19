@@ -311,6 +311,34 @@ async def test_publish_is_content_addressed_and_never_overwrites_prior_video(tmp
 
 
 @pytest.mark.asyncio
+async def test_publish_replaces_corrupt_existing_digest_destination(tmp_path):
+    source = tmp_path / "source" / "MainScene.mp4"
+    source.parent.mkdir()
+    source_bytes = b"correct-content-addressed-video"
+    source.write_bytes(source_bytes)
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    public_dir = tmp_path / "public"
+    public_dir.mkdir()
+    destination = public_dir / f"{digest}.mp4"
+    destination.write_bytes(b"corrupt-stale-video")
+    executor = MagicMock(spec=ManimExecutor)
+    executor.is_available.return_value = True
+    executor.temp_dir = tmp_path / "work"
+    executor.render.return_value = ManimRenderResult(
+        status=RenderStatus.SUCCESS,
+        video_path=source,
+    )
+    service = ManimRenderService(executor=executor, public_dir=public_dir)
+
+    result = await service.render(code=VALID_CODE, scene_class="HelloScene")
+
+    assert result.success is True
+    assert result.video_path == destination
+    assert result.video_path.read_bytes() == source_bytes
+    assert hashlib.sha256(result.video_path.read_bytes()).hexdigest() == digest
+
+
+@pytest.mark.asyncio
 async def test_publish_copy_failure_returns_structured_terminal_failure(
     tmp_path,
     monkeypatch,

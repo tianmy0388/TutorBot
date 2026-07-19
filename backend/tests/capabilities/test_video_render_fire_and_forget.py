@@ -1078,6 +1078,127 @@ async def test_next_manual_repair_uses_latest_failed_candidate_and_diagnostic(
 
 
 @pytest.mark.asyncio
+async def test_renderer_exception_persists_candidate_for_next_manual_repair(
+    tmp_path,
+) -> None:
+    from tutor.services.jobs.follow_up import VideoRepairFollowUpCapability
+    from tutor.services.resource_package.schema import public_resource_dump
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    class RaisingRenderer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def render(self, *, code, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(code)
+            raise RuntimeError(
+                "provider-token=SECRET_RENDERER C:\\private\\renderer.py"
+            )
+
+    store = ResourcePackageStore(tmp_path / "packages.db")
+    await store.init()
+    resource = Resource(
+        resource_id="renderer-exception-video",
+        type=ResourceType.VIDEO,
+        title="repair",
+        format_specific={
+            "manim_code": "ORIGINAL SOURCE",
+            "scene_class": "MainScene",
+            "render_status": "failed",
+            "render_error": "ORIGINAL FAILURE",
+            "source_revision": 5,
+            "repair_status": "running",
+            "repair_job_id": "renderer-child-1",
+        },
+    )
+    package = ResourcePackage(
+        package_id="renderer-exception-package",
+        topic="t",
+        resources=[resource],
+    )
+    await store.save(package, user_id="owner")
+
+    async def claim_guard(operation):
+        await operation()
+        return True
+
+    renderer = RaisingRenderer()
+    first_agent = _ScriptedRepairAgent([REPAIR_GOOD_CODE])
+    first_capability = VideoRepairFollowUpCapability(
+        package_store=store,
+        repair_agent=first_agent,
+        render_service=renderer,
+        runtime_namespace={
+            "Scene": object(),
+            "Dot": object(),
+            "Create": object(),
+        },
+        runtime_versions={"python": "3.11", "manim": "0.20"},
+    )
+    with pytest.raises(RuntimeError, match="Video repair failed"):
+        await first_capability.run(
+            UnifiedContext(
+                job_id="renderer-child-1",
+                user_id="owner",
+                metadata={
+                    "package_id": package.package_id,
+                    "resource_id": resource.resource_id,
+                    "failed_revision": 5,
+                    "_claim_validator": lambda: _async_true(),
+                    "_claim_guard": claim_guard,
+                },
+            ),
+            StreamBus(),
+        )
+
+    failed = await store.get_resource(resource.resource_id)
+    assert failed is not None
+    assert renderer.calls == [REPAIR_GOOD_CODE]
+    assert failed.format_specific["manim_code"] == "ORIGINAL SOURCE"
+    assert failed.format_specific["source_revision"] == 5
+    assert failed.format_specific["repair_candidate_code"] == REPAIR_GOOD_CODE
+    failure = failed.format_specific["repair_candidate_failure"]
+    assert failure["error_code"] == "repair_render_failed"
+    assert "SECRET_RENDERER" not in str(failure)
+    assert "C:\\private" not in str(failure)
+    public = public_resource_dump(failed)
+    assert "SECRET_RENDERER" not in str(public)
+    assert "C:\\private" not in str(public)
+
+    second_agent = _ScriptedRepairAgent([REPAIR_GOOD_CODE])
+    second_capability = VideoRepairFollowUpCapability(
+        package_store=store,
+        repair_agent=second_agent,
+        render_service=_FakeRenderService(success=True),
+        runtime_namespace={
+            "Scene": object(),
+            "Dot": object(),
+            "Create": object(),
+        },
+        runtime_versions={"python": "3.11", "manim": "0.20"},
+    )
+    await second_capability.run(
+        UnifiedContext(
+            job_id="renderer-child-2",
+            user_id="owner",
+            metadata={
+                "package_id": package.package_id,
+                "resource_id": resource.resource_id,
+                "failed_revision": 5,
+                "expected_repair_job_id": "renderer-child-1",
+                "_claim_validator": lambda: _async_true(),
+                "_claim_guard": claim_guard,
+            },
+        ),
+        StreamBus(),
+    )
+
+    assert second_agent.calls[0][0] == REPAIR_GOOD_CODE
+    assert second_agent.calls[0][1].error_code == "repair_render_failed"
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_generation_failure_before_candidate_retains_previous_candidate_state(
     tmp_path,
 ) -> None:

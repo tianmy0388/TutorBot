@@ -371,11 +371,26 @@ class VideoRepairFollowUpCapability(BaseCapability):
                     raise _VideoRepairError(latest_candidate_failure)
 
             renderer = self._render_service or get_manim_render_service()
-            render_result = await renderer.render(
-                code=candidate,
-                scene_class="MainScene",
-                job_id=context.job_id,
-            )
+            try:
+                render_result = await renderer.render(
+                    code=candidate,
+                    scene_class="MainScene",
+                    job_id=context.job_id,
+                )
+            except Exception:
+                message = "Video repair renderer failed internally"
+                log_key = ManimRenderService._write_current_exception_log_artifact(
+                    context.job_id,
+                    attempt_label="repair-render-exception",
+                    public_stderr=message,
+                )
+                latest_candidate_failure = RenderFailure(
+                    error_code="repair_render_failed",
+                    summary=message,
+                    traceback_tail=(message,),
+                    log_artifact_key=log_key,
+                )
+                raise _VideoRepairError(latest_candidate_failure) from None
             if not render_result.success:
                 render_failure = getattr(render_result, "failure", None)
                 if render_failure is None:

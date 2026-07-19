@@ -452,3 +452,41 @@ TDD and verification evidence:
 - Changed-file Ruff: `All checks passed!`; compileall and `git diff --check`
   exited 0.
 - Real installed-Manim pipeline: `1 passed` in 15.44 seconds.
+
+## Sixth review hardening follow-up
+
+The final quality pass closed three durability and schema gaps around private
+repair handoff and published video integrity.
+
+Renderer exceptions that occur after deterministic validation now enter the
+same `_VideoRepairError` persistence path as structured render failures. The
+valid generated source is retained privately as `repair_candidate_code`, its
+diagnostic is classified as `repair_render_failed`, and only a fixed sanitized
+message reaches persisted/public failure state. The complete exception remains
+available solely in the operator log. The next manual repair receives both the
+candidate and the safe diagnostic, while canonical `manim_code` and
+`source_revision` remain unchanged.
+
+`VideoResource` now declares both transient fields explicitly under its strict
+schema. `RepairCandidateFailure` rejects extra properties and enforces the same
+bounds used by the persistence projection: 120 characters for the error code,
+240 for the summary, 40 traceback lines of at most 500 characters, and a
+500-character artifact key. Candidate source is capped at 100,000 characters.
+The browser projection continues to omit both fields.
+
+Content-addressed publishing now re-hashes an existing digest destination
+before reuse. A stale or corrupt destination is replaced through the existing
+verified temporary copy and atomic `os.replace` path, followed by a final hash
+verification of the published file.
+
+TDD and verification evidence:
+
+- Renderer-exception RED: `1 failed`; focused GREEN: `1 passed`.
+- Typed transient-schema RED: `1 failed, 5 passed`; focused GREEN including
+  public omission: `7 passed`.
+- Corrupt-destination RED: `1 failed`; focused publish GREEN: `3 passed`.
+- Complete changed focused files: `80 passed, 0 failed`.
+- Expanded Task 9/API/resource/Manim suite: `268 passed, 0 failed`.
+- Changed-file Ruff: `All checks passed!`; scoped compileall and
+  `git diff --check` exited 0.
+- Real installed-Manim pipeline: `1 passed` in 16.36 seconds.

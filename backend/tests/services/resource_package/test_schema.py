@@ -190,6 +190,78 @@ def test_video_resource_accepts_structured_render_failure_and_log_manifest():
     assert v.artifacts[0].kind == "render_log"
 
 
+def test_video_resource_parses_bounded_transient_repair_candidate_state() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="repair candidate",
+        format_specific={
+            "manim_code": "ORIGINAL SOURCE",
+            "render_status": "failed",
+            "repair_candidate_code": "from manim import *\n",
+            "repair_candidate_failure": {
+                "error_code": "repair_render_failed",
+                "summary": "renderer failed internally",
+                "traceback_tail": ["safe diagnostic"],
+                "log_artifact_key": "manim_logs/child/repair-render.log",
+            },
+        },
+    )
+
+    parsed = resource.parsed_format_specific()
+
+    assert isinstance(parsed, VideoResource)
+    assert parsed.repair_candidate_code == "from manim import *\n"
+    assert parsed.repair_candidate_failure is not None
+    assert parsed.repair_candidate_failure.error_code == "repair_render_failed"
+
+
+@pytest.mark.parametrize(
+    "candidate_state",
+    [
+        {"repair_candidate_code": "x" * 100_001},
+        {
+            "repair_candidate_failure": {
+                "error_code": "x" * 121,
+                "summary": "safe",
+                "traceback_tail": [],
+            }
+        },
+        {
+            "repair_candidate_failure": {
+                "error_code": "repair_failed",
+                "summary": "x" * 241,
+                "traceback_tail": [],
+            }
+        },
+        {
+            "repair_candidate_failure": {
+                "error_code": "repair_failed",
+                "summary": "safe",
+                "traceback_tail": ["x" * 501],
+            }
+        },
+        {
+            "repair_candidate_failure": {
+                "error_code": "repair_failed",
+                "summary": "safe",
+                "traceback_tail": ["safe"] * 41,
+            }
+        },
+    ],
+)
+def test_video_resource_rejects_oversized_transient_candidate_state(
+    candidate_state,
+) -> None:
+    with pytest.raises(ValidationError):
+        VideoResource.model_validate(
+            {
+                "manim_code": "ORIGINAL SOURCE",
+                "render_status": "failed",
+                **candidate_state,
+            }
+        )
+
+
 @pytest.mark.parametrize(
     ("render_status", "state_fields"),
     (

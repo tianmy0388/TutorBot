@@ -246,6 +246,24 @@ class ReadingResource(BaseModel):
     estimated_reading_minutes: int = 5
 
 
+class RepairCandidateFailure(BaseModel):
+    """Bounded diagnostic retained for the next private repair attempt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error_code: str = Field(max_length=120)
+    summary: str = Field(max_length=240)
+    traceback_tail: list[str] = Field(default_factory=list, max_length=40)
+    log_artifact_key: str | None = Field(default=None, max_length=500)
+
+    @field_validator("traceback_tail")
+    @classmethod
+    def _bound_traceback_lines(cls, lines: list[str]) -> list[str]:
+        if any(len(line) > 500 for line in lines):
+            raise ValueError("repair candidate traceback lines must be at most 500 characters")
+        return lines
+
+
 class VideoResource(BaseModel):
     """Payload for ``type=video``. Holds Manim source + (optional) render result.
 
@@ -274,6 +292,8 @@ class VideoResource(BaseModel):
     repair_status: Literal["pending", "running", "ready", "failed"] | None = None
     repair_job_id: str | None = None
     repair_history: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
+    repair_candidate_code: str | None = Field(default=None, max_length=100_000)
+    repair_candidate_failure: RepairCandidateFailure | None = None
     artifacts: list[ArtifactRef] = Field(default_factory=list)
 
 
@@ -736,6 +756,7 @@ __all__ = [
     "MindMapResource",
     "PPTResource",
     "ReadingResource",
+    "RepairCandidateFailure",
     "Resource",
     "ResourcePackage",
     "ResourceReview",

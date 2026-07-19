@@ -444,13 +444,16 @@ class ManimRenderService:
         if not suffix or len(suffix) > 10 or not suffix[1:].isalnum():
             suffix = ".mp4"
         dest = self.public_dir / f"{digest}{suffix}"
-        if not dest.exists():
+        destination_matches = dest.exists() and self._file_sha256(dest) == digest
+        if not destination_matches:
             temporary = self.public_dir / f".{digest}.{uuid.uuid4().hex}.tmp"
             try:
                 shutil.copy2(video_path, temporary)
                 if self._file_sha256(temporary) != digest:
                     raise OSError("published video changed while copying")
                 os.replace(temporary, dest)
+                if self._file_sha256(dest) != digest:
+                    raise OSError("published video failed final verification")
             finally:
                 with suppress(OSError):
                     temporary.unlink(missing_ok=True)
