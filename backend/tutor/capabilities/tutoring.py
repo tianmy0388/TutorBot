@@ -63,6 +63,7 @@ from tutor.services.learner_profile.builder import (
     ProfileBuilder,
     get_profile_builder,
 )
+from tutor.services.learner_profile.dialogue_ingest import ingest_dialogue_signal
 from tutor.services.learning_events.store import (
     LearningEventStore,
     get_learning_event_store,
@@ -398,6 +399,11 @@ class TutoringCapability(BaseCapability):
                     stage="session_recording",
                 )
 
+        # Conversational profile building: best-effort, post-answer. The
+        # student's answer has already streamed; extraction latency only
+        # delays job terminalisation by a bounded (20s) margin.
+        _, profile_follow_ups = await ingest_dialogue_signal(context, stream)
+
         # ------------------------------------------------------------------
         # Emit final result
         # ------------------------------------------------------------------
@@ -421,6 +427,7 @@ class TutoringCapability(BaseCapability):
         return CapabilityResult(
             assistant_message=(answer.tldr if answer and answer.tldr else "答疑已完成"),
             payload=payload,
+            follow_up_tasks=profile_follow_ups,
         )
 
 
