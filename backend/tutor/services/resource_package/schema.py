@@ -270,6 +270,10 @@ class VideoResource(BaseModel):
     render_error: str | None = None
     render_error_code: str | None = None
     render_failure: dict[str, Any] | None = None
+    source_revision: int = Field(default=0, ge=0)
+    repair_status: Literal["pending", "running", "ready", "failed"] | None = None
+    repair_job_id: str | None = None
+    repair_history: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
     artifacts: list[ArtifactRef] = Field(default_factory=list)
 
 

@@ -20,6 +20,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -43,6 +44,101 @@ def _make_client(*, multi_user_enabled: bool = True) -> TestClient:
     app.state.settings = SimpleNamespace(multi_user_enabled=multi_user_enabled)
     app.include_router(resources_router, prefix="/api/v1")
     return TestClient(app)
+
+
+def test_retry_endpoint_enqueues_video_repair_and_preserves_visible_failure(
+    tmp_path: Path,
+) -> None:
+    from tutor.services.jobs.schema import Job, JobStatus
+    from tutor.services.jobs.store import JobStore
+    from tutor.services.resource_package.schema import Resource, ResourcePackage, ResourceType
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    jobs = JobStore(tmp_path / "jobs.db")
+    packages = ResourcePackageStore(tmp_path / "packages.db")
+
+    async def seed() -> None:
+        await jobs.init()
+        await packages.init()
+        parent = Job(
+            job_id="repair-parent",
+            user_id="owner",
+            session_id="session",
+            status=JobStatus.SUCCEEDED,
+        )
+        await jobs.save(parent)
+        resource = Resource(
+            resource_id="repair-video",
+            type=ResourceType.VIDEO,
+            title="video",
+            format_specific={
+                "manim_code": "FAILED ORIGINAL SOURCE",
+                "scene_class": "MainScene",
+                "render_status": "failed",
+                "render_error_code": "process_exit",
+                "render_error": "VISIBLE ORIGINAL FAILURE",
+                "render_failure": {
+                    "error_code": "process_exit",
+                    "summary": "VISIBLE ORIGINAL FAILURE",
+                    "traceback_tail": ["ValueError: failed"],
+                    "log_artifact_key": "manim_logs/original/attempt-01.log",
+                },
+                "source_revision": 3,
+            },
+        )
+        package = ResourcePackage(
+            package_id="repair-package",
+            topic="topic",
+            resources=[resource],
+        )
+        package.associate_originating_job(parent.job_id)
+        await packages.save(package, user_id="owner")
+
+    import asyncio
+
+    asyncio.run(seed())
+    runner = SimpleNamespace(store=jobs, resume_pending=AsyncMock(return_value=1))
+    app = FastAPI()
+    app.state.settings = SimpleNamespace(multi_user_enabled=True)
+    app.state.resource_package_store = packages
+    app.state.learning_runner = runner
+    app.include_router(resources_router, prefix="/api/v1")
+    client = TestClient(app)
+    url = (
+        "/api/v1/resources/packages/owner/repair-package/resources/"
+        "repair-video/retry-video"
+    )
+
+    first = client.post(url)
+    second = client.post(url)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["child"]["task_kind"] == "video_repair_render"
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert first.json()["resource"]["format_specific"]["render_status"] == "failed"
+    assert first.json()["resource"]["format_specific"]["repair_status"] == "pending"
+
+    async def verify() -> None:
+        children = await jobs.get_children("repair-parent")
+        resource = await packages.get_resource("repair-video")
+        assert len(children) == 1
+        assert children[0].metadata == {
+            "package_id": "repair-package",
+            "resource_id": "repair-video",
+            "user_id": "owner",
+            "failed_revision": 3,
+        }
+        assert resource is not None
+        assert resource.format_specific["manim_code"] == "FAILED ORIGINAL SOURCE"
+        assert resource.format_specific["render_error"] == "VISIBLE ORIGINAL FAILURE"
+        assert resource.format_specific["render_status"] == "failed"
+        assert resource.format_specific["repair_status"] == "pending"
+        await jobs.close()
+        await packages.close()
+
+    asyncio.run(verify())
+    runner.resume_pending.assert_awaited_once()
 
 
 @pytest.fixture

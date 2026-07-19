@@ -42,6 +42,18 @@ def test_apply_patches_replaces_first_match():
     assert out == "x = 100\ny = 2\nx = x + 1\n"
 
 
+def test_apply_patches_rejects_token_prefix_match():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = "self.play(Create(dot), run_time=0.5)\n"
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "run_time=0", "replace": "run_time=1"}],
+    )
+
+    assert out == code
+
+
 def test_apply_patches_skips_unmatched_search():
     cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
     code = "x = 1\n"

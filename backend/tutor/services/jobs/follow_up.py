@@ -145,6 +145,447 @@ class VideoRenderFollowUpCapability(BaseCapability):
         )
 
 
+class _VideoRepairError(RuntimeError):
+    def __init__(self, failure) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(failure.summary)
+        self.failure = failure
+
+
+class VideoRepairFollowUpCapability(BaseCapability):
+    """Regenerate a failed video's complete source, validate, then render once."""
+
+    manifest = CapabilityManifest(
+        name="video_repair_render",
+        description="用户触发的持久化 Manim 全源码修复任务",
+        stages=["video_repair_generation", "video_repair_rendering"],
+        tags=["internal", "follow_up", "video", "repair"],
+    )
+
+    def __init__(
+        self,
+        package_store=None,
+        settings=None,
+        repair_agent=None,
+        render_service=None,
+        runtime_namespace=None,
+        runtime_versions=None,
+    ) -> None:
+        super().__init__()
+        self._package_store = package_store
+        self._settings = settings
+        self._repair_agent = repair_agent
+        self._render_service = render_service
+        self._runtime_namespace = runtime_namespace
+        self._runtime_versions = runtime_versions
+
+    async def run(
+        self,
+        context: UnifiedContext,
+        stream: StreamBus,
+    ) -> CapabilityResult:
+        from pathlib import Path
+
+        from tutor.agents.resource.manim_repair import ManimRepairAgent
+        from tutor.services.artifacts import UnsafeArtifactKey, to_artifact_key
+        from tutor.services.config.settings import get_settings
+        from tutor.services.manim_render.candidate_validation import (
+            validate_manim_candidate,
+        )
+        from tutor.services.manim_render.executor import RenderFailure
+        from tutor.services.manim_render.service import (
+            ManimRenderService,
+            get_manim_render_service,
+        )
+        from tutor.services.resource_package import get_resource_package_store
+
+        package_id = str(context.metadata.get("package_id") or "")
+        resource_id = str(context.metadata.get("resource_id") or "")
+        failed_revision = int(context.metadata.get("failed_revision") or 0)
+        await _require_current_claim(context)
+        store = self._package_store or get_resource_package_store()
+        package = await store.get_for_user(package_id, context.user_id)
+        if package is None or not await store.owns_resource(
+            package_id, resource_id, context.user_id
+        ):
+            raise PermissionError("Video resource is unavailable for this user")
+        resource = next(
+            (item for item in package.resources if item.resource_id == resource_id),
+            None,
+        )
+        if resource is None:
+            raise RuntimeError("Video resource is unavailable")
+        payload = resource.format_specific or {}
+        if (
+            int(payload.get("source_revision") or 0) != failed_revision
+            or payload.get("repair_job_id") != context.job_id
+        ):
+            raise PermissionError("Video repair is no longer current")
+
+        async def mark_running() -> None:
+            current = await store.get_resource(resource_id)
+            if current is None:
+                raise RuntimeError("Video resource is unavailable")
+            current_payload = current.format_specific or {}
+            if (
+                current_payload.get("repair_job_id") != context.job_id
+                or int(current_payload.get("source_revision") or 0) != failed_revision
+            ):
+                raise PermissionError("Video repair is no longer current")
+            current_payload["repair_status"] = "running"
+            await store.update_resource(package_id, current, user_id=context.user_id)
+
+        await self._guarded_commit(context, mark_running)
+        original_failure = _render_failure_from_payload(payload, RenderFailure)
+        runtime_versions, runtime_namespace = self._runtime()
+        workdir = Path(
+            getattr(
+                getattr(self._render_service, "executor", None),
+                "temp_dir",
+                get_settings().manim_temp_dir,
+            )
+        )
+        workdir.mkdir(parents=True, exist_ok=True)
+        agent = self._repair_agent or ManimRepairAgent()
+
+        try:
+            candidate = await agent.regenerate(
+                context,
+                failed_code=str(payload.get("manim_code") or ""),
+                failure=original_failure,
+                runtime=runtime_versions,
+            )
+            validation = validate_manim_candidate(
+                candidate,
+                workdir=workdir,
+                runtime_namespace=runtime_namespace,
+            )
+            if not validation.valid:
+                issue_text = "\n".join(
+                    f"{issue.code}: {issue.message}" for issue in validation.issues
+                )
+                log_key = ManimRenderService._write_log_artifact(
+                    context.job_id,
+                    attempt_label="candidate-validation-01",
+                    stdout="",
+                    stderr=issue_text,
+                )
+                validation_failure = RenderFailure(
+                    error_code="candidate_validation_failed",
+                    summary="Regenerated Manim source failed deterministic validation",
+                    traceback_tail=tuple(issue_text.splitlines()[-40:]),
+                    log_artifact_key=log_key,
+                )
+                candidate = await agent.regenerate(
+                    context,
+                    failed_code=candidate,
+                    failure=validation_failure,
+                    runtime=runtime_versions,
+                )
+                validation = validate_manim_candidate(
+                    candidate,
+                    workdir=workdir,
+                    runtime_namespace=runtime_namespace,
+                )
+                if not validation.valid:
+                    issue_text = "\n".join(
+                        f"{issue.code}: {issue.message}" for issue in validation.issues
+                    )
+                    log_key = ManimRenderService._write_log_artifact(
+                        context.job_id,
+                        attempt_label="candidate-validation-02",
+                        stdout="",
+                        stderr=issue_text,
+                    )
+                    raise _VideoRepairError(
+                        RenderFailure(
+                            error_code="candidate_validation_failed",
+                            summary="Regenerated Manim source failed deterministic validation",
+                            traceback_tail=tuple(issue_text.splitlines()[-40:]),
+                            log_artifact_key=log_key,
+                        )
+                    )
+
+            renderer = self._render_service or get_manim_render_service()
+            render_result = await renderer.render(
+                code=candidate,
+                scene_class="MainScene",
+                job_id=context.job_id,
+            )
+            if not render_result.success:
+                render_failure = getattr(render_result, "failure", None)
+                if render_failure is None:
+                    message = "Video repair render failed internally"
+                    log_key = ManimRenderService._write_log_artifact(
+                        context.job_id,
+                        attempt_label="repair-render-internal-error",
+                        stdout="",
+                        stderr=message,
+                        operator_stderr=str(getattr(render_result, "error", "") or message),
+                    )
+                    render_failure = RenderFailure(
+                        error_code="repair_render_failed",
+                        summary=message,
+                        traceback_tail=(message,),
+                        log_artifact_key=log_key,
+                    )
+                raise _VideoRepairError(render_failure)
+
+            artifact_key = ""
+            video_path = getattr(render_result, "video_path", None)
+            if video_path:
+                try:
+                    artifact_key = to_artifact_key(
+                        Path(video_path), get_settings().data_dir
+                    )
+                except UnsafeArtifactKey:
+                    artifact_key = ""
+
+            async def persist_success() -> None:
+                current = await store.get_resource(resource_id)
+                if current is None:
+                    raise RuntimeError("Video resource is unavailable")
+                current_payload = current.format_specific or {}
+                if (
+                    current_payload.get("repair_job_id") != context.job_id
+                    or int(current_payload.get("source_revision") or 0)
+                    != failed_revision
+                ):
+                    raise PermissionError("Video repair is no longer current")
+                current_payload.update(
+                    {
+                        "manim_code": candidate,
+                        "scene_class": "MainScene",
+                        "render_status": "ready",
+                        "repair_status": "ready",
+                        "source_revision": failed_revision + 1,
+                    }
+                )
+                current_payload.pop("video_url", None)
+                current_payload.pop("artifact_key", None)
+                if getattr(render_result, "public_url", None):
+                    current_payload["video_url"] = render_result.public_url
+                if artifact_key:
+                    current_payload["artifact_key"] = artifact_key
+                if getattr(render_result, "duration_seconds", None):
+                    current_payload["duration_seconds"] = render_result.duration_seconds
+                for key in ("render_failure", "render_error_code", "render_error"):
+                    current_payload.pop(key, None)
+                _append_repair_history(
+                    current_payload,
+                    job_id=context.job_id,
+                    failed_revision=failed_revision,
+                    status="ready",
+                )
+                await store.update_resource(package_id, current, user_id=context.user_id)
+
+            await self._guarded_commit(context, persist_success)
+        except _VideoRepairError as exc:
+            await self._persist_failure(
+                context, store, package_id, resource_id, failed_revision, exc.failure
+            )
+            raise RuntimeError("Video repair failed") from None
+        except Exception:
+            message = "Video repair generation failed"
+            log_key = ManimRenderService._write_current_exception_log_artifact(
+                context.job_id,
+                attempt_label="repair-generation-error",
+                public_stderr=message,
+            )
+            failure = RenderFailure(
+                error_code="repair_generation_failed",
+                summary=message,
+                traceback_tail=(message,),
+                log_artifact_key=log_key,
+            )
+            await self._persist_failure(
+                context, store, package_id, resource_id, failed_revision, failure
+            )
+            raise RuntimeError("Video repair failed") from None
+
+        return CapabilityResult(
+            assistant_message="视频修复完成",
+            payload={
+                "package_id": package_id,
+                "resource_id": resource_id,
+                "render_status": "ready",
+                "source_revision": failed_revision + 1,
+            },
+            artifacts=(
+                ArtifactRef(
+                    name=artifact_key.rsplit("/", 1)[-1],
+                    kind="video",
+                    artifact_key=artifact_key,
+                ),
+            ) if artifact_key else (),
+        )
+
+    @staticmethod
+    async def _guarded_commit(context: UnifiedContext, operation) -> None:  # type: ignore[no-untyped-def]
+        await _require_current_claim(context)
+        guard = context.metadata.get("_claim_guard")
+        if callable(guard):
+            if not await guard(operation):
+                raise PermissionError("follow-up claim is no longer current")
+        else:
+            await operation()
+
+    async def _persist_failure(
+        self,
+        context,
+        store,
+        package_id,
+        resource_id,
+        failed_revision,
+        failure,
+    ) -> None:  # type: ignore[no-untyped-def]
+        async def persist() -> None:
+            current = await store.get_resource(resource_id)
+            if current is None:
+                raise RuntimeError("Video resource is unavailable")
+            payload = current.format_specific or {}
+            if (
+                payload.get("repair_job_id") != context.job_id
+                or int(payload.get("source_revision") or 0) != failed_revision
+            ):
+                raise PermissionError("Video repair is no longer current")
+            payload["repair_status"] = "failed"
+            _append_repair_history(
+                payload,
+                job_id=context.job_id,
+                failed_revision=failed_revision,
+                status="failed",
+                failure=failure,
+            )
+            safe_log_key = _safe_log_artifact_key(failure.log_artifact_key)
+            if safe_log_key:
+                artifacts = list(payload.get("artifacts") or [])
+                if not any(
+                    isinstance(item, dict)
+                    and item.get("artifact_key") == safe_log_key
+                    for item in artifacts
+                ):
+                    artifacts.append(
+                        {
+                            "name": safe_log_key.rsplit("/", 1)[-1],
+                            "kind": "render_log",
+                            "artifact_key": safe_log_key,
+                        }
+                    )
+                payload["artifacts"] = artifacts[-20:]
+            await store.update_resource(package_id, current, user_id=context.user_id)
+
+        await self._guarded_commit(context, persist)
+
+    def _runtime(self) -> tuple[dict[str, str], set[str]]:
+        if self._runtime_versions is not None and self._runtime_namespace is not None:
+            return dict(self._runtime_versions), set(self._runtime_namespace)
+        import platform
+        try:
+            import manim
+        except Exception:
+            return {"python": platform.python_version(), "manim": "unavailable"}, set()
+        return (
+            {
+                "python": platform.python_version(),
+                "manim": str(getattr(manim, "__version__", "unknown")),
+            },
+            set(vars(manim)),
+        )
+
+
+def _render_failure_from_payload(payload, render_failure_type):  # type: ignore[no-untyped-def]
+    raw = payload.get("render_failure")
+    if isinstance(raw, dict):
+        return render_failure_type(
+            error_code=str(raw.get("error_code") or payload.get("render_error_code") or "render_failed"),
+            summary=str(raw.get("summary") or payload.get("render_error") or "Video rendering failed"),
+            traceback_tail=tuple(str(line) for line in (raw.get("traceback_tail") or [])[-120:]),
+            log_artifact_key=str(raw.get("log_artifact_key") or ""),
+        )
+    return render_failure_type(
+        error_code=str(payload.get("render_error_code") or "render_failed"),
+        summary=str(payload.get("render_error") or "Video rendering failed"),
+    )
+
+
+def _append_repair_history(
+    payload,
+    *,
+    job_id,
+    failed_revision,
+    status,
+    failure=None,
+):  # type: ignore[no-untyped-def]
+    from tutor.services.manim_render.executor import sanitize_public_diagnostic
+
+    history = [
+        normalized
+        for raw in list(payload.get("repair_history") or [])[-9:]
+        if isinstance(raw, dict)
+        for normalized in [_normalize_repair_history_record(raw)]
+    ]
+    record = {
+        "job_id": sanitize_public_diagnostic(str(job_id))[:96],
+        "failed_revision": int(failed_revision),
+        "status": str(status),
+    }
+    if failure is not None:
+        record.update(
+            {
+                "error_code": sanitize_public_diagnostic(
+                    str(failure.error_code)
+                )[:120],
+                "summary": sanitize_public_diagnostic(
+                    str(failure.summary)
+                )[:200],
+                "log_artifact_key": _safe_log_artifact_key(
+                    failure.log_artifact_key
+                ),
+            }
+        )
+    history.append(record)
+    payload["repair_history"] = history[-10:]
+
+
+def _normalize_repair_history_record(raw):  # type: ignore[no-untyped-def]
+    from tutor.services.manim_render.executor import sanitize_public_diagnostic
+
+    try:
+        failed_revision = max(0, int(raw.get("failed_revision") or 0))
+    except (TypeError, ValueError):
+        failed_revision = 0
+    record = {
+        "job_id": sanitize_public_diagnostic(str(raw.get("job_id") or ""))[:96],
+        "failed_revision": failed_revision,
+        "status": str(raw.get("status") or "failed")[:20],
+    }
+    if raw.get("error_code"):
+        record["error_code"] = sanitize_public_diagnostic(
+            str(raw["error_code"])
+        )[:120]
+    if raw.get("summary"):
+        record["summary"] = sanitize_public_diagnostic(str(raw["summary"]))[:200]
+    safe_log_key = _safe_log_artifact_key(raw.get("log_artifact_key"))
+    if safe_log_key:
+        record["log_artifact_key"] = safe_log_key
+    return record
+
+
+def _safe_log_artifact_key(value) -> str:  # type: ignore[no-untyped-def]
+    from pathlib import Path
+
+    from tutor.services.artifacts import UnsafeArtifactKey, resolve_artifact_key
+
+    key = str(value or "")
+    if not key.startswith("manim_logs/"):
+        return ""
+    try:
+        resolve_artifact_key(key, Path("."))
+    except UnsafeArtifactKey:
+        return ""
+    return key
+
+
 class ProfileUpdateFollowUpCapability(BaseCapability):
     """Aggregate a stable learning-event window without invoking an LLM."""
 
@@ -391,6 +832,7 @@ class PathRebuildFollowUpCapability(BaseCapability):
 
 _FOLLOW_UP_BUILDERS = {
     "video_render": VideoRenderFollowUpCapability,
+    "video_repair_render": VideoRepairFollowUpCapability,
     "profile_update": ProfileUpdateFollowUpCapability,
     "path_rebuild": PathRebuildFollowUpCapability,
 }
@@ -406,11 +848,21 @@ def validate_follow_up_spec(spec: FollowUpTaskSpec) -> None:
         raise ValueError("follow-up dedupe_key must be non-empty")
     if len(spec.dedupe_key) > 256:
         raise ValueError("follow-up dedupe_key exceeds 256 characters")
-    if spec.kind == "video_render":
-        for field in ("package_id", "resource_id"):
+    if spec.kind in {"video_render", "video_repair_render"}:
+        required = (
+            ("package_id", "resource_id")
+            if spec.kind == "video_render"
+            else ("package_id", "resource_id", "user_id", "failed_revision")
+        )
+        for field in required:
             value = spec.payload.get(field)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"video_render follow-up requires {field}")
+            if field == "failed_revision":
+                if type(value) is not int or value < 0:
+                    raise ValueError(
+                        "video_repair_render follow-up requires non-negative failed_revision"
+                    )
+            elif not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{spec.kind} follow-up requires {field}")
     elif spec.kind == "profile_update":
         for field in ("user_id", "from_watermark", "through_sequence"):
             if field not in spec.payload:
@@ -429,6 +881,7 @@ def build_follow_up_capability(task_kind: str) -> BaseCapability | None:
 __all__ = [
     "FollowUpScheduler",
     "VideoRenderFollowUpCapability",
+    "VideoRepairFollowUpCapability",
     "ProfileUpdateFollowUpCapability",
     "PathRebuildFollowUpCapability",
     "build_follow_up_capability",

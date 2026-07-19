@@ -19,7 +19,7 @@ from tutor.services.resource_package.schema import (
 from tutor.services.resource_package.store import ResourcePackageStore
 
 
-def test_video_retry_creates_one_new_durable_child_then_resets_pending(
+def test_video_retry_creates_one_repair_child_and_preserves_failed_render(
     tmp_path,
     monkeypatch,
 ):
@@ -55,11 +55,12 @@ def test_video_retry_creates_one_new_durable_child_then_resets_pending(
             resource_id="video",
             type=ResourceType.VIDEO,
             title="video",
-            format_specific={
-                "manim_code": "from manim import *",
-                "scene_class": "MainScene",
-                "render_status": "failed",
-            },
+                format_specific={
+                    "manim_code": "from manim import *",
+                    "scene_class": "MainScene",
+                    "render_status": "failed",
+                    "render_error": "original render failure",
+                },
         )
         package = ResourcePackage(
             package_id="package",
@@ -106,8 +107,12 @@ def test_video_retry_creates_one_new_durable_child_then_resets_pending(
         resource = await packages.get_resource("video")
         assert len(children) == 2
         assert children[-1].status == JobStatus.PENDING
+        assert children[-1].task_kind == "video_repair_render"
         assert resource is not None
-        assert resource.format_specific["render_status"] == "pending"
+        assert resource.format_specific["render_status"] == "failed"
+        assert resource.format_specific["repair_status"] == "pending"
+        assert resource.format_specific["manim_code"] == "from manim import *"
+        assert resource.format_specific["render_error"] == "original render failure"
         await jobs.close()
         await packages.close()
 

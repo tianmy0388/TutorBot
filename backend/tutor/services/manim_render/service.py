@@ -89,7 +89,7 @@ class RenderedVideo:
 
 
 class ManimRenderService:
-    """End-to-end Manim rendering with validation + retry."""
+    """End-to-end Manim rendering with validation and one runtime attempt."""
 
     def __init__(
         self,
@@ -150,7 +150,7 @@ class ManimRenderService:
         scene_class: str = "MainScene",
         job_id: str | None = None,
     ) -> RenderedVideo:
-        """Full pipeline: validate → render → (retry on failure) → publish."""
+        """Validate, render once, then publish or return a terminal failure."""
         # Stage 1: StaticGuard
         invocation_id = job_id or uuid.uuid4().hex
         configured_workdir = getattr(self.executor, "temp_dir", None)
@@ -210,43 +210,39 @@ class ManimRenderService:
 
         cleaned = sg.cleaned_code or code
 
-        # Stage 2 + 3: render with retry
+        # Stage 2: one render attempt. Runtime repair is an explicit durable
+        # user action, never an implicit LLM patch loop in the initial path.
         render_fn, render_history = self._make_render_fn(
             scene_class,
             invocation_id,
         )
-        retry_result = await self.code_retry.fix_until_renderable(
-            original_code=cleaned,
-            render_fn=render_fn,
+        success, failure_or_error = await render_fn(cleaned)
+        final_render = render_history[-1]
+        failure = (
+            failure_or_error
+            if isinstance(failure_or_error, RenderFailure)
+            else None
         )
 
-        # Last successful render result (if any)
-        final_render = None
-        if retry_result.success and render_history:
-            final_render = render_history[-1]
-        elif render_history:
-            final_render = render_history[-1]  # show last attempt even if failed
-
-        # Stage 4: publish (copy to public dir)
+        # Stage 3: publish (copy to public dir)
         video_path = None
         public_url = ""
-        if retry_result.success and final_render and final_render.video_path:
+        if success and final_render.video_path:
             video_path, public_url = self._publish(
                 final_render.video_path, scene_class
             )
 
         return RenderedVideo(
-            success=retry_result.success,
-            code=retry_result.code,
+            success=success,
+            code=cleaned,
             video_path=video_path,
-            duration_seconds=final_render.duration_seconds if final_render else 0.0,
-            attempts=retry_result.attempts_used,
-            error=retry_result.final_error,
+            duration_seconds=final_render.duration_seconds,
+            attempts=1,
+            error="" if success else (failure.summary if failure else str(failure_or_error)),
             static_guard=sg,
-            retry_result=retry_result,
             final_render=final_render,
             public_url=public_url,
-            failure=retry_result.failure,
+            failure=failure,
         )
 
     # ------------------------------------------------------------------

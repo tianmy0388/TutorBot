@@ -325,13 +325,18 @@ class CodeRetry:
     def _apply_patches(
         code: str, patches: list[dict[str, str]]
     ) -> str:
-        """Apply patches in order. Skip patches whose 'search' isn't found."""
+        """Apply only exact, unique searches aligned to token boundaries."""
         out = code
         for p in patches:
             search = p["search"]
             replace = p["replace"]
-            if search in out:
-                # Replace only the FIRST occurrence to avoid over-matching
+            start = out.find(search)
+            if (
+                search
+                and start >= 0
+                and out.find(search, start + 1) < 0
+                and CodeRetry._has_token_boundaries(out, start, search)
+            ):
                 out = out.replace(search, replace, 1)
             else:
                 logger.debug(
@@ -344,6 +349,26 @@ class CodeRetry:
                     ),
                 )
         return out
+
+    @staticmethod
+    def _has_token_boundaries(code: str, start: int, search: str) -> bool:
+        """Return whether a substring does not cut through a Python token."""
+        end = start + len(search)
+        before = code[start - 1] if start else ""
+        after = code[end] if end < len(code) else ""
+        first = search[0]
+        last = search[-1]
+        if first.isalnum() or first == "_":
+            if before.isalnum() or before == "_":
+                return False
+            if first.isdigit() and before == ".":
+                return False
+        if last.isalnum() or last == "_":
+            if after.isalnum() or after == "_":
+                return False
+            if last.isdigit() and after == ".":
+                return False
+        return True
 
     @staticmethod
     def _parse_json_safe(content: str) -> Any:

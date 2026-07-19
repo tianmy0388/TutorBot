@@ -164,65 +164,39 @@ async def test_render_static_guard_failure_short_circuits(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_render_retries_on_failure_then_succeeds(tmp_path):
-    """First render fails, retry applies patch, second render succeeds."""
-    # Build a real CodeRetry with mock LLM that produces a no-op patch
-    # (the test patches the render fn to succeed on second call)
-    from unittest.mock import MagicMock
+async def test_initial_render_does_not_call_llm_patch_retry(tmp_path):
+    """A runtime failure is terminal until the user requests regeneration."""
+    executor = _mock_executor_failure()
+    executor.temp_dir = tmp_path / "render-workdir"
 
-    llm = MagicMock()
-    llm.model = "mock"
-    llm.default_temperature = 0.5
-    llm.default_max_tokens = 2048
+    class RecordingLLM:
+        model = "mock"
+        default_temperature = 0.5
+        default_max_tokens = 2048
 
-    llm_responses = iter(
-        [
-            # First call: provide a patch
-            '{"patches": [{"search": "Hello", "replace": "Hi", "explanation": "shorten"}]}',
-        ]
-    )
+        def __init__(self):
+            self.calls = []
 
-    async def call(req):
-        return LLMResponse(content=next(llm_responses), model="mock")
-
-    llm.call = call
-    code_retry = CodeRetry(llm=llm, max_attempts=3)
-
-    # Build an executor that fails first, succeeds second
-    executor = MagicMock(spec=ManimExecutor)
-    fake_video = tmp_path / "ok.mp4"
-    fake_video.write_bytes(b"X")
-    executor.is_available.return_value = True
-    call_count = [0]
-
-    def render_fn(code, scene_class, **kw):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return ManimRenderResult(
-                status=RenderStatus.FAILED,
-                stderr="render error 1",
-                error_message="failed",
+        async def call(self, request):
+            self.calls.append(request)
+            return LLMResponse(
+                content='{"patches": [{"search": "Hello", "replace": "Hi"}]}',
+                model="mock",
             )
-        return ManimRenderResult(
-            status=RenderStatus.SUCCESS,
-            video_path=fake_video,
-            exit_code=0,
-            duration_seconds=5.0,
-        )
 
-    executor.render.side_effect = render_fn
-
-    svc = ManimRenderService(
+    llm = RecordingLLM()
+    service = ManimRenderService(
         static_guard=StaticGuard(),
         executor=executor,
-        code_retry=code_retry,
+        code_retry=CodeRetry(llm=llm, max_attempts=4),
         public_dir=tmp_path / "public",
     )
 
-    result = await svc.render(code=VALID_CODE, scene_class="HelloScene")
-    assert result.success is True
-    assert result.attempts == 2  # first fail + retry success
-    assert "Hi" in result.code  # patch was applied
+    result = await service.render(code=VALID_CODE, scene_class="HelloScene")
+
+    assert result.success is False
+    assert executor.render.call_count == 1
+    assert llm.calls == []
 
 
 @pytest.mark.asyncio

@@ -264,7 +264,7 @@ async def retry_video_render(
     matching = [
         child
         for child in await job_store.get_children(parent.job_id)
-        if child.task_kind == "video_render"
+        if child.task_kind == "video_repair_render"
         and str((child.metadata or {}).get("package_id") or "") == package_id
         and str((child.metadata or {}).get("resource_id") or "") == resource_id
     ]
@@ -282,29 +282,33 @@ async def retry_video_render(
     if child is None and render_status != "failed":
         raise HTTPException(status_code=409, detail="video is not retryable")
     if child is None:
-        revision = len(matching) + 1
+        failed_revision = int(
+            (resource.format_specific or {}).get("source_revision") or 0
+        )
+        attempt = len(matching) + 1
         child = (
             await FollowUpScheduler(job_store).enqueue(
                 parent.job_id,
                 (
                     FollowUpTaskSpec(
-                        kind="video_render",
+                        kind="video_repair_render",
                         dedupe_key=(
-                            f"video-retry:{package_id}:{resource_id}:{revision}"
+                            f"video-repair:{package_id}:{resource_id}:"
+                            f"{failed_revision}:{attempt}"
                         ),
                         payload={
                             "package_id": package_id,
                             "resource_id": resource_id,
                             "user_id": parent.user_id,
+                            "failed_revision": failed_revision,
                         },
                     ),
                 ),
             )
         )[0]
 
-    # Durable child creation is the commit point. Serialize the resource reset
-    # with child terminalization, and never overwrite a terminal write from the
-    # same retry revision during the claim->terminal handoff window.
+    # Durable child creation is the commit point. The original render failure,
+    # source and log manifest remain visible while intelligent repair runs.
     reset_applied = False
 
     async def reset_resource() -> None:
@@ -313,27 +317,12 @@ async def retry_video_render(
         if current is None:
             return
         current_format = current.format_specific or {}
-        if (
-            current_format.get("render_job_id") == child.job_id
-            and current_format.get("render_status")
-            in {"pending", "rendering", "ready", "failed"}
-        ):
+        if current_format.get("repair_job_id") == child.job_id:
             return
-        current.format_specific["render_status"] = "pending"
-        current.format_specific["render_job_id"] = child.job_id
-        for key in (
-            "render_failure",
-            "render_error_code",
-            "render_error",
-            "video_url",
-            "artifact_key",
-        ):
-            current.format_specific.pop(key, None)
-        current.format_specific["artifacts"] = [
-            item
-            for item in (current.format_specific.get("artifacts") or [])
-            if not (isinstance(item, dict) and item.get("kind") == "render_log")
-        ]
+        current.format_specific["repair_status"] = "pending"
+        current.format_specific["repair_job_id"] = child.job_id
+        current.format_specific.setdefault("source_revision", 0)
+        current.format_specific.setdefault("repair_history", [])
         await package_store.update_resource(
             package_id,
             current,
@@ -365,6 +354,9 @@ async def retry_video_render(
             "metadata": {
                 "package_id": package_id,
                 "resource_id": resource_id,
+                "failed_revision": int(
+                    (current_child.metadata or {}).get("failed_revision") or 0
+                ),
             },
             "error": (
                 sanitize_public_diagnostic(str(current_child.error))

@@ -779,3 +779,299 @@ def monkeypatch_for_module(mod: Any, fake: Any) -> _MonkeyPatch:
     m.setattr(service_mod, "get_manim_render_service", lambda: fake)
     m.setattr(mod, "get_manim_render_service", lambda: fake)
     return m
+
+
+class _ScriptedRepairAgent:
+    def __init__(self, candidates: list[str]) -> None:
+        self.candidates = list(candidates)
+        self.calls = []
+
+    async def regenerate(self, context, failed_code, failure, runtime):  # type: ignore[no-untyped-def]
+        self.calls.append((failed_code, failure, runtime))
+        if not self.candidates:
+            raise RuntimeError("provider-token=private-value")
+        return self.candidates.pop(0)
+
+
+REPAIR_GOOD_CODE = """from manim import *
+
+class MainScene(Scene):
+    def construct(self):
+        dot = Dot()
+        self.play(Create(dot), run_time=0.5)
+"""
+
+
+@pytest.mark.asyncio
+async def test_video_repair_regenerates_twice_after_validation_then_renders_once(
+    tmp_path,
+) -> None:
+    from tutor.services.jobs.follow_up import VideoRepairFollowUpCapability
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    store = ResourcePackageStore(tmp_path / "packages.db")
+    await store.init()
+    original = REPAIR_GOOD_CODE.replace("0.5", "0")
+    resource = Resource(
+        resource_id="repair-video",
+        type=ResourceType.VIDEO,
+        title="repair",
+        format_specific={
+            "manim_code": original,
+            "scene_class": "MainScene",
+            "render_status": "failed",
+            "render_error_code": "process_exit",
+            "render_error": "original failure",
+            "source_revision": 4,
+            "repair_status": "pending",
+            "repair_job_id": "repair-child",
+        },
+    )
+    package = ResourcePackage(package_id="repair-package", topic="t", resources=[resource])
+    await store.save(package, user_id="owner")
+    invalid = REPAIR_GOOD_CODE.replace("run_time=0.5", "run_time=0")
+    agent = _ScriptedRepairAgent([invalid, REPAIR_GOOD_CODE])
+    renderer = _FakeRenderService(success=True, video_path=None)
+
+    async def claim_guard(operation):
+        await operation()
+        return True
+
+    capability = VideoRepairFollowUpCapability(
+        package_store=store,
+        repair_agent=agent,
+        render_service=renderer,
+        runtime_namespace={"Scene", "Dot", "Create"},
+        runtime_versions={"python": "3.11", "manim": "0.20"},
+    )
+    result = await capability.run(
+        UnifiedContext(
+            job_id="repair-child",
+            user_id="owner",
+            metadata={
+                "package_id": package.package_id,
+                "resource_id": resource.resource_id,
+                "failed_revision": 4,
+                "_claim_validator": lambda: _async_true(),
+                "_claim_guard": claim_guard,
+            },
+        ),
+        StreamBus(),
+    )
+
+    reloaded = await store.get_resource(resource.resource_id)
+    assert result.payload["source_revision"] == 5
+    assert len(agent.calls) == 2
+    assert agent.calls[1][1].error_code == "candidate_validation_failed"
+    assert len(renderer.calls) == 1
+    assert reloaded is not None
+    assert reloaded.format_specific["manim_code"] == REPAIR_GOOD_CODE
+    assert reloaded.format_specific["render_status"] == "ready"
+    assert reloaded.format_specific["repair_status"] == "ready"
+    assert reloaded.format_specific["source_revision"] == 5
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_video_repair_failure_preserves_original_source_and_error_with_history(
+    tmp_path,
+) -> None:
+    from tutor.services.jobs.follow_up import VideoRepairFollowUpCapability
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    store = ResourcePackageStore(tmp_path / "packages.db")
+    await store.init()
+    resource = Resource(
+        resource_id="failed-repair-video",
+        type=ResourceType.VIDEO,
+        title="repair",
+        format_specific={
+            "manim_code": "ORIGINAL SOURCE",
+            "scene_class": "MainScene",
+            "render_status": "failed",
+            "render_error_code": "process_exit",
+            "render_error": "ORIGINAL ERROR",
+            "source_revision": 1,
+            "repair_status": "pending",
+            "repair_job_id": "failed-child",
+            "repair_history": [
+                {
+                    "job_id": "old-child",
+                    "failed_revision": 0,
+                    "status": "failed",
+                    "summary": "provider-token=private-value " + ("x" * 1000),
+                    "log_artifact_key": "C:\\private\\raw.log",
+                }
+            ],
+        },
+    )
+    package = ResourcePackage(package_id="failed-package", topic="t", resources=[resource])
+    await store.save(package, user_id="owner")
+
+    async def claim_guard(operation):
+        await operation()
+        return True
+
+    capability = VideoRepairFollowUpCapability(
+        package_store=store,
+        repair_agent=_ScriptedRepairAgent([]),
+        render_service=_FakeRenderService(success=True),
+        runtime_namespace={"Scene"},
+        runtime_versions={"python": "3.11"},
+    )
+    with pytest.raises(RuntimeError, match="Video repair failed"):
+        await capability.run(
+            UnifiedContext(
+                job_id="failed-child",
+                user_id="owner",
+                metadata={
+                    "package_id": package.package_id,
+                    "resource_id": resource.resource_id,
+                    "failed_revision": 1,
+                    "_claim_validator": lambda: _async_true(),
+                    "_claim_guard": claim_guard,
+                },
+            ),
+            StreamBus(),
+        )
+
+    reloaded = await store.get_resource(resource.resource_id)
+    assert reloaded is not None
+    payload = reloaded.format_specific
+    assert payload["manim_code"] == "ORIGINAL SOURCE"
+    assert payload["render_error"] == "ORIGINAL ERROR"
+    assert payload["render_status"] == "failed"
+    assert payload["repair_status"] == "failed"
+    assert len(payload["repair_history"]) == 2
+    assert payload["repair_history"][-1]["log_artifact_key"]
+    assert len(payload["repair_history"][0]["summary"]) <= 200
+    assert "C:\\private" not in str(payload["repair_history"])
+    assert "private-value" not in str(payload["repair_history"])
+    await store.close()
+
+
+async def _async_true() -> bool:
+    return True
+
+
+@pytest.mark.asyncio
+async def test_pending_video_repair_child_resumes_after_runner_refresh(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from tutor.agents.resource.manim_repair import ManimRepairAgent
+    from tutor.services import manim_render as mr_module
+    from tutor.services.jobs.follow_up import VideoRepairFollowUpCapability
+    from tutor.services.resource_package import store as package_store_module
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    package_store = ResourcePackageStore(tmp_path / "packages.db")
+    await package_store.init()
+    monkeypatch.setattr(package_store_module, "_store", package_store)
+    resource = Resource(
+        resource_id="resume-repair-video",
+        type=ResourceType.VIDEO,
+        title="repair",
+        format_specific={
+            "manim_code": REPAIR_GOOD_CODE.replace("0.5", "0"),
+            "scene_class": "MainScene",
+            "render_status": "failed",
+            "render_error": "original",
+            "source_revision": 2,
+        },
+    )
+    package = ResourcePackage(package_id="resume-repair-package", topic="t", resources=[resource])
+    await package_store.save(package, user_id="owner")
+    job_store = JobStore(tmp_path / "jobs.db")
+    await job_store.init()
+    parent = Job(job_id="resume-repair-parent", user_id="owner", status=JobStatus.SUCCEEDED)
+    await job_store.save(parent)
+    spec = FollowUpTaskSpec(
+        kind="video_repair_render",
+        dedupe_key="resume-repair:2:1",
+        payload={
+            "package_id": package.package_id,
+            "resource_id": resource.resource_id,
+            "user_id": "owner",
+            "failed_revision": 2,
+        },
+    )
+    child = (await FollowUpScheduler(job_store).enqueue(parent.job_id, (spec,)))[0]
+    resource.format_specific.update(
+        {"repair_status": "pending", "repair_job_id": child.job_id}
+    )
+    await package_store.update_resource(package.package_id, resource, user_id="owner")
+
+    async def regenerate(self, context, failed_code, failure, runtime):  # type: ignore[no-untyped-def]
+        return REPAIR_GOOD_CODE
+
+    monkeypatch.setattr(ManimRepairAgent, "regenerate", regenerate)
+    monkeypatch.setattr(
+        VideoRepairFollowUpCapability,
+        "_runtime",
+        lambda self: ({"python": "3.11", "manim": "0.20"}, {"Scene", "Dot", "Create"}),
+    )
+    module_patch = monkeypatch_for_module(mr_module, _FakeRenderService(success=True, video_path=None))
+    runner = JobRunner(job_store=job_store, capability_registry=_EmptyCapabilities())  # type: ignore[arg-type]
+
+    assert await runner.resume_pending() == 1
+    terminal = await _wait_child(job_store, child.job_id)
+    module_patch.undo()
+    reloaded = await package_store.get_resource(resource.resource_id)
+    assert terminal.status == JobStatus.SUCCEEDED
+    assert reloaded is not None
+    assert reloaded.format_specific["source_revision"] == 3
+    assert reloaded.format_specific["repair_status"] == "ready"
+    await job_store.close()
+    await package_store.close()
+
+
+@pytest.mark.asyncio
+async def test_video_repair_child_cannot_cross_owner_boundary(tmp_path) -> None:
+    from tutor.services.jobs.follow_up import VideoRepairFollowUpCapability
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    store = ResourcePackageStore(tmp_path / "packages.db")
+    await store.init()
+    resource = Resource(
+        resource_id="private-repair-video",
+        type=ResourceType.VIDEO,
+        title="private",
+        format_specific={
+            "manim_code": "PRIVATE SOURCE",
+            "render_status": "failed",
+            "render_error": "PRIVATE ERROR",
+            "source_revision": 0,
+            "repair_status": "pending",
+            "repair_job_id": "attacker-child",
+        },
+    )
+    package = ResourcePackage(package_id="private-repair-package", topic="t", resources=[resource])
+    await store.save(package, user_id="owner-b")
+    capability = VideoRepairFollowUpCapability(
+        package_store=store,
+        repair_agent=_ScriptedRepairAgent([REPAIR_GOOD_CODE]),
+        render_service=_FakeRenderService(success=True),
+        runtime_namespace={"Scene", "Dot", "Create"},
+        runtime_versions={"python": "3.11"},
+    )
+
+    with pytest.raises(PermissionError):
+        await capability.run(
+            UnifiedContext(
+                job_id="attacker-child",
+                user_id="owner-a",
+                metadata={
+                    "package_id": package.package_id,
+                    "resource_id": resource.resource_id,
+                    "failed_revision": 0,
+                },
+            ),
+            StreamBus(),
+        )
+
+    reloaded = await store.get_resource(resource.resource_id)
+    assert reloaded is not None
+    assert reloaded.format_specific["manim_code"] == "PRIVATE SOURCE"
+    assert reloaded.format_specific["render_error"] == "PRIVATE ERROR"
+    await store.close()
