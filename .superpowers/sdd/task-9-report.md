@@ -398,3 +398,57 @@ Verification evidence:
 - Combined Task 9 and follow-up store suite: `237 passed, 0 failed`.
 - Changed-file Ruff: `All checks passed!`; `git diff --check` exited 0.
 - Real installed-Manim pipeline: `1 passed` in 15.40 seconds.
+
+## Fifth review hardening follow-up
+
+The final independent review identified three remaining provenance/state-machine
+gaps: first-class capture of the NumPy namespace, mutation of Manim's global
+`config`, and repair children resumed after their resource outcome had already
+committed. It also required preserving the newest failed generated candidate
+across manual repair attempts and closing a bound-method container bypass.
+
+The validator work was reproduced with `15 failed, 2 passed`. It now builds one
+AST parent map and applies use-sensitive rules:
+
+- NumPy module/import aliases may only be the immediate base of an attribute;
+  safe callable attributes must be invoked directly, namespace prefixes such as
+  `np.random` may only lead to a further allowlisted attribute, and scalar
+  constants `pi`, `e`, `inf`, and `nan` remain readable. Capturing/passing
+  `np`, `np.array`, or `np.random` is rejected, closing both `n=np; n.save(...)`
+  and `n=np; n.ctypeslib.load_library(...)`.
+- Manim `config` permits only loaded scalar reads of frame width/height, pixel
+  width/height, and frame rate. Name capture, subscripts, calls, unknown
+  attributes, and every Store/Del form are rejected, including direct and
+  imported-module-alias access.
+- Runtime-derived Mobject method attributes must be direct call targets.
+  Assignment/list/star capture is rejected while ordinary calls such as
+  `dot.rotate(...)` remain valid.
+
+The claimed repair child now recognizes its own already-committed outcomes
+before the ordinary bind path. A child-owned ready resource at revision
+`failed_revision + 1` returns the existing success result without another LLM
+or render call. A child-owned failed resource with its matching durable history
+record re-raises the existing failure without work or history duplication.
+Repair-history append also replaces the same `(job_id, failed_revision,
+status)` outcome defensively.
+
+Repair failures now retain private, bounded `repair_candidate_code` and a
+sanitized `repair_candidate_failure` without modifying canonical `manim_code`
+or `source_revision`. The next manual child prompts from those transient fields.
+Provider failure before any new candidate preserves the prior transient state;
+validation, render, and publish failures update it; successful promotion clears
+it. Browser resource projections explicitly omit both private fields.
+
+TDD and verification evidence:
+
+- Validator RED: `15 failed, 2 passed`; focused GREEN: `17 passed`; complete
+  candidate suite: `78 passed`.
+- Post-outcome runner RED: `2 failed`; GREEN: `2 passed`, with zero agent/render
+  calls and exact failed-history preservation.
+- Candidate-handoff/public-projection RED: `2 failed, 1 passed`; GREEN:
+  `3 passed`. Full repair capability plus resource schema: `57 passed`.
+- Idempotent-history and failed-publish candidate persistence: `2 passed`.
+- Expanded Task 9, API, resource, and JobStore suite: `260 passed, 0 failed`.
+- Changed-file Ruff: `All checks passed!`; compileall and `git diff --check`
+  exited 0.
+- Real installed-Manim pipeline: `1 passed` in 15.44 seconds.

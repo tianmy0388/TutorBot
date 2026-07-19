@@ -637,3 +637,153 @@ class MainScene(Scene):
     )
 
     assert "INVALID_RUNTIME_NAMESPACE" in {issue.code for issue in result.issues}
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "n = np\n        n.save('escape.npy', [1])",
+        "n = np\n        n.ctypeslib.load_library('escape', '.')",
+        "captured = [np]",
+        "list(np)",
+        "writer = np.array\n        writer([1])",
+        "namespace = np.random",
+    ],
+)
+def test_validator_rejects_numpy_namespace_and_callable_capture(
+    tmp_path,
+    statement,
+):
+    code = f"""from manim import *
+import numpy as np
+class MainScene(Scene):
+    def construct(self):
+        {statement}
+        self.add(Dot())
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert "UNSAFE_NUMPY_REFERENCE" in {issue.code for issue in result.issues}
+
+
+def test_validator_allows_direct_numpy_calls_namespaces_and_scalar_constants(
+    tmp_path,
+):
+    code = """from manim import *
+import numpy as np
+class MainScene(Scene):
+    def construct(self):
+        values = np.array([np.pi, np.e, np.inf])
+        random_values = np.random.random(3)
+        generator = np.random.default_rng(7)
+        self.add(Dot(point=[values[0] + random_values[0] + generator.random(), 0, 0]))
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert result.valid is True
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "config['media_dir'] = 'escape'",
+        "config.media_dir = 'escape'",
+        "cfg = config\n        cfg['media_dir'] = 'escape'",
+        "value = config['frame_width']",
+        "config.update({'media_dir': 'escape'})",
+        "config.frame_width = 1",
+    ],
+)
+def test_validator_rejects_manim_config_capture_mutation_and_dynamic_access(
+    tmp_path,
+    statement,
+):
+    code = f"""from manim import *
+class MainScene(Scene):
+    def construct(self):
+        {statement}
+        self.add(Dot())
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace={**RUNTIME_NAMESPACE, "config": object()},
+    )
+
+    assert "UNSAFE_MANIM_CONFIG" in {issue.code for issue in result.issues}
+
+
+def test_validator_allows_explicit_manim_config_scalar_reads(tmp_path):
+    code = """from manim import *
+class MainScene(Scene):
+    def construct(self):
+        width = config.frame_width
+        height = config.frame_height
+        pixels = config.pixel_width + config.pixel_height
+        rate = config.frame_rate
+        self.add(Dot(point=[width / height + pixels / rate, 0, 0]))
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace={**RUNTIME_NAMESPACE, "config": object()},
+    )
+
+    assert result.valid is True
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "method = dot.rotate\n        self.add(VGroup(method))",
+        "self.add(VGroup(*[dot.rotate]))",
+    ],
+)
+def test_validator_rejects_captured_mobject_bound_methods(
+    tmp_path,
+    statement,
+):
+    code = f"""from manim import *
+class MainScene(Scene):
+    def construct(self):
+        dot = Dot()
+        {statement}
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert "BOUND_METHOD_CAPTURE" in {issue.code for issue in result.issues}
+
+
+def test_validator_allows_direct_mobject_method_call(tmp_path):
+    code = """from manim import *
+class MainScene(Scene):
+    def construct(self):
+        dot = Dot()
+        dot.rotate(0.5)
+        self.add(dot)
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert result.valid is True

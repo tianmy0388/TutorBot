@@ -586,6 +586,8 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
         )
 
         format_specific = dict(data.get("format_specific") or {})
+        format_specific.pop("repair_candidate_code", None)
+        format_specific.pop("repair_candidate_failure", None)
         format_specific["repair_history"] = _public_repair_history(
             format_specific.get("repair_history")
         )

@@ -216,6 +216,34 @@ class VideoRepairFollowUpCapability(BaseCapability):
         if resource is None:
             raise RuntimeError("Video resource is unavailable")
         payload = resource.format_specific or {}
+        if _is_committed_repair_success(
+            payload,
+            job_id=context.job_id,
+            failed_revision=failed_revision,
+        ):
+            artifact_key = str(payload.get("artifact_key") or "")
+            return CapabilityResult(
+                assistant_message="视频修复完成",
+                payload={
+                    "package_id": package_id,
+                    "resource_id": resource_id,
+                    "render_status": "ready",
+                    "source_revision": failed_revision + 1,
+                },
+                artifacts=(
+                    ArtifactRef(
+                        name=artifact_key.rsplit("/", 1)[-1],
+                        kind="video",
+                        artifact_key=artifact_key,
+                    ),
+                ) if artifact_key else (),
+            )
+        if _is_committed_repair_failure(
+            payload,
+            job_id=context.job_id,
+            failed_revision=failed_revision,
+        ):
+            raise RuntimeError("Video repair failed")
         if int(payload.get("source_revision") or 0) != failed_revision:
             raise PermissionError("Video repair is no longer current")
         expected_repair_job_id = context.metadata.get("expected_repair_job_id")
@@ -260,6 +288,15 @@ class VideoRepairFollowUpCapability(BaseCapability):
 
         await self._guarded_commit(context, bind_and_mark_running)
         original_failure = _render_failure_from_payload(payload, RenderFailure)
+        repair_input_code = str(
+            payload.get("repair_candidate_code")
+            or payload.get("manim_code")
+            or ""
+        )
+        repair_input_failure = _repair_candidate_failure_from_payload(
+            payload,
+            RenderFailure,
+        ) or original_failure
         runtime_versions, runtime_namespace = self._runtime()
         workdir = Path(
             getattr(
@@ -271,13 +308,16 @@ class VideoRepairFollowUpCapability(BaseCapability):
         workdir.mkdir(parents=True, exist_ok=True)
         agent = self._repair_agent or ManimRepairAgent()
 
+        latest_candidate: str | None = None
+        latest_candidate_failure = None
         try:
             candidate = await agent.regenerate(
                 context,
-                failed_code=str(payload.get("manim_code") or ""),
-                failure=original_failure,
+                failed_code=repair_input_code,
+                failure=repair_input_failure,
                 runtime=runtime_versions,
             )
+            latest_candidate = candidate
             validation = validate_manim_candidate(
                 candidate,
                 workdir=workdir,
@@ -299,12 +339,14 @@ class VideoRepairFollowUpCapability(BaseCapability):
                     traceback_tail=tuple(issue_text.splitlines()[-40:]),
                     log_artifact_key=log_key,
                 )
+                latest_candidate_failure = validation_failure
                 candidate = await agent.regenerate(
                     context,
                     failed_code=candidate,
                     failure=validation_failure,
                     runtime=runtime_versions,
                 )
+                latest_candidate = candidate
                 validation = validate_manim_candidate(
                     candidate,
                     workdir=workdir,
@@ -320,14 +362,13 @@ class VideoRepairFollowUpCapability(BaseCapability):
                         stdout="",
                         stderr=issue_text,
                     )
-                    raise _VideoRepairError(
-                        RenderFailure(
-                            error_code="candidate_validation_failed",
-                            summary="Regenerated Manim source failed deterministic validation",
-                            traceback_tail=tuple(issue_text.splitlines()[-40:]),
-                            log_artifact_key=log_key,
-                        )
+                    latest_candidate_failure = RenderFailure(
+                        error_code="candidate_validation_failed",
+                        summary="Regenerated Manim source failed deterministic validation",
+                        traceback_tail=tuple(issue_text.splitlines()[-40:]),
+                        log_artifact_key=log_key,
                     )
+                    raise _VideoRepairError(latest_candidate_failure)
 
             renderer = self._render_service or get_manim_render_service()
             render_result = await renderer.render(
@@ -352,6 +393,7 @@ class VideoRepairFollowUpCapability(BaseCapability):
                         traceback_tail=(message,),
                         log_artifact_key=log_key,
                     )
+                latest_candidate_failure = render_failure
                 raise _VideoRepairError(render_failure)
 
             if not getattr(render_result, "video_path", None) or not getattr(
@@ -364,14 +406,13 @@ class VideoRepairFollowUpCapability(BaseCapability):
                     stdout="",
                     stderr=message,
                 )
-                raise _VideoRepairError(
-                    RenderFailure(
-                        error_code="repair_publish_failed",
-                        summary=message,
-                        traceback_tail=(message,),
-                        log_artifact_key=log_key,
-                    )
+                latest_candidate_failure = RenderFailure(
+                    error_code="repair_publish_failed",
+                    summary=message,
+                    traceback_tail=(message,),
+                    log_artifact_key=log_key,
                 )
+                raise _VideoRepairError(latest_candidate_failure)
 
             artifact_key = ""
             video_path = getattr(render_result, "video_path", None)
@@ -406,6 +447,8 @@ class VideoRepairFollowUpCapability(BaseCapability):
                         "render_failure",
                         "render_error_code",
                         "render_error",
+                        "repair_candidate_code",
+                        "repair_candidate_failure",
                     ):
                         current_payload.pop(key, None)
                     _append_repair_history(
@@ -429,7 +472,14 @@ class VideoRepairFollowUpCapability(BaseCapability):
             await self._guarded_commit(context, persist_success)
         except _VideoRepairError as exc:
             await self._persist_failure(
-                context, store, package_id, resource_id, failed_revision, exc.failure
+                context,
+                store,
+                package_id,
+                resource_id,
+                failed_revision,
+                exc.failure,
+                candidate_code=latest_candidate,
+                candidate_failure=exc.failure,
             )
             raise RuntimeError("Video repair failed") from None
         except Exception:
@@ -446,7 +496,18 @@ class VideoRepairFollowUpCapability(BaseCapability):
                 log_artifact_key=log_key,
             )
             await self._persist_failure(
-                context, store, package_id, resource_id, failed_revision, failure
+                context,
+                store,
+                package_id,
+                resource_id,
+                failed_revision,
+                failure,
+                candidate_code=(
+                    latest_candidate
+                    if latest_candidate_failure is not None
+                    else None
+                ),
+                candidate_failure=latest_candidate_failure,
             )
             raise RuntimeError("Video repair failed") from None
 
@@ -485,12 +546,20 @@ class VideoRepairFollowUpCapability(BaseCapability):
         resource_id,
         failed_revision,
         failure,
+        *,
+        candidate_code=None,
+        candidate_failure=None,
     ) -> None:  # type: ignore[no-untyped-def]
         async def persist() -> None:
             safe_log_key = _safe_log_artifact_key(failure.log_artifact_key)
 
             def mutation(payload) -> None:  # type: ignore[no-untyped-def]
                 payload["repair_status"] = "failed"
+                if candidate_code is not None and candidate_failure is not None:
+                    payload["repair_candidate_code"] = str(candidate_code)[:100_000]
+                    payload["repair_candidate_failure"] = (
+                        _repair_candidate_failure_payload(candidate_failure)
+                    )
                 _append_repair_history(
                     payload,
                     job_id=context.job_id,
@@ -566,6 +635,42 @@ def _render_failure_from_payload(payload, render_failure_type):  # type: ignore[
     )
 
 
+def _repair_candidate_failure_from_payload(
+    payload,
+    render_failure_type,
+):  # type: ignore[no-untyped-def]
+    raw = payload.get("repair_candidate_failure")
+    if not isinstance(raw, dict):
+        return None
+    return render_failure_type(
+        error_code=str(raw.get("error_code") or "candidate_failed"),
+        summary=str(raw.get("summary") or "Previous repair candidate failed"),
+        traceback_tail=tuple(
+            str(line) for line in list(raw.get("traceback_tail") or [])[-40:]
+        ),
+        log_artifact_key=str(raw.get("log_artifact_key") or ""),
+    )
+
+
+def _repair_candidate_failure_payload(failure):  # type: ignore[no-untyped-def]
+    from tutor.services.manim_render.executor import sanitize_public_diagnostic
+
+    payload = {
+        "error_code": sanitize_public_diagnostic(
+            str(failure.error_code)
+        )[:120],
+        "summary": sanitize_public_diagnostic(str(failure.summary))[:240],
+        "traceback_tail": [
+            sanitize_public_diagnostic(str(line))[:500]
+            for line in tuple(failure.traceback_tail)[-40:]
+        ],
+    }
+    safe_log_key = _safe_log_artifact_key(failure.log_artifact_key)
+    if safe_log_key:
+        payload["log_artifact_key"] = safe_log_key
+    return payload
+
+
 def _append_repair_history(
     payload,
     *,
@@ -578,14 +683,25 @@ def _append_repair_history(
 
     history = [
         normalized
-        for raw in list(payload.get("repair_history") or [])[-9:]
+        for raw in list(payload.get("repair_history") or [])[-10:]
         if isinstance(raw, dict)
         for normalized in [_normalize_repair_history_record(raw)]
     ]
+    safe_job_id = sanitize_public_diagnostic(str(job_id))[:96]
+    normalized_status = str(status)
+    history = [
+        record
+        for record in history
+        if not (
+            record.get("job_id") == safe_job_id
+            and int(record.get("failed_revision") or 0) == int(failed_revision)
+            and record.get("status") == normalized_status
+        )
+    ][-9:]
     record = {
-        "job_id": sanitize_public_diagnostic(str(job_id))[:96],
+        "job_id": safe_job_id,
         "failed_revision": int(failed_revision),
-        "status": str(status),
+        "status": normalized_status,
     }
     if failure is not None:
         record.update(
@@ -603,6 +719,63 @@ def _append_repair_history(
         )
     history.append(record)
     payload["repair_history"] = history[-10:]
+
+
+def _repair_history_has_outcome(
+    payload,
+    *,
+    job_id,
+    failed_revision,
+    status,
+) -> bool:  # type: ignore[no-untyped-def]
+    return any(
+        isinstance(record, dict)
+        and str(record.get("job_id") or "") == str(job_id)
+        and int(record.get("failed_revision") or 0) == int(failed_revision)
+        and str(record.get("status") or "") == status
+        for record in list(payload.get("repair_history") or [])
+    )
+
+
+def _is_committed_repair_success(
+    payload,
+    *,
+    job_id,
+    failed_revision,
+) -> bool:  # type: ignore[no-untyped-def]
+    return bool(
+        payload.get("repair_job_id") == job_id
+        and int(payload.get("source_revision") or 0) == int(failed_revision) + 1
+        and payload.get("render_status") == "ready"
+        and payload.get("repair_status") == "ready"
+        and payload.get("video_url")
+        and _repair_history_has_outcome(
+            payload,
+            job_id=job_id,
+            failed_revision=failed_revision,
+            status="ready",
+        )
+    )
+
+
+def _is_committed_repair_failure(
+    payload,
+    *,
+    job_id,
+    failed_revision,
+) -> bool:  # type: ignore[no-untyped-def]
+    return bool(
+        payload.get("repair_job_id") == job_id
+        and int(payload.get("source_revision") or 0) == int(failed_revision)
+        and payload.get("render_status") == "failed"
+        and payload.get("repair_status") == "failed"
+        and _repair_history_has_outcome(
+            payload,
+            job_id=job_id,
+            failed_revision=failed_revision,
+            status="failed",
+        )
+    )
 
 
 def _normalize_repair_history_record(raw):  # type: ignore[no-untyped-def]

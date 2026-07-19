@@ -510,3 +510,24 @@ def test_public_video_dump_sanitizes_legacy_top_level_render_error_code() -> Non
 
     assert len(public["render_error_code"]) <= 120
     assert "SECRET_CODE" not in public["render_error_code"]
+
+
+def test_public_video_dump_omits_private_repair_candidate_state() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "repair_candidate_code": "PRIVATE GENERATED SOURCE",
+            "repair_candidate_failure": {
+                "error_code": "provider-token=SECRET",
+                "summary": "C:\\private\\scene.py",
+                "traceback_tail": ["PRIVATE TRACE"],
+            },
+        },
+    )
+
+    public = public_resource_dump(resource)["format_specific"]
+
+    assert "repair_candidate_code" not in public
+    assert "repair_candidate_failure" not in public

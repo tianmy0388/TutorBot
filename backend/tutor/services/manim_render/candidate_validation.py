@@ -133,11 +133,29 @@ _ALLOWED_NUMPY_CALLS = {
     "numpy.zeros",
     "numpy.zeros_like",
 }
+_ALLOWED_NUMPY_CONSTANTS = {
+    "numpy.e",
+    "numpy.inf",
+    "numpy.nan",
+    "numpy.pi",
+}
 _ALLOWED_NUMPY_ATTRIBUTES = {
     ".".join(parts[:index])
     for call_name in _ALLOWED_NUMPY_CALLS
     for parts in (call_name.split("."),)
     for index in range(2, len(parts) + 1)
+} | _ALLOWED_NUMPY_CONSTANTS
+_ALLOWED_NUMPY_NAMESPACES = {
+    attribute
+    for attribute in _ALLOWED_NUMPY_ATTRIBUTES
+    if any(call.startswith(f"{attribute}.") for call in _ALLOWED_NUMPY_CALLS)
+}
+_ALLOWED_CONFIG_READS = {
+    "manim.config.frame_height",
+    "manim.config.frame_rate",
+    "manim.config.frame_width",
+    "manim.config.pixel_height",
+    "manim.config.pixel_width",
 }
 _FORBIDDEN_ASSET_CALLS = {"ImageMobject", "SVGMobject", "add_sound"}
 _FORBIDDEN_NUMPY_IO = {
@@ -267,6 +285,16 @@ def validate_manim_candidate(
         _validate_python_surface(tree, runtime_names, locally_defined)
     )
     bound_mobject_methods = _runtime_mobject_methods(runtime_namespace)
+    parents = _parent_map(tree)
+    issues.extend(_validate_numpy_references(tree, aliases, parents))
+    issues.extend(_validate_config_references(tree, aliases, parents))
+    issues.extend(
+        _validate_bound_method_references(
+            tree,
+            parents,
+            bound_mobject_methods,
+        )
+    )
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -329,6 +357,151 @@ def _call_name(node: ast.AST) -> str:
         prefix = _call_name(node.value)
         return f"{prefix}.{node.attr}" if prefix else node.attr
     return ""
+
+
+def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+
+def _is_direct_attribute_base(node: ast.AST, parent: ast.AST | None) -> bool:
+    return isinstance(parent, ast.Attribute) and parent.value is node
+
+
+def _is_direct_call_target(node: ast.AST, parent: ast.AST | None) -> bool:
+    return isinstance(parent, ast.Call) and parent.func is node
+
+
+def _normalize_config_name(name: str) -> str:
+    if name == "config" or name.startswith("config."):
+        return f"manim.{name}"
+    return name
+
+
+def _validate_numpy_references(
+    tree: ast.AST,
+    aliases: dict[str, str],
+    parents: dict[ast.AST, ast.AST],
+) -> list[CandidateValidationIssue]:
+    """Keep NumPy modules, namespaces, and callables from becoming values."""
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Name, ast.Attribute)) or not isinstance(
+            node.ctx, ast.Load
+        ):
+            continue
+        resolved = _resolve_alias(_call_name(node), aliases)
+        if resolved != "numpy" and not resolved.startswith("numpy."):
+            continue
+        parent = parents.get(node)
+        allowed = False
+        if resolved == "numpy" or resolved in _ALLOWED_NUMPY_NAMESPACES:
+            allowed = _is_direct_attribute_base(node, parent)
+        elif resolved in _ALLOWED_NUMPY_CONSTANTS:
+            allowed = True
+        elif resolved in _ALLOWED_NUMPY_CALLS:
+            allowed = _is_direct_call_target(node, parent)
+        if allowed:
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="UNSAFE_NUMPY_REFERENCE",
+                message=f"NumPy reference {resolved} cannot be captured or passed",
+                line=node.lineno,
+            )
+        )
+    return issues
+
+
+def _validate_config_references(
+    tree: ast.AST,
+    aliases: dict[str, str],
+    parents: dict[ast.AST, ast.AST],
+) -> list[CandidateValidationIssue]:
+    """Permit only scalar reads from Manim's process-global config."""
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript):
+            value_name = _normalize_config_name(
+                _resolve_alias(_call_name(node.value), aliases)
+            )
+            if value_name == "manim.config" or value_name.startswith(
+                "manim.config."
+            ):
+                issues.append(
+                    CandidateValidationIssue(
+                        code="UNSAFE_MANIM_CONFIG",
+                        message="Manim config subscript access is not allowed",
+                        line=node.lineno,
+                    )
+                )
+            continue
+        if not isinstance(node, (ast.Name, ast.Attribute)):
+            continue
+        resolved = _normalize_config_name(
+            _resolve_alias(_call_name(node), aliases)
+        )
+        if resolved != "manim.config" and not resolved.startswith(
+            "manim.config."
+        ):
+            continue
+        parent = parents.get(node)
+        allowed = False
+        if resolved == "manim.config":
+            allowed = (
+                isinstance(node.ctx, ast.Load)
+                and _is_direct_attribute_base(node, parent)
+                and _normalize_config_name(
+                    _resolve_alias(_call_name(parent), aliases)
+                )
+                in _ALLOWED_CONFIG_READS
+            )
+        elif resolved in _ALLOWED_CONFIG_READS:
+            allowed = (
+                isinstance(node.ctx, ast.Load)
+                and not _is_direct_call_target(node, parent)
+                and not _is_direct_attribute_base(node, parent)
+                and not (
+                    isinstance(parent, ast.Subscript) and parent.value is node
+                )
+            )
+        if allowed:
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="UNSAFE_MANIM_CONFIG",
+                message="Only allowlisted scalar Manim config reads are allowed",
+                line=node.lineno,
+            )
+        )
+    return issues
+
+
+def _validate_bound_method_references(
+    tree: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+    bound_mobject_methods: set[str],
+) -> list[CandidateValidationIssue]:
+    issues: list[CandidateValidationIssue] = []
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Attribute)
+            or not isinstance(node.ctx, ast.Load)
+            or node.attr not in bound_mobject_methods
+            or _is_direct_call_target(node, parents.get(node))
+        ):
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="BOUND_METHOD_CAPTURE",
+                message="Mobject bound methods must be called directly",
+                line=node.lineno,
+            )
+        )
+    return issues
 
 
 def _numeric_constant(node: ast.AST) -> float | None:
