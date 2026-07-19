@@ -4,7 +4,7 @@
 
 Implemented a durable, owner-scoped `video_repair_render` follow-up that regenerates a complete `MainScene`, validates at most two LLM candidates, and performs exactly one real Manim render. Initial rendering is now terminal after one executor invocation and never enters the legacy LLM patch loop.
 
-The existing retry URL remains compatible. Enqueueing a repair preserves the failed source, failed render status, visible error, failure record, prior video fields, and log artifacts while setting only `repair_status=pending` and `repair_job_id`.
+The existing retry URL remains compatible. Enqueueing durably persists a repair child while leaving the failed resource completely unchanged. Once claimed, that child uses its first guarded operation to CAS-bind `repair_job_id` to itself and set `repair_status=running`, so both the pre-bind and post-bind crash boundaries are resumable.
 
 ## Scope
 
@@ -21,12 +21,14 @@ Modified brief files:
 - `backend/tutor/services/manim_render/service.py`
 - `backend/tutor/services/manim_render/code_retry.py`
 - `backend/tutor/services/jobs/follow_up.py`
+- `backend/tutor/services/jobs/store.py`
 - `backend/tutor/api/routers/resources.py`
 - `backend/tutor/services/resource_package/schema.py`
 - `backend/tests/services/manim_render/test_service.py`
 - `backend/tests/services/manim_render/test_code_retry.py`
 - `backend/tests/capabilities/test_video_render_fire_and_forget.py`
 - `backend/tests/api/test_resources_artifact_endpoint.py`
+- `backend/tests/services/jobs/test_follow_up.py`
 
 Authorized adjacent compatibility test update:
 
@@ -351,3 +353,48 @@ Verification evidence:
 - Final combined prior-plus-new suite: `200 passed, 0 failed`.
 - Changed-file Ruff: `All checks passed!`.
 - Real installed-Manim pipeline: `1 passed` in 16.70 seconds.
+
+## Fourth review hardening follow-up
+
+The fourth review found two remaining validator indirections and a durability
+problem in the cross-database insert/bind transaction. The focused validator
+RED run produced `9 failed`: NumPy file-capable attributes could be read into
+aliases, and asset constructors could be hidden in list/tuple/unpack/lambda
+expressions without being called directly.
+
+Every loaded NumPy-rooted attribute is now checked against the full-path
+computation allowlist (including only the namespace prefixes needed to reach an
+allowed computation). Consequently `writer = np.save`, ndarray `tofile`/`dump`
+attribute reads, and `np.lib.format.open_memmap` are rejected before invocation,
+while the representative NumPy computation scene remains valid. `dump` and
+`tofile` loads are rejected on arbitrary receivers as well. Asset validation
+now rejects every expression load of `SVGMobject`, `ImageMobject`, or
+`add_sound`, including direct names, Manim-module attributes, containers,
+unpacking, and lambdas; imports remain parseable until such a symbol is used.
+
+The endpoint-side jobs-transaction/resource-CAS primitive was removed. A retry
+now commits or reuses the durable pending child first and records the resource's
+prior repair owner in child metadata. The claimed child performs the first
+resource CAS under its claim guard, binding the resource to its own job ID and
+marking it running. If the process dies before that CAS, the durable unbound
+child is reclaimable; if it dies after the CAS, the same child recognizes its
+existing binding and resumes. Revision changes, ownership failures, or a
+different repair owner make the child fail terminally without modifying the
+resource. Duplicate endpoint calls still reuse the active child and schedule
+only one resume. The misleading `create_child_if_absent_with_bind`,
+`enqueue_bound`, and `run_if_child_active_or_delete` APIs and their obsolete
+cross-database atomicity tests were removed.
+
+New tests cover the exact NumPy and asset bypass snippets, endpoint store order,
+an unbound pre-CAS resume, a self-bound post-CAS resume, and terminal failure
+without overwrite for both stale revisions and competing repair owners.
+
+Verification evidence:
+
+- Full candidate validator: `61 passed`.
+- Focused saga/validator/API/capability/store group: `129 passed`, followed by
+  `4 passed` for the explicit pre-bind, post-bind, stale-revision, and
+  competing-owner recovery cases.
+- Combined Task 9 and follow-up store suite: `237 passed, 0 failed`.
+- Changed-file Ruff: `All checks passed!`; `git diff --check` exited 0.
+- Real installed-Manim pipeline: `1 passed` in 15.40 seconds.

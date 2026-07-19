@@ -133,6 +133,12 @@ _ALLOWED_NUMPY_CALLS = {
     "numpy.zeros",
     "numpy.zeros_like",
 }
+_ALLOWED_NUMPY_ATTRIBUTES = {
+    ".".join(parts[:index])
+    for call_name in _ALLOWED_NUMPY_CALLS
+    for parts in (call_name.split("."),)
+    for index in range(2, len(parts) + 1)
+}
 _FORBIDDEN_ASSET_CALLS = {"ImageMobject", "SVGMobject", "add_sound"}
 _FORBIDDEN_NUMPY_IO = {
     "fromfile",
@@ -255,7 +261,7 @@ def validate_manim_candidate(
     issues.extend(_validate_imports(tree, runtime_names))
     issues.extend(_validate_manim_aliases(tree, aliases, runtime_names))
     issues.extend(_validate_external_io(tree, aliases))
-    issues.extend(_validate_asset_aliases(tree, aliases))
+    issues.extend(_validate_asset_references(tree, aliases))
     locally_defined = _defined_names(tree)
     issues.extend(
         _validate_python_surface(tree, runtime_names, locally_defined)
@@ -583,10 +589,30 @@ def _validate_external_io(
                         line=node.lineno,
                     )
                 )
-        elif isinstance(node, ast.Attribute):
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
             name = _resolve_alias(_call_name(node), aliases)
             root = name.split(".", 1)[0]
-            if root in _FORBIDDEN_IO_ROOTS:
+            terminal = node.attr
+            if terminal in {"dump", "tofile"}:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="EXTERNAL_IO",
+                        message=f"Filesystem method {terminal} is not allowed",
+                        line=node.lineno,
+                    )
+                )
+            elif root == "numpy" and name not in _ALLOWED_NUMPY_ATTRIBUTES:
+                issues.append(
+                    CandidateValidationIssue(
+                        code="DISALLOWED_NUMPY_ATTRIBUTE",
+                        message=(
+                            f"NumPy attribute {name} is outside the computation "
+                            "allowlist"
+                        ),
+                        line=node.lineno,
+                    )
+                )
+            elif root in _FORBIDDEN_IO_ROOTS:
                 issues.append(
                     CandidateValidationIssue(
                         code="EXTERNAL_IO",
@@ -597,51 +623,26 @@ def _validate_external_io(
     return issues
 
 
-def _validate_asset_aliases(
+def _validate_asset_references(
     tree: ast.AST,
     import_aliases: dict[str, str],
 ) -> list[CandidateValidationIssue]:
-    """Reject direct and assignment-aliased external asset callables."""
-    asset_aliases: set[str] = set()
-
-    def is_asset_reference(node: ast.AST) -> bool:
-        raw_name = _call_name(node)
-        resolved = _resolve_alias(raw_name, import_aliases)
-        return (
-            resolved.rsplit(".", 1)[-1] in _FORBIDDEN_ASSET_CALLS
-            or raw_name in asset_aliases
-        )
-
-    assignments = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-    ]
-    changed = True
-    while changed:
-        changed = False
-        for assignment in assignments:
-            value = assignment.value
-            if value is None or not is_asset_reference(value):
-                continue
-            targets = (
-                assignment.targets
-                if isinstance(assignment, ast.Assign)
-                else [assignment.target]
-            )
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id not in asset_aliases:
-                    asset_aliases.add(target.id)
-                    changed = True
-
+    """Reject every expression reference to an external asset callable."""
     issues: list[CandidateValidationIssue] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not is_asset_reference(node.func):
+        if not (
+            isinstance(node, (ast.Name, ast.Attribute))
+            and isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        raw_name = _call_name(node)
+        resolved = _resolve_alias(raw_name, import_aliases)
+        if resolved.rsplit(".", 1)[-1] not in _FORBIDDEN_ASSET_CALLS:
             continue
         issues.append(
             CandidateValidationIssue(
                 code="EXTERNAL_ASSET",
-                message="Repair candidates cannot call external asset constructors",
+                message="Repair candidates cannot reference external asset constructors",
                 line=node.lineno,
             )
         )

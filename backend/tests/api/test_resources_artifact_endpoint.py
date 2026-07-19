@@ -132,7 +132,8 @@ def test_retry_endpoint_enqueues_video_repair_and_preserves_visible_failure(
     assert first.json()["child"]["task_kind"] == "video_repair_render"
     assert second.json()["job_id"] == first.json()["job_id"]
     assert first.json()["resource"]["format_specific"]["render_status"] == "failed"
-    assert first.json()["resource"]["format_specific"]["repair_status"] == "pending"
+    assert "repair_status" not in first.json()["resource"]["format_specific"]
+    assert "repair_job_id" not in first.json()["resource"]["format_specific"]
     public_failure = first.json()["resource"]["format_specific"]["render_failure"]
     assert len(public_failure["error_code"]) <= 120
     assert "SECRET" not in str(public_failure)
@@ -154,12 +155,14 @@ def test_retry_endpoint_enqueues_video_repair_and_preserves_visible_failure(
             "resource_id": "repair-video",
             "user_id": "owner",
             "failed_revision": 3,
+            "expected_repair_job_id": None,
         }
         assert resource is not None
         assert resource.format_specific["manim_code"] == "FAILED ORIGINAL SOURCE"
         assert resource.format_specific["render_error"] == "VISIBLE ORIGINAL FAILURE"
         assert resource.format_specific["render_status"] == "failed"
-        assert resource.format_specific["repair_status"] == "pending"
+        assert "repair_status" not in resource.format_specific
+        assert "repair_job_id" not in resource.format_specific
         await jobs.close()
         await packages.close()
 

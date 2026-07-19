@@ -959,9 +959,11 @@ async def _async_true() -> bool:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prebound", [False, True])
 async def test_pending_video_repair_child_resumes_after_runner_refresh(
     tmp_path,
     monkeypatch,
+    prebound,
 ) -> None:
     from tutor.agents.resource.manim_repair import ManimRepairAgent
     from tutor.services import manim_render as mr_module
@@ -998,13 +1000,19 @@ async def test_pending_video_repair_child_resumes_after_runner_refresh(
             "resource_id": resource.resource_id,
             "user_id": "owner",
             "failed_revision": 2,
+            "expected_repair_job_id": None,
         },
     )
     child = (await FollowUpScheduler(job_store).enqueue(parent.job_id, (spec,)))[0]
-    resource.format_specific.update(
-        {"repair_status": "pending", "repair_job_id": child.job_id}
-    )
-    await package_store.update_resource(package.package_id, resource, user_id="owner")
+    if prebound:
+        resource.format_specific.update(
+            {"repair_status": "running", "repair_job_id": child.job_id}
+        )
+        await package_store.update_resource(
+            package.package_id,
+            resource,
+            user_id="owner",
+        )
 
     async def regenerate(self, context, failed_code, failure, runtime):  # type: ignore[no-untyped-def]
         return REPAIR_GOOD_CODE
@@ -1029,6 +1037,85 @@ async def test_pending_video_repair_child_resumes_after_runner_refresh(
     assert reloaded is not None
     assert reloaded.format_specific["source_revision"] == 3
     assert reloaded.format_specific["repair_status"] == "ready"
+    await job_store.close()
+    await package_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current_revision", "repair_job_id"),
+    [(3, None), (2, "newer-repair-child")],
+)
+async def test_stale_or_conflicting_video_repair_child_fails_without_overwrite(
+    tmp_path,
+    monkeypatch,
+    current_revision,
+    repair_job_id,
+) -> None:
+    from tutor.services.resource_package import store as package_store_module
+    from tutor.services.resource_package.store import ResourcePackageStore
+
+    package_store = ResourcePackageStore(tmp_path / "packages.db")
+    await package_store.init()
+    monkeypatch.setattr(package_store_module, "_store", package_store)
+    format_specific = {
+        "manim_code": "CURRENT SOURCE",
+        "render_status": "failed",
+        "render_error": "CURRENT FAILURE",
+        "source_revision": current_revision,
+    }
+    if repair_job_id is not None:
+        format_specific["repair_job_id"] = repair_job_id
+        format_specific["repair_status"] = "running"
+    resource = Resource(
+        resource_id="stale-repair-video",
+        type=ResourceType.VIDEO,
+        title="repair",
+        format_specific=format_specific,
+    )
+    package = ResourcePackage(
+        package_id="stale-repair-package",
+        topic="t",
+        resources=[resource],
+    )
+    await package_store.save(package, user_id="owner")
+    job_store = JobStore(tmp_path / "jobs.db")
+    await job_store.init()
+    parent = Job(
+        job_id="stale-repair-parent",
+        user_id="owner",
+        status=JobStatus.SUCCEEDED,
+    )
+    await job_store.save(parent)
+    child = (
+        await FollowUpScheduler(job_store).enqueue(
+            parent.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="video_repair_render",
+                    dedupe_key="stale-repair:2:1",
+                    payload={
+                        "package_id": package.package_id,
+                        "resource_id": resource.resource_id,
+                        "user_id": "owner",
+                        "failed_revision": 2,
+                        "expected_repair_job_id": None,
+                    },
+                ),
+            ),
+        )
+    )[0]
+    runner = JobRunner(
+        job_store=job_store,
+        capability_registry=_EmptyCapabilities(),  # type: ignore[arg-type]
+    )
+
+    assert await runner.resume_pending() == 1
+    terminal = await _wait_child(job_store, child.job_id)
+    reloaded = await package_store.get_resource(resource.resource_id)
+    assert terminal.status == JobStatus.FAILED
+    assert reloaded is not None
+    assert reloaded.format_specific == format_specific
     await job_store.close()
     await package_store.close()
 

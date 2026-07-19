@@ -438,69 +438,6 @@ class JobStore:
             row = (await session.execute(select(JobRow).where(*predicate))).scalar_one()
             return self._row_to_job(row)
 
-    async def create_child_if_absent_with_bind(
-        self,
-        *,
-        parent_job_id: str,
-        task_kind: str,
-        dedupe_key: str,
-        payload: dict[str, Any],
-        bind: Callable[[Job], Awaitable[bool]],
-    ) -> Job | None:
-        """Insert a child and externally bind it before either becomes claimable.
-
-        The jobs ``BEGIN IMMEDIATE`` transaction remains open while ``bind``
-        performs the resource CAS. Competing runners cannot claim the
-        uncommitted child. A false bind deletes it before commit.
-        """
-        self._ensure_engine()
-        assert self._write_lock is not None
-        async with self._write_lock, self._with_session() as session:
-            await session.execute(text("BEGIN IMMEDIATE"))
-            parent = (
-                await session.execute(
-                    select(JobRow).where(JobRow.job_id == parent_job_id)
-                )
-            ).scalar_one_or_none()
-            if parent is None:
-                raise KeyError(f"parent job not found: {parent_job_id}")
-            child = Job(
-                user_id=parent.user_id,
-                session_id=parent.session_id,
-                capability=task_kind,
-                parent_job_id=parent_job_id,
-                task_kind=task_kind,
-                dedupe_key=dedupe_key,
-                message=parent.message or "",
-                language=parent.language or "zh",
-                metadata=dict(payload),
-                web_search_enabled=bool(parent.web_search_enabled),
-                status=JobStatus.PENDING,
-            )
-            child_row = self._to_row(child)
-            values = {
-                column.name: getattr(child_row, column.name)
-                for column in JobRow.__table__.columns
-                if column.name != "id"
-            }
-            await session.execute(
-                sqlite_insert(JobRow).values(**values).on_conflict_do_nothing()
-            )
-            predicate = (
-                JobRow.parent_job_id == parent_job_id,
-                JobRow.dedupe_key == dedupe_key,
-            )
-            row = (
-                await session.execute(select(JobRow).where(*predicate))
-            ).scalar_one()
-            durable = self._row_to_job(row)
-            if durable.status not in {JobStatus.PENDING, JobStatus.RUNNING}:
-                return durable
-            if await bind(durable):
-                return durable
-            await session.delete(row)
-            return None
-
     async def update_status(
         self,
         job_id: str,
@@ -793,50 +730,6 @@ class JobStore:
                 return False
             await operation()
             return True
-
-    async def run_if_child_active_or_delete(
-        self,
-        job_id: str,
-        *,
-        operation: Callable[[], Awaitable[bool]],
-    ) -> bool:
-        """Commit a resource bind or atomically remove its unbound child.
-
-        The jobs write transaction remains held while ``operation`` performs
-        the resource CAS. A competing store therefore cannot claim the child
-        between a false CAS result and deletion. Lock order is jobs then
-        resources, matching the existing child claim guards.
-        """
-        self._ensure_engine()
-        assert self._write_lock is not None
-        async with self._write_lock, self._with_session() as session:
-            await session.execute(text("BEGIN IMMEDIATE"))
-            row = (
-                await session.execute(
-                    select(JobRow).where(JobRow.job_id == job_id)
-                )
-            ).scalar_one_or_none()
-            if (
-                row is None
-                or row.parent_job_id is None
-                or row.status
-                not in {JobStatus.PENDING.value, JobStatus.RUNNING.value}
-            ):
-                return False
-            parent = (
-                await session.execute(
-                    select(JobRow).where(JobRow.job_id == row.parent_job_id)
-                )
-            ).scalar_one_or_none()
-            if parent is None or parent.status not in {
-                JobStatus.SUCCEEDED.value,
-                JobStatus.PARTIAL.value,
-            }:
-                return False
-            if await operation():
-                return True
-            await session.delete(row)
-            return False
 
     async def append_event(
         self,

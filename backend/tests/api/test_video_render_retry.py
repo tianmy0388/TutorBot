@@ -110,7 +110,9 @@ def test_video_retry_creates_one_repair_child_and_preserves_failed_render(
         assert children[-1].task_kind == "video_repair_render"
         assert resource is not None
         assert resource.format_specific["render_status"] == "failed"
-        assert resource.format_specific["repair_status"] == "pending"
+        assert "repair_status" not in resource.format_specific
+        assert "repair_job_id" not in resource.format_specific
+        assert children[-1].metadata["expected_repair_job_id"] is None
         assert resource.format_specific["manim_code"] == "from manim import *"
         assert resource.format_specific["render_error"] == "original render failure"
         await jobs.close()
@@ -199,16 +201,15 @@ def test_video_retry_completion_race_cannot_overwrite_terminal_resource(
         await packages.save(package, user_id="owner")
 
     asyncio.run(seed())
-    original_enqueue_bound = FollowUpScheduler.enqueue_bound
+    original_enqueue = FollowUpScheduler.enqueue
 
-    async def enqueue_then_complete(self, parent_job_id, spec, *, bind):
-        child = await original_enqueue_bound(
+    async def enqueue_then_complete(self, parent_job_id, specs):
+        children = await original_enqueue(
             self,
             parent_job_id,
-            spec,
-            bind=bind,
+            specs,
         )
-        assert child is not None
+        child = children[0]
         terminal_resource = await packages.get_resource("race-video")
         assert terminal_resource is not None
         terminal_resource.format_specific.update(
@@ -235,11 +236,11 @@ def test_video_retry_completion_race_cannot_overwrite_terminal_resource(
                 '"C:\\Program Files\\Tutor Bot\\scene.py"'
             ),
         )
-        return child
+        return children
 
     monkeypatch.setattr(
         FollowUpScheduler,
-        "enqueue_bound",
+        "enqueue",
         enqueue_then_complete,
     )
     runner = SimpleNamespace(store=jobs, resume_pending=AsyncMock(return_value=0))
@@ -408,7 +409,8 @@ def test_video_retry_does_not_rebind_stale_active_child_from_old_revision(tmp_pa
         resource = await packages.get_resource("revision-video")
         assert len(children) == 2
         assert resource is not None
-        assert resource.format_specific["repair_job_id"] == children[-1].job_id
+        assert "repair_job_id" not in resource.format_specific
+        assert children[-1].metadata["expected_repair_job_id"] is None
         assert resource.format_specific["source_revision"] == 1
         assert resource.format_specific["render_error"] == "current revision error"
         await jobs.close()
@@ -417,7 +419,7 @@ def test_video_retry_does_not_rebind_stale_active_child_from_old_revision(tmp_pa
     asyncio.run(verify())
 
 
-def test_video_retry_cas_miss_removes_unbound_child_and_returns_conflict(
+def test_video_retry_persists_child_before_resource_bind_and_survives_revision_race(
     tmp_path,
     monkeypatch,
 ):
@@ -454,27 +456,24 @@ def test_video_retry_cas_miss_removes_unbound_child_and_returns_conflict(
         await packages.save(package, user_id="owner")
 
     asyncio.run(seed())
-    original_mutate = packages.mutate_video_repair_if_current
-    raced = False
+    original_enqueue = FollowUpScheduler.enqueue
 
-    async def mutate_after_revision_advance(**kwargs):
-        nonlocal raced
-        if not raced:
-            raced = True
-            current = await packages.get_resource("stale-bind-video")
-            assert current is not None
-            current.format_specific["source_revision"] = 1
-            await packages.update_resource(
-                "stale-bind-package",
-                current,
-                user_id="owner",
-            )
-        return await original_mutate(**kwargs)
+    async def enqueue_then_advance_revision(self, parent_job_id, specs):
+        children = await original_enqueue(self, parent_job_id, specs)
+        current = await packages.get_resource("stale-bind-video")
+        assert current is not None
+        current.format_specific["source_revision"] = 1
+        await packages.update_resource(
+            "stale-bind-package",
+            current,
+            user_id="owner",
+        )
+        return children
 
     monkeypatch.setattr(
-        packages,
-        "mutate_video_repair_if_current",
-        mutate_after_revision_advance,
+        FollowUpScheduler,
+        "enqueue",
+        enqueue_then_advance_revision,
     )
     runner = SimpleNamespace(store=jobs, resume_pending=AsyncMock(return_value=1))
     app = FastAPI()
@@ -488,10 +487,12 @@ def test_video_retry_cas_miss_removes_unbound_child_and_returns_conflict(
         "stale-bind-video/retry-video"
     )
 
-    assert response.status_code == 409
+    assert response.status_code == 200, response.text
 
     async def verify():
-        assert await jobs.get_children("stale-bind-parent") == []
+        children = await jobs.get_children("stale-bind-parent")
+        assert len(children) == 1
+        assert children[0].status == JobStatus.PENDING
         resource = await packages.get_resource("stale-bind-video")
         assert resource is not None
         assert resource.format_specific["source_revision"] == 1
@@ -500,4 +501,4 @@ def test_video_retry_cas_miss_removes_unbound_child_and_returns_conflict(
         await packages.close()
 
     asyncio.run(verify())
-    runner.resume_pending.assert_not_awaited()
+    runner.resume_pending.assert_awaited_once()

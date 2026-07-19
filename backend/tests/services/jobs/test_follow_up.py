@@ -978,15 +978,16 @@ async def test_claim_generation_fences_stale_owner_terminal_write(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_active_child_cas_false_deletes_before_other_store_can_claim(
+async def test_persisted_child_is_visible_and_claimable_before_resource_bind(
     tmp_path,
 ) -> None:
     first = JobStore(tmp_path / "jobs.db")
     second = JobStore(tmp_path / "jobs.db")
     await first.init()
     await second.init()
-    parent = Job(job_id="atomic-bind-parent", status=JobStatus.SUCCEEDED)
+    parent = Job(job_id="saga-parent", status=JobStatus.SUCCEEDED)
     await first.save(parent)
+
     child = (
         await FollowUpScheduler(first).enqueue(
             parent.job_id,
@@ -998,225 +999,23 @@ async def test_active_child_cas_false_deletes_before_other_store_can_claim(
                         "resource_id": "video",
                         "user_id": "owner",
                         "failed_revision": 0,
+                        "expected_repair_job_id": None,
                     },
-                    dedupe_key="repair:atomic-false",
-                ),
-            ),
-        )
-    )[0]
-    operation_entered = asyncio.Event()
-    release_operation = asyncio.Event()
-
-    async def stale_resource_cas() -> bool:
-        operation_entered.set()
-        await release_operation.wait()
-        return False
-
-    guarded = asyncio.create_task(
-        first.run_if_child_active_or_delete(
-            child.job_id,
-            operation=stale_resource_cas,
-        )
-    )
-    await asyncio.wait_for(operation_entered.wait(), timeout=2)
-    claim = asyncio.create_task(
-        second.claim_child(
-            child.job_id,
-            owner="other-runner",
-            lease_seconds=60,
-        )
-    )
-    await asyncio.sleep(0.05)
-    assert not claim.done()
-    release_operation.set()
-
-    assert await guarded is False
-    assert await claim is None
-    assert await first.get(child.job_id) is None
-    await second.close()
-    await first.close()
-
-
-@pytest.mark.asyncio
-async def test_active_child_cas_true_keeps_child_claimable(tmp_path) -> None:
-    store = JobStore(tmp_path / "jobs.db")
-    await store.init()
-    parent = Job(job_id="atomic-keep-parent", status=JobStatus.SUCCEEDED)
-    await store.save(parent)
-    child = (
-        await FollowUpScheduler(store).enqueue(
-            parent.job_id,
-            (
-                FollowUpTaskSpec(
-                    kind="video_repair_render",
-                    payload={
-                        "package_id": "pkg",
-                        "resource_id": "video",
-                        "user_id": "owner",
-                        "failed_revision": 0,
-                    },
-                    dedupe_key="repair:atomic-true",
+                    dedupe_key="repair:saga-order",
                 ),
             ),
         )
     )[0]
 
-    async def current_resource_cas() -> bool:
-        return True
-
-    assert await store.run_if_child_active_or_delete(
-        child.job_id,
-        operation=current_resource_cas,
-    )
-    assert await store.claim_child(
+    durable = await second.get(child.job_id)
+    claimed = await second.claim_child(
         child.job_id,
         owner="runner",
         lease_seconds=60,
-    ) is not None
-    await store.close()
-
-
-@pytest.mark.asyncio
-async def test_active_child_bind_does_not_run_for_ineligible_parent(tmp_path) -> None:
-    store = JobStore(tmp_path / "jobs.db")
-    await store.init()
-    parent = Job(job_id="atomic-ineligible-parent", status=JobStatus.SUCCEEDED)
-    await store.save(parent)
-    child = (
-        await FollowUpScheduler(store).enqueue(
-            parent.job_id,
-            (
-                FollowUpTaskSpec(
-                    kind="video_repair_render",
-                    payload={
-                        "package_id": "pkg",
-                        "resource_id": "video",
-                        "user_id": "owner",
-                        "failed_revision": 0,
-                    },
-                    dedupe_key="repair:atomic-ineligible",
-                ),
-            ),
-        )
-    )[0]
-    await store.update_status(parent.job_id, status=JobStatus.CANCELLED)
-    operation_called = False
-
-    async def resource_cas() -> bool:
-        nonlocal operation_called
-        operation_called = True
-        return True
-
-    assert not await store.run_if_child_active_or_delete(
-        child.job_id,
-        operation=resource_cas,
     )
-    assert operation_called is False
-    await store.close()
-
-
-@pytest.mark.asyncio
-async def test_child_insert_and_external_bind_block_claim_until_bound(tmp_path) -> None:
-    first = JobStore(tmp_path / "jobs.db")
-    second = JobStore(tmp_path / "jobs.db")
-    await first.init()
-    await second.init()
-    parent = Job(job_id="insert-bind-parent", status=JobStatus.SUCCEEDED)
-    await first.save(parent)
-    bind_entered = asyncio.Event()
-    release_bind = asyncio.Event()
-    bound_jobs: set[str] = set()
-    inserted_job_ids: list[str] = []
-
-    async def bind_resource(child: Job) -> bool:
-        inserted_job_ids.append(child.job_id)
-        bind_entered.set()
-        await release_bind.wait()
-        bound_jobs.add(child.job_id)
-        return True
-
-    submit = asyncio.create_task(
-        first.create_child_if_absent_with_bind(
-            parent_job_id=parent.job_id,
-            task_kind="video_repair_render",
-            dedupe_key="repair:insert-bind-success",
-            payload={
-                "package_id": "pkg",
-                "resource_id": "video",
-                "user_id": "owner",
-                "failed_revision": 0,
-            },
-            bind=bind_resource,
-        )
-    )
-    await asyncio.wait_for(bind_entered.wait(), timeout=2)
-    claim = asyncio.create_task(
-        second.claim_child(
-            inserted_job_ids[0],
-            owner="runner",
-            lease_seconds=60,
-        )
-    )
-    await asyncio.sleep(0.05)
-    assert not claim.done()
-    release_bind.set()
-
-    child = await submit
-    claimed = await claim
-    assert child is not None and claimed is not None
-    assert claimed.job_id == child.job_id
-    assert claimed.job_id in bound_jobs
-    await second.close()
-    await first.close()
-
-
-@pytest.mark.asyncio
-async def test_child_insert_bind_false_is_never_visible_or_claimable(tmp_path) -> None:
-    first = JobStore(tmp_path / "jobs.db")
-    second = JobStore(tmp_path / "jobs.db")
-    await first.init()
-    await second.init()
-    parent = Job(job_id="insert-reject-parent", status=JobStatus.SUCCEEDED)
-    await first.save(parent)
-    bind_entered = asyncio.Event()
-    release_bind = asyncio.Event()
-    inserted_job_ids: list[str] = []
-
-    async def reject_bind(child: Job) -> bool:
-        inserted_job_ids.append(child.job_id)
-        bind_entered.set()
-        await release_bind.wait()
-        return False
-
-    submit = asyncio.create_task(
-        first.create_child_if_absent_with_bind(
-            parent_job_id=parent.job_id,
-            task_kind="video_repair_render",
-            dedupe_key="repair:insert-bind-false",
-            payload={
-                "package_id": "pkg",
-                "resource_id": "video",
-                "user_id": "owner",
-                "failed_revision": 0,
-            },
-            bind=reject_bind,
-        )
-    )
-    await asyncio.wait_for(bind_entered.wait(), timeout=2)
-    claim = asyncio.create_task(
-        second.claim_child(
-            inserted_job_ids[0],
-            owner="runner",
-            lease_seconds=60,
-        )
-    )
-    await asyncio.sleep(0.05)
-    assert not claim.done()
-    release_bind.set()
-
-    assert await submit is None
-    assert await claim is None
-    assert await first.get_children(parent.job_id) == []
+    assert durable is not None and durable.status == JobStatus.PENDING
+    assert claimed is not None and claimed.status == JobStatus.RUNNING
+    assert claimed.metadata["expected_repair_job_id"] is None
     await second.close()
     await first.close()
 

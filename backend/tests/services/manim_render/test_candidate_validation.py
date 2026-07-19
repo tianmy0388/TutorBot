@@ -515,6 +515,39 @@ class MainScene(Scene):
 
 
 @pytest.mark.parametrize(
+    "statement",
+    [
+        "writer = np.save\n        writer('escape.npy', [1])",
+        "writer = np.array([1]).tofile\n        writer('escape.bin')",
+        "writer = np.lib.format.open_memmap\n        writer('escape.npy')",
+        "writer = Dot().tofile",
+    ],
+)
+def test_validator_rejects_numpy_and_file_method_attribute_aliases(
+    tmp_path,
+    statement,
+):
+    code = f"""from manim import *
+import numpy as np
+class MainScene(Scene):
+    def construct(self):
+        {statement}
+        self.add(Dot())
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert {issue.code for issue in result.issues} & {
+        "DISALLOWED_NUMPY_ATTRIBUTE",
+        "EXTERNAL_IO",
+    }
+
+
+@pytest.mark.parametrize(
     ("assignment", "call"),
     [
         ("maker = alias = SVGMobject", "self.add(alias('x.svg'))"),
@@ -539,6 +572,41 @@ class MainScene(Scene):
     def construct(self):
         {assignment}
         {call}
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace={
+            **RUNTIME_NAMESPACE,
+            "SVGMobject": object(),
+            "ImageMobject": object(),
+        },
+    )
+
+    assert "EXTERNAL_ASSET" in {issue.code for issue in result.issues}
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "maker = [SVGMobject][0]",
+        "(maker,) = (ImageMobject,)",
+        "maker = lambda: SVGMobject",
+        "makers = [manim.ImageMobject]",
+        "sounds = (self.add_sound,)",
+    ],
+)
+def test_validator_rejects_asset_constructor_expression_references(
+    tmp_path,
+    statement,
+):
+    code = f"""import manim
+from manim import *
+class MainScene(Scene):
+    def construct(self):
+        {statement}
+        self.add(Dot())
 """
 
     result = validate_manim_candidate(

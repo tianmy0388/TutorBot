@@ -36,7 +36,7 @@ from tutor.services.artifacts import (
 from tutor.services.config.settings import get_settings
 from tutor.services.identity import identity_policy_for
 from tutor.services.jobs.follow_up import FollowUpScheduler
-from tutor.services.jobs.schema import Job, JobStatus
+from tutor.services.jobs.schema import JobStatus
 from tutor.services.manim_render.executor import sanitize_public_diagnostic
 from tutor.services.resource_package.schema import (
     Resource,
@@ -288,84 +288,43 @@ async def retry_video_render(
         raise HTTPException(status_code=409, detail="ready video cannot be retried")
     if child is None and render_status != "failed":
         raise HTTPException(status_code=409, detail="video is not retryable")
-    reset_applied = False
     expected_repair_job_id = (resource.format_specific or {}).get("repair_job_id")
-
-    async def bind_child(candidate: Job) -> bool:
-        nonlocal reset_applied
-
-        def bind_resource(payload: dict[str, Any]) -> None:
-            payload["repair_status"] = "pending"
-            payload["repair_job_id"] = candidate.job_id
-            payload.setdefault("source_revision", failed_revision)
-            payload.setdefault("repair_history", [])
-
-        updated = await package_store.mutate_video_repair_if_current(
-            package_id=package_id,
-            resource_id=resource_id,
-            user_id=parent.user_id,
-            expected_source_revision=failed_revision,
-            expected_repair_job_id=(
-                str(expected_repair_job_id) if expected_repair_job_id else None
-            ),
-            mutation=bind_resource,
-        )
-        if updated is not None:
-            reset_applied = True
-            return True
-        # A concurrent identical request may have committed this exact child
-        # while this request waited on the jobs transaction.
-        current = await package_store.get_resource(resource_id)
-        return bool(
-            current is not None
-            and int((current.format_specific or {}).get("source_revision") or 0)
-            == failed_revision
-            and (current.format_specific or {}).get("repair_job_id")
-            == candidate.job_id
-        )
-
-    created_with_bind = False
+    created_child = child is None
     if child is None:
         attempt = len(matching) + 1
-        child = await FollowUpScheduler(job_store).enqueue_bound(
-            parent.job_id,
-            FollowUpTaskSpec(
-                kind="video_repair_render",
-                dedupe_key=(
-                    f"video-repair:{package_id}:{resource_id}:"
-                    f"{failed_revision}:{attempt}"
+        child = (
+            await FollowUpScheduler(job_store).enqueue(
+                parent.job_id,
+                (
+                    FollowUpTaskSpec(
+                        kind="video_repair_render",
+                        dedupe_key=(
+                            f"video-repair:{package_id}:{resource_id}:"
+                            f"{failed_revision}:{attempt}"
+                        ),
+                        payload={
+                            "package_id": package_id,
+                            "resource_id": resource_id,
+                            "user_id": parent.user_id,
+                            "failed_revision": failed_revision,
+                            "expected_repair_job_id": (
+                                str(expected_repair_job_id)
+                                if expected_repair_job_id
+                                else None
+                            ),
+                        },
+                    ),
                 ),
-                payload={
-                    "package_id": package_id,
-                    "resource_id": resource_id,
-                    "user_id": parent.user_id,
-                    "failed_revision": failed_revision,
-                },
-            ),
-            bind=bind_child,
-        )
-        created_with_bind = True
-        if child is None:
-            raise HTTPException(
-                status_code=409,
-                detail="video changed before repair could be scheduled",
             )
+        )[0]
 
-    if (
-        not created_with_bind
-        and str(expected_repair_job_id or "") != child.job_id
-    ):
-        await job_store.run_if_child_active_or_delete(
-            child.job_id,
-            operation=lambda: bind_child(child),
-        )
     current_child = await job_store.get(child.job_id)
     if current_child is None:
         raise HTTPException(
             status_code=409,
             detail="video changed before repair could be scheduled",
         )
-    if reset_applied and current_child.status in {
+    if created_child and current_child.status in {
         JobStatus.PENDING,
         JobStatus.RUNNING,
     }:

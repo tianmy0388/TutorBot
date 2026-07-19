@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
@@ -43,24 +43,6 @@ class FollowUpScheduler:
                 )
             )
         return children
-
-    async def enqueue_bound(
-        self,
-        parent_job_id: str,
-        spec: FollowUpTaskSpec,
-        *,
-        bind: Callable[[Job], Awaitable[bool]],
-    ) -> Job | None:
-        """Persist one child only if its external resource bind succeeds."""
-        validate_follow_up_spec(spec)
-        return await self.store.create_child_if_absent_with_bind(
-            parent_job_id=parent_job_id,
-            task_kind=spec.kind,
-            dedupe_key=spec.dedupe_key,
-            payload=spec.payload,
-            bind=bind,
-        )
-
 
 class VideoRenderFollowUpCapability(BaseCapability):
     """Execute one persisted pending-video spec on a child stream."""
@@ -234,14 +216,17 @@ class VideoRepairFollowUpCapability(BaseCapability):
         if resource is None:
             raise RuntimeError("Video resource is unavailable")
         payload = resource.format_specific or {}
-        if (
-            int(payload.get("source_revision") or 0) != failed_revision
-            or payload.get("repair_job_id") != context.job_id
-        ):
+        if int(payload.get("source_revision") or 0) != failed_revision:
             raise PermissionError("Video repair is no longer current")
+        expected_repair_job_id = context.metadata.get("expected_repair_job_id")
+        if expected_repair_job_id is not None:
+            expected_repair_job_id = str(expected_repair_job_id)
 
-        async def mark_running() -> None:
+        async def bind_and_mark_running() -> None:
             def mutation(current_payload) -> None:  # type: ignore[no-untyped-def]
+                if current_payload.get("render_status") != "failed":
+                    raise PermissionError("Video repair is no longer current")
+                current_payload["repair_job_id"] = context.job_id
                 current_payload["repair_status"] = "running"
 
             updated = await store.mutate_video_repair_if_current(
@@ -249,13 +234,31 @@ class VideoRepairFollowUpCapability(BaseCapability):
                 resource_id=resource_id,
                 user_id=context.user_id,
                 expected_source_revision=failed_revision,
+                expected_repair_job_id=expected_repair_job_id,
+                mutation=mutation,
+            )
+            if updated is not None:
+                return
+            current = await store.get_resource(resource_id)
+            current_payload = current.format_specific if current is not None else {}
+            if (
+                int((current_payload or {}).get("source_revision") or 0)
+                != failed_revision
+                or (current_payload or {}).get("repair_job_id") != context.job_id
+            ):
+                raise PermissionError("Video repair is no longer current")
+            resumed = await store.mutate_video_repair_if_current(
+                package_id=package_id,
+                resource_id=resource_id,
+                user_id=context.user_id,
+                expected_source_revision=failed_revision,
                 expected_repair_job_id=context.job_id,
                 mutation=mutation,
             )
-            if updated is None:
+            if resumed is None:
                 raise PermissionError("Video repair is no longer current")
 
-        await self._guarded_commit(context, mark_running)
+        await self._guarded_commit(context, bind_and_mark_running)
         original_failure = _render_failure_from_payload(payload, RenderFailure)
         runtime_versions, runtime_namespace = self._runtime()
         workdir = Path(
@@ -918,6 +921,14 @@ def validate_follow_up_spec(spec: FollowUpTaskSpec) -> None:
                     )
             elif not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{spec.kind} follow-up requires {field}")
+        if spec.kind == "video_repair_render":
+            expected_job_id = spec.payload.get("expected_repair_job_id")
+            if expected_job_id is not None and (
+                not isinstance(expected_job_id, str) or not expected_job_id.strip()
+            ):
+                raise ValueError(
+                    "video_repair_render expected_repair_job_id must be null or non-empty"
+                )
     elif spec.kind == "profile_update":
         for field in ("user_id", "from_watermark", "through_sequence"):
             if field not in spec.payload:
