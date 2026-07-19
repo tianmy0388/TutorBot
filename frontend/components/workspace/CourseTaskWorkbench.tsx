@@ -226,7 +226,7 @@ export function CourseTaskWorkbench({
               </div>
               <div className="mt-2 flex flex-col items-start justify-between gap-5 sm:flex-row sm:items-end">
                 <div className="min-w-0">
-                  <h1 className="text-[26px] font-semibold leading-tight tracking-tight text-fg sm:text-[30px]">
+                  <h1 className="text-[26px] font-semibold leading-tight tracking-[0.025em] text-fg sm:text-[30px]">
                     {courseName}
                   </h1>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-fg-muted text-pretty">

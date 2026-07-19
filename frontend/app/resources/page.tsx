@@ -90,7 +90,7 @@ export default function ResourcesPage() {
     <div className="knowledge-canvas h-full overflow-y-auto">
       <header className="mx-auto max-w-[1480px] px-5 pb-5 pt-8 sm:px-8 lg:px-10 lg:pt-10">
         <div className="text-4xl" aria-hidden="true">🗂️</div>
-        <h1 className="mt-4 font-display text-4xl font-bold tracking-[-0.03em] sm:text-5xl">最近资料</h1>
+        <h1 className="mt-4 font-display text-4xl font-bold tracking-[0.035em] sm:text-5xl">最近资料</h1>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-fg-muted">学习过程中整理出的讲解、练习和阅读内容。打开一组资料后，可以在右侧逐项阅读。</p>
 
         {error && <div className="mt-5 rounded-lg border border-border bg-bg-panel px-4 py-3 text-sm">资料加载未完成：{error}</div>}

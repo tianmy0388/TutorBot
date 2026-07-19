@@ -39,7 +39,7 @@ export function Logo({
         <div className="leading-none flex items-baseline gap-1.5">
           <span
             className={cn(
-              "font-semibold tracking-tight",
+              "font-semibold tracking-[0.02em]",
               wordmarkSize === "lg" ? "text-[17px]" : "text-sm",
             )}
           >

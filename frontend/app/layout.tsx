@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { JetBrains_Mono, Noto_Sans_SC, Noto_Serif_SC } from "next/font/google";
+import { JetBrains_Mono, Noto_Sans_SC } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "@/components/layout/AppShell";
 import { ThemeHydrator } from "@/components/layout/ThemeHydrator";
@@ -11,13 +11,6 @@ const notoSans = Noto_Sans_SC({
   display: "swap",
   weight: ["400", "500", "600", "700"],
   variable: "--font-body",
-});
-
-const notoSerif = Noto_Serif_SC({
-  subsets: ["latin"],
-  display: "swap",
-  weight: ["500", "600", "700"],
-  variable: "--font-display",
 });
 
 const jetBrainsMono = JetBrains_Mono({
@@ -38,7 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html
       lang="zh-CN"
       suppressHydrationWarning
-      className={`${notoSans.variable} ${notoSerif.variable} ${jetBrainsMono.variable}`}
+      className={`${notoSans.variable} ${jetBrainsMono.variable}`}
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeBootScript }} />

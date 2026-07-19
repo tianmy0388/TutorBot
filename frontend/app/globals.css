@@ -123,6 +123,7 @@
   body {
     font-family: var(--font-body), "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI",
       ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.025em;
     font-feature-settings: "ss01", "cv11", "rlig" 1, "calt" 1;
     background-color: rgb(var(--color-bg));
     color: rgb(var(--color-fg));
@@ -138,13 +139,22 @@
   }
 
   .font-display {
-    font-family: var(--font-display), "Noto Serif SC", "Source Han Serif SC", "Songti SC",
-      ui-serif, Georgia, serif;
-    letter-spacing: -0.015em;
+    font-family: var(--font-body), "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI",
+      ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.02em;
   }
   .font-mono-tab {
     font-family: var(--font-mono), ui-monospace, "SFMono-Regular", monospace;
     font-feature-settings: "zero", "ss01";
+    letter-spacing: 0;
+  }
+
+  code,
+  pre,
+  kbd,
+  samp,
+  .katex {
+    letter-spacing: 0;
   }
 
   /* Selection */

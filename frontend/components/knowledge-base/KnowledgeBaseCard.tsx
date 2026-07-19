@@ -41,7 +41,7 @@ export function KnowledgeBaseCard({ detail, isActive, onSelect, onUpload, onRetr
         <div className="text-4xl" aria-hidden="true">📖</div>
         <div className="mt-5 flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="font-display text-2xl font-bold leading-tight tracking-[-0.02em]">{detail.name}</h2>
+            <h2 className="font-display text-2xl font-bold leading-tight tracking-[0.02em]">{detail.name}</h2>
             {detail.description && <p className="mt-2 text-sm leading-6 text-fg-muted">{detail.description}</p>}
           </div>
           {isActive ? <span className="rounded bg-bg-subtle px-2 py-1 text-[11px] font-semibold" title="当前资料库">当前</span> : <button className="btn-secondary min-h-9 text-xs" onClick={onSelect} data-testid={`kb-${detail.id}-select`}>设为当前</button>}

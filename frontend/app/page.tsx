@@ -61,7 +61,7 @@ export default function LearningHomePage() {
         <header className="relative z-10 flex items-center justify-between gap-4">
           <div>
             <p className="text-sm font-semibold text-fg-muted">欢迎回来</p>
-            <h1 className="mt-2 max-w-3xl text-[38px] font-bold leading-[1.08] tracking-[-0.04em] text-fg sm:text-[52px] lg:text-[64px]">
+            <h1 className="mt-2 max-w-3xl text-[38px] font-bold leading-[1.08] tracking-[0.035em] text-fg sm:text-[52px] lg:text-[64px]">
               今天，想从哪里继续？
             </h1>
           </div>
@@ -73,7 +73,7 @@ export default function LearningHomePage() {
             <div className="flex items-start justify-between gap-6">
               <div>
                 <p className="text-sm font-semibold opacity-75">继续学习</p>
-                <h2 className="mt-4 max-w-2xl text-3xl font-bold leading-tight tracking-[-0.03em] sm:text-4xl">
+                <h2 className="mt-4 max-w-2xl text-3xl font-bold leading-tight tracking-[0.03em] sm:text-4xl">
                   {recentConversation?.title || course?.name || "从一门课程开始"}
                 </h2>
                 <p className="mt-4 max-w-xl text-sm leading-7 opacity-80 sm:text-base">
@@ -107,7 +107,7 @@ export default function LearningHomePage() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-fg-muted">今日安排</p>
-                <h2 className="mt-2 text-2xl font-bold tracking-[-0.025em]">把注意力放在下一步</h2>
+                <h2 className="mt-2 text-2xl font-bold tracking-[0.025em]">把注意力放在下一步</h2>
               </div>
               <Clock3 className="h-6 w-6 text-fg-muted" />
             </div>
@@ -122,7 +122,7 @@ export default function LearningHomePage() {
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <p className="text-sm font-semibold text-fg-muted">最近资料</p>
-                <h2 className="mt-2 text-2xl font-bold tracking-[-0.025em]">需要时，再把它们拿起来</h2>
+                <h2 className="mt-2 text-2xl font-bold tracking-[0.025em]">需要时，再把它们拿起来</h2>
               </div>
               <Link href="/knowledge-bases" className="inline-flex min-h-11 items-center gap-2 rounded-full px-4 text-sm font-semibold text-fg-muted transition-colors hover:bg-bg-subtle hover:text-fg">
                 查看资料库 <ArrowRight className="h-4 w-4" />

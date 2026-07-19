@@ -22,7 +22,7 @@ There is no separate showcase experience. Product capability is communicated thr
 - Primary surface: coral `#F4A573`; primary ink `#1B3A47`; secondary ink `#5C6B7A`.
 - One auxiliary color per scene only: lavender `#B0A5D1`, sage `#9DB67A` or salmon `#F5867B`.
 - Knowledge canvas: `#FFFFFF`; panel `#F7F6F3`; ink `#37352F`; secondary `#787774`; hairline `#E9E9E7`.
-- Body typography: Noto Sans SC. Knowledge headings: Noto Serif SC. Code: JetBrains Mono. These are the only three typography systems.
+- Interface and knowledge typography: Noto Sans SC with relaxed Chinese letter spacing. Code and formulas use JetBrains Mono or their native math font without added tracking. These are the only two typography systems.
 - Headspace radii: 16 / 24 / 32px and capsule buttons. Notion controls: 4 / 8 / 16px with 8px cards.
 - Headspace spacing: 8 / 16 / 24 / 40 / 64 / 96px. Knowledge surfaces may use 4px micro-spacing.
 - Normal transitions: 400–600ms for page atmosphere, 200–300ms for knowledge feedback. Breathing decoration uses a 3.2s cycle and is disabled by reduced-motion preferences.

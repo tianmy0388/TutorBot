@@ -125,7 +125,7 @@ export default function KnowledgeBasesPage() {
         <div className="flex flex-wrap items-end justify-between gap-5">
           <div>
             <div className="text-4xl" aria-hidden="true">📚</div>
-            <h1 className="mt-4 font-display text-4xl font-bold tracking-[-0.03em] sm:text-5xl">资料库</h1>
+            <h1 className="mt-4 font-display text-4xl font-bold tracking-[0.035em] sm:text-5xl">资料库</h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-fg-muted">把课程讲义、阅读材料和自己的笔记放在一起。学习时只会在你选择的范围内查找。</p>
           </div>
           <button className="btn-primary min-h-11" onClick={() => setCreating((value) => !value)} data-testid="kb-new-toggle"><Plus className="h-4 w-4" />新建资料库</button>
