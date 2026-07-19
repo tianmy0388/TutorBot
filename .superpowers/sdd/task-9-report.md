@@ -242,3 +242,59 @@ Ruff covered all 15 changed implementation/test files and finished with
 `test_real_render_full_pipeline` passed in 16.17 seconds and produced a real
 video larger than 1 KiB. `git diff --check` exited 0. The pre-existing
 `frontend/next-env.d.ts` modification remains untouched and unstaged.
+
+## Second review hardening follow-up
+
+The second review was handled test-first. The initial combined focused run
+produced `17 failed, 29 passed`, with every failure corresponding to one
+missing behavior rather than a collection or environment error:
+
+- Six indirect builtins/object-model escape cases were accepted, including
+  `getattr(__builtins__, ...)`, `__builtins__[...]`, and the
+  `__class__.__mro__.__subclasses__` chain.
+- `import manim as m` attributes were not checked against the runtime.
+- Four callable Mobject methods absent from the old finite list were accepted
+  as `VGroup` arguments.
+- An existing external asset was accepted and ordinary `str.replace` and
+  `Mobject.replace` calls were rejected by an overbroad terminal-name rule.
+- Untokenizable source fell back to lexical patching.
+- Structured legacy render-failure codes/log paths were exposed on direct and
+  endpoint reads.
+- A resource-bind CAS miss returned an unbound pending child.
+
+The candidate validator now uses a fail-closed Python name surface with an
+explicit pure-builtin allowlist, rejects dangerous names and all dunder
+object-model access, validates only `manim` module aliases against the supplied
+runtime namespace, and derives callable Mobject methods from runtime classes.
+It permits non-callable Mobject attributes and ordinary `replace` calls.
+Repair candidates reject SVG, image, and audio asset references even when the
+referenced file exists. The injected/default repair runtime now preserves a
+namespace mapping so class inspection is available; unrelated `math` aliases
+remain outside Manim-symbol validation.
+
+For stale endpoint binding, the existing post-CAS `delete` operation was found
+to leave a cross-process claim window. After explicit scope approval, JobStore
+gained `run_if_child_active_or_delete`: it holds the jobs database
+`BEGIN IMMEDIATE` transaction, verifies both active child and eligible parent,
+runs the resource CAS in the established jobs→resources lock order, and deletes
+the child before commit when the CAS returns false. A two-connection test proves
+another store blocks and then cannot claim the deleted child; the true-CAS case
+remains claimable. The parent-eligibility addition was independently RED
+(`1 failed`) then GREEN (`3 passed` for the atomic group). No reverse
+resources→jobs lock acquisition was found in the reviewed paths.
+
+Public structured failures now whitelist their shape, redact and bound
+`error_code`, sanitize summaries/trace tails, synchronize the top-level public
+error code, and expose only validated portable `manim_logs/...` keys. Patch
+application now rejects the entire patch when Python tokenization fails.
+
+Verification evidence:
+
+- First focused GREEN after implementation: `48 passed, 0 failed`.
+- Expanded suite plus the two initial atomic race tests: `186 passed,
+  0 failed`.
+- Final validator plus three atomic-store tests: `48 passed, 0 failed`.
+- Changed-file Ruff: `All checks passed!`.
+- Real installed-Manim pipeline: `1 passed` in 15.13 seconds.
+- Final combined post-lint run including all new cases: `190 passed,
+  0 failed`; final real-Manim rerun: `1 passed` in 15.83 seconds.

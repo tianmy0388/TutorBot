@@ -21,6 +21,47 @@ NAMESPACE = {
 }
 
 
+class _Mobject:
+    def get_end(self):
+        return None
+
+    def get_left(self):
+        return None
+
+    def get_right(self):
+        return None
+
+    def replace(self, other):
+        return other
+
+    def rotate(self, angle):
+        return angle
+
+    def set_opacity(self, value):
+        return value
+
+
+class _Dot(_Mobject):
+    pass
+
+
+class _Axes(_Mobject):
+    x_axis = object()
+
+
+class _Scene:
+    pass
+
+
+RUNTIME_NAMESPACE = {
+    **{name: object() for name in NAMESPACE},
+    "Mobject": _Mobject,
+    "Dot": _Dot,
+    "Axes": _Axes,
+    "Scene": _Scene,
+}
+
+
 def test_validator_rejects_bound_method_in_vgroup_and_zero_runtime(tmp_path):
     code = """from manim import *
 
@@ -34,7 +75,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert {issue.code for issue in result.issues} >= {
@@ -217,7 +258,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert "BOUND_METHOD_IN_VGROUP" not in {issue.code for issue in result.issues}
@@ -235,7 +276,7 @@ class MainScene(Scene):
     result = validate_manim_candidate(
         code,
         workdir=tmp_path,
-        runtime_namespace=NAMESPACE,
+        runtime_namespace=RUNTIME_NAMESPACE,
     )
 
     assert "BOUND_METHOD_IN_VGROUP" in {issue.code for issue in result.issues}
@@ -255,3 +296,165 @@ class MainScene(Scene):
     )
 
     assert "UNAVAILABLE_MANIM_SYMBOL" in {issue.code for issue in result.issues}
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "getattr(__builtins__, 'open')('secret.txt')",
+        "__builtins__['open']('secret.txt')",
+        "().__class__.__mro__[1].__subclasses__()",
+        "globals()",
+        "vars(self)",
+        "compile('1', '<x>', 'eval')",
+    ],
+)
+def test_validator_rejects_builtin_and_object_model_sandbox_escapes(
+    tmp_path,
+    statement,
+):
+    code = f"""from manim import *
+class MainScene(Scene):
+    def construct(self):
+        {statement}
+        self.add(Dot())
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert "UNSAFE_PYTHON_SURFACE" in {issue.code for issue in result.issues}
+
+
+def test_manim_module_alias_validates_runtime_symbols(tmp_path):
+    valid = """import manim as m
+class MainScene(m.Scene):
+    def construct(self):
+        self.add(m.Dot())
+"""
+    missing = valid.replace("m.Dot()", "m.MissingMobject()")
+
+    valid_result = validate_manim_candidate(
+        valid,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+    missing_result = validate_manim_candidate(
+        missing,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert valid_result.valid is True
+    assert "UNAVAILABLE_MANIM_SYMBOL" in {
+        issue.code for issue in missing_result.issues
+    }
+
+
+def test_non_manim_module_alias_is_not_checked_as_manim_namespace(tmp_path):
+    code = """import math as m
+from manim import Scene, Dot
+class MainScene(Scene):
+    def construct(self):
+        self.add(Dot().shift([m.sin(0.0), 0, 0]))
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert result.valid is True
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["get_left", "get_right", "set_opacity", "replace"],
+)
+def test_vgroup_rejects_runtime_derived_mobject_bound_methods(tmp_path, method):
+    code = f"""from manim import *
+class MainScene(Scene):
+    def construct(self):
+        dot = Dot()
+        self.add(VGroup(dot.{method}))
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert "BOUND_METHOD_IN_VGROUP" in {issue.code for issue in result.issues}
+
+
+def test_repair_candidate_rejects_existing_external_asset(tmp_path):
+    (tmp_path / "existing.svg").write_text("<svg/>", encoding="utf-8")
+    code = """from manim import *
+class MainScene(Scene):
+    def construct(self):
+        self.add(SVGMobject("existing.svg"))
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace={**RUNTIME_NAMESPACE, "SVGMobject": object()},
+    )
+
+    assert "EXTERNAL_ASSET" in {issue.code for issue in result.issues}
+
+
+@pytest.mark.parametrize(
+    ("filename", "statement", "runtime_symbol"),
+    [
+        ("existing.png", 'self.add(ImageMobject("existing.png"))', "ImageMobject"),
+        ("existing.wav", 'self.add_sound("existing.wav")', None),
+    ],
+)
+def test_repair_candidate_rejects_all_existing_asset_kinds(
+    tmp_path,
+    filename,
+    statement,
+    runtime_symbol,
+):
+    (tmp_path / filename).write_bytes(b"asset")
+    namespace = dict(RUNTIME_NAMESPACE)
+    if runtime_symbol:
+        namespace[runtime_symbol] = object()
+    code = f"""from manim import *
+class MainScene(Scene):
+    def construct(self):
+        {statement}
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=namespace,
+    )
+
+    assert "EXTERNAL_ASSET" in {issue.code for issue in result.issues}
+
+
+def test_validator_allows_string_and_mobject_replace_calls(tmp_path):
+    code = """from manim import *
+class MainScene(Scene):
+    def construct(self):
+        label = "before".replace("before", "after")
+        dot = Dot()
+        dot.replace(Dot())
+        self.add(dot)
+"""
+
+    result = validate_manim_candidate(
+        code,
+        workdir=tmp_path,
+        runtime_namespace=RUNTIME_NAMESPACE,
+    )
+
+    assert result.valid is True

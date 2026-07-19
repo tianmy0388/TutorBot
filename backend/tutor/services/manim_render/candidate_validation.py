@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,27 +11,54 @@ from pathlib import Path
 from tutor.services.manim_render.static_guard import StaticGuard
 
 _ALLOWED_IMPORT_ROOTS = {"manim", "math", "numpy"}
-_BOUND_MOBJECT_METHODS = {
-    "add",
-    "align_to",
-    "arrange",
-    "become",
-    "copy",
-    "get_center",
-    "get_end",
-    "get_start",
-    "move_to",
-    "next_to",
-    "remove",
-    "rotate",
-    "scale",
-    "set_color",
-    "set_fill",
-    "set_stroke",
-    "shift",
-    "stretch",
-    "to_edge",
-    "to_corner",
+_DANGEROUS_NAMES = {
+    "__builtins__",
+    "__import__",
+    "breakpoint",
+    "compile",
+    "delattr",
+    "dir",
+    "eval",
+    "exec",
+    "getattr",
+    "globals",
+    "help",
+    "input",
+    "locals",
+    "memoryview",
+    "object",
+    "open",
+    "setattr",
+    "type",
+    "vars",
+}
+_SAFE_BUILTINS = {
+    "abs",
+    "all",
+    "any",
+    "bool",
+    "dict",
+    "enumerate",
+    "filter",
+    "float",
+    "int",
+    "isinstance",
+    "len",
+    "list",
+    "map",
+    "max",
+    "min",
+    "next",
+    "range",
+    "reversed",
+    "round",
+    "set",
+    "sorted",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "zip",
 }
 _FORBIDDEN_IO_ROOTS = {
     "httpx",
@@ -50,7 +78,6 @@ _FORBIDDEN_FILE_METHODS = {
     "read_bytes",
     "read_text",
     "rename",
-    "replace",
     "rglob",
     "rmdir",
     "tofile",
@@ -122,6 +149,16 @@ def validate_manim_candidate(
                 message=(guard.summary or "; ".join(guard.errors))[:500],
             )
         )
+    if guard.external_assets or guard.error_code in {
+        "dynamic_external_asset",
+        "missing_external_asset",
+    }:
+        issues.append(
+            CandidateValidationIssue(
+                code="EXTERNAL_ASSET",
+                message="Repair candidates must be self-contained without external assets",
+            )
+        )
 
     main_scene = next(
         (
@@ -158,8 +195,13 @@ def validate_manim_candidate(
     runtime_names = set(runtime_namespace)
     aliases = _import_aliases(tree)
     issues.extend(_validate_imports(tree, runtime_names))
+    issues.extend(_validate_manim_aliases(tree, aliases, runtime_names))
     issues.extend(_validate_external_io(tree, aliases))
     locally_defined = _defined_names(tree)
+    issues.extend(
+        _validate_python_surface(tree, runtime_names, locally_defined)
+    )
+    bound_mobject_methods = _runtime_mobject_methods(runtime_namespace)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -168,7 +210,7 @@ def validate_manim_candidate(
             for argument in node.args:
                 if (
                     isinstance(argument, ast.Attribute)
-                    and argument.attr in _BOUND_MOBJECT_METHODS
+                    and argument.attr in bound_mobject_methods
                 ):
                     issues.append(
                         CandidateValidationIssue(
@@ -245,6 +287,8 @@ def _defined_names(tree: ast.AST) -> set[str]:
             names.add(node.name)
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             names.add(node.id)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
         elif isinstance(node, ast.Import):
             names.update(alias.asname or alias.name.split(".", 1)[0] for alias in node.names)
         elif (
@@ -336,6 +380,98 @@ def _validate_imports(
                             )
                         )
     return issues
+
+
+def _validate_manim_aliases(
+    tree: ast.AST,
+    aliases: dict[str, str],
+    runtime_names: set[str],
+) -> list[CandidateValidationIssue]:
+    issues: list[CandidateValidationIssue] = []
+    manim_aliases = {
+        alias for alias, target in aliases.items() if target == "manim"
+    }
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Attribute)
+            or not isinstance(node.value, ast.Name)
+            or node.value.id not in manim_aliases
+            or node.attr in runtime_names
+        ):
+            continue
+        issues.append(
+            CandidateValidationIssue(
+                code="UNAVAILABLE_MANIM_SYMBOL",
+                message=f"{node.attr} is not available in this Manim runtime",
+                line=node.lineno,
+            )
+        )
+    return issues
+
+
+def _validate_python_surface(
+    tree: ast.AST,
+    runtime_names: set[str],
+    locally_defined: set[str],
+) -> list[CandidateValidationIssue]:
+    """Allow only explicit runtime/local names and a small pure-builtin set."""
+    issues: list[CandidateValidationIssue] = []
+    allowed_names = runtime_names | locally_defined | _SAFE_BUILTINS
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and _is_dunder(node.attr):
+            issues.append(
+                CandidateValidationIssue(
+                    code="UNSAFE_PYTHON_SURFACE",
+                    message="Python dunder object-model access is not allowed",
+                    line=node.lineno,
+                )
+            )
+        elif (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and (
+                node.id in _DANGEROUS_NAMES
+                or _is_dunder(node.id)
+                or node.id not in allowed_names
+            )
+        ):
+            issues.append(
+                CandidateValidationIssue(
+                    code="UNSAFE_PYTHON_SURFACE",
+                    message=f"Python name {node.id!r} is not allowed in repair code",
+                    line=node.lineno,
+                )
+            )
+    return issues
+
+
+def _is_dunder(name: str) -> bool:
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _runtime_mobject_methods(
+    runtime_namespace: Mapping[str, object] | Collection[str],
+) -> set[str]:
+    if not isinstance(runtime_namespace, Mapping):
+        return set()
+    mobject = runtime_namespace.get("Mobject")
+    if not inspect.isclass(mobject):
+        return set()
+    methods: set[str] = set()
+    for value in runtime_namespace.values():
+        if not inspect.isclass(value):
+            continue
+        try:
+            if not issubclass(value, mobject):
+                continue
+        except TypeError:
+            continue
+        methods.update(
+            name
+            for name in dir(value)
+            if not _is_dunder(name) and callable(getattr(value, name, None))
+        )
+    return methods
 
 
 def _validate_external_io(

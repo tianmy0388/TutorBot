@@ -316,7 +316,7 @@ async def retry_video_render(
     reset_applied = False
     expected_repair_job_id = (resource.format_specific or {}).get("repair_job_id")
 
-    async def reset_resource() -> None:
+    async def reset_resource() -> bool:
         nonlocal reset_applied
         def bind_child(payload: dict[str, Any]) -> None:
             payload["repair_status"] = "pending"
@@ -335,10 +335,19 @@ async def retry_video_render(
             mutation=bind_child,
         )
         reset_applied = updated is not None
+        return reset_applied
 
     if str(expected_repair_job_id or "") != child.job_id:
-        await job_store.run_if_child_active(child.job_id, operation=reset_resource)
-    current_child = await job_store.get(child.job_id) or child
+        await job_store.run_if_child_active_or_delete(
+            child.job_id,
+            operation=reset_resource,
+        )
+    current_child = await job_store.get(child.job_id)
+    if current_child is None:
+        raise HTTPException(
+            status_code=409,
+            detail="video changed before repair could be scheduled",
+        )
     if reset_applied and current_child.status in {
         JobStatus.PENDING,
         JobStatus.RUNNING,

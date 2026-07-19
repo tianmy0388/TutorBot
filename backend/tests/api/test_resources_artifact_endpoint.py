@@ -78,10 +78,12 @@ def test_retry_endpoint_enqueues_video_repair_and_preserves_visible_failure(
                 "render_error_code": "process_exit",
                 "render_error": "VISIBLE ORIGINAL FAILURE",
                 "render_failure": {
-                    "error_code": "process_exit",
-                    "summary": "VISIBLE ORIGINAL FAILURE",
-                    "traceback_tail": ["ValueError: failed"],
-                    "log_artifact_key": "manim_logs/original/attempt-01.log",
+                    "error_code": "provider-token=SECRET_CODE " + ("e" * 500),
+                    "summary": "api_key=SECRET_SUMMARY C:\\private\\scene.py",
+                    "traceback_tail": [
+                        "provider-token=SECRET_TRACE C:\\private\\worker.py"
+                    ],
+                    "log_artifact_key": "C:\\private\\operator.log",
                 },
                 "source_revision": 3,
                 "repair_history": [
@@ -131,6 +133,11 @@ def test_retry_endpoint_enqueues_video_repair_and_preserves_visible_failure(
     assert second.json()["job_id"] == first.json()["job_id"]
     assert first.json()["resource"]["format_specific"]["render_status"] == "failed"
     assert first.json()["resource"]["format_specific"]["repair_status"] == "pending"
+    public_failure = first.json()["resource"]["format_specific"]["render_failure"]
+    assert len(public_failure["error_code"]) <= 120
+    assert "SECRET" not in str(public_failure)
+    assert "C:\\private" not in str(public_failure)
+    assert "log_artifact_key" not in public_failure
     public_history = first.json()["resource"]["format_specific"]["repair_history"]
     assert len(public_history[0]["summary"]) <= 200
     assert "SECRET_VALUE" not in str(public_history)

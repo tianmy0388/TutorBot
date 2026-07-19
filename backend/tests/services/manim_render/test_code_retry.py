@@ -90,6 +90,18 @@ def test_apply_patches_accepts_complete_python_token_span():
     assert out == "self.wait()\n"
 
 
+def test_apply_patches_rejects_all_patches_when_source_cannot_be_tokenized():
+    cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
+    code = "x = 1\nmessage = '''unterminated\n"
+
+    out = cr._apply_patches(
+        code,
+        [{"search": "x = 1", "replace": "x = 2"}],
+    )
+
+    assert out == code
+
+
 def test_apply_patches_skips_unmatched_search():
     cr = CodeRetry(llm=_mock_llm([]), max_attempts=1)
     code = "x = 1\n"

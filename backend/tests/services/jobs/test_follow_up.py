@@ -975,6 +975,143 @@ async def test_claim_generation_fences_stale_owner_terminal_write(tmp_path) -> N
         expected_claim_owner="new-owner",
         expected_claim_generation=new.claim_generation,
     )
+
+
+@pytest.mark.asyncio
+async def test_active_child_cas_false_deletes_before_other_store_can_claim(
+    tmp_path,
+) -> None:
+    first = JobStore(tmp_path / "jobs.db")
+    second = JobStore(tmp_path / "jobs.db")
+    await first.init()
+    await second.init()
+    parent = Job(job_id="atomic-bind-parent", status=JobStatus.SUCCEEDED)
+    await first.save(parent)
+    child = (
+        await FollowUpScheduler(first).enqueue(
+            parent.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="video_repair_render",
+                    payload={
+                        "package_id": "pkg",
+                        "resource_id": "video",
+                        "user_id": "owner",
+                        "failed_revision": 0,
+                    },
+                    dedupe_key="repair:atomic-false",
+                ),
+            ),
+        )
+    )[0]
+    operation_entered = asyncio.Event()
+    release_operation = asyncio.Event()
+
+    async def stale_resource_cas() -> bool:
+        operation_entered.set()
+        await release_operation.wait()
+        return False
+
+    guarded = asyncio.create_task(
+        first.run_if_child_active_or_delete(
+            child.job_id,
+            operation=stale_resource_cas,
+        )
+    )
+    await asyncio.wait_for(operation_entered.wait(), timeout=2)
+    claim = asyncio.create_task(
+        second.claim_child(
+            child.job_id,
+            owner="other-runner",
+            lease_seconds=60,
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not claim.done()
+    release_operation.set()
+
+    assert await guarded is False
+    assert await claim is None
+    assert await first.get(child.job_id) is None
+    await second.close()
+    await first.close()
+
+
+@pytest.mark.asyncio
+async def test_active_child_cas_true_keeps_child_claimable(tmp_path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    await store.init()
+    parent = Job(job_id="atomic-keep-parent", status=JobStatus.SUCCEEDED)
+    await store.save(parent)
+    child = (
+        await FollowUpScheduler(store).enqueue(
+            parent.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="video_repair_render",
+                    payload={
+                        "package_id": "pkg",
+                        "resource_id": "video",
+                        "user_id": "owner",
+                        "failed_revision": 0,
+                    },
+                    dedupe_key="repair:atomic-true",
+                ),
+            ),
+        )
+    )[0]
+
+    async def current_resource_cas() -> bool:
+        return True
+
+    assert await store.run_if_child_active_or_delete(
+        child.job_id,
+        operation=current_resource_cas,
+    )
+    assert await store.claim_child(
+        child.job_id,
+        owner="runner",
+        lease_seconds=60,
+    ) is not None
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_active_child_bind_does_not_run_for_ineligible_parent(tmp_path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    await store.init()
+    parent = Job(job_id="atomic-ineligible-parent", status=JobStatus.SUCCEEDED)
+    await store.save(parent)
+    child = (
+        await FollowUpScheduler(store).enqueue(
+            parent.job_id,
+            (
+                FollowUpTaskSpec(
+                    kind="video_repair_render",
+                    payload={
+                        "package_id": "pkg",
+                        "resource_id": "video",
+                        "user_id": "owner",
+                        "failed_revision": 0,
+                    },
+                    dedupe_key="repair:atomic-ineligible",
+                ),
+            ),
+        )
+    )[0]
+    await store.update_status(parent.job_id, status=JobStatus.CANCELLED)
+    operation_called = False
+
+    async def resource_cas() -> bool:
+        nonlocal operation_called
+        operation_called = True
+        return True
+
+    assert not await store.run_if_child_active_or_delete(
+        child.job_id,
+        operation=resource_cas,
+    )
+    assert operation_called is False
     await store.close()
 
 

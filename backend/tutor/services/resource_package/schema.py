@@ -581,6 +581,7 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
     if resource.type == ResourceType.VIDEO:
         from tutor.services.manim_render.executor import (
             safe_failure_summary,
+            sanitize_public_diagnostic,
             tail_lines,
         )
 
@@ -599,12 +600,21 @@ def public_resource_dump(resource: Resource) -> dict[str, Any]:
             diagnostic_text = "\n".join(
                 str(line) for line in raw_tail
             ) if isinstance(raw_tail, list) else str(raw_tail or "")
-            format_specific["render_failure"] = {
-                "error_code": str(failure.get("error_code") or "internal_error"),
+            error_code = sanitize_public_diagnostic(
+                str(failure.get("error_code") or "internal_error")
+            )[:120]
+            public_failure: dict[str, Any] = {
+                "error_code": error_code,
                 "summary": summary,
                 "traceback_tail": list(tail_lines(diagnostic_text)),
-                "log_artifact_key": str(failure.get("log_artifact_key") or ""),
             }
+            log_key = _safe_manim_log_artifact_key(
+                failure.get("log_artifact_key")
+            )
+            if log_key:
+                public_failure["log_artifact_key"] = log_key
+            format_specific["render_failure"] = public_failure
+            format_specific["render_error_code"] = error_code
             format_specific["render_error"] = summary
         elif format_specific.get("render_status") == "failed":
             # Pre-structured Manim records stored the complete host traceback
@@ -683,16 +693,22 @@ def _public_repair_history(value: Any) -> list[dict[str, Any]]:
             record["summary"] = sanitize_public_diagnostic(
                 str(raw["summary"])
             )[:200]
-        log_key = str(raw.get("log_artifact_key") or "")
-        if log_key.startswith("manim_logs/"):
-            try:
-                resolve_artifact_key(log_key, Path("."))
-            except UnsafeArtifactKey:
-                pass
-            else:
-                record["log_artifact_key"] = log_key
+        log_key = _safe_manim_log_artifact_key(raw.get("log_artifact_key"))
+        if log_key:
+            record["log_artifact_key"] = log_key
         projected.append(record)
     return projected
+
+
+def _safe_manim_log_artifact_key(value: Any) -> str:
+    key = str(value or "")
+    if not key.startswith("manim_logs/"):
+        return ""
+    try:
+        resolve_artifact_key(key, Path("."))
+    except UnsafeArtifactKey:
+        return ""
+    return key
 
 
 def public_package_dump(package: ResourcePackage) -> dict[str, Any]:

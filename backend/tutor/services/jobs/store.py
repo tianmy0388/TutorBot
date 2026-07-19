@@ -731,6 +731,50 @@ class JobStore:
             await operation()
             return True
 
+    async def run_if_child_active_or_delete(
+        self,
+        job_id: str,
+        *,
+        operation: Callable[[], Awaitable[bool]],
+    ) -> bool:
+        """Commit a resource bind or atomically remove its unbound child.
+
+        The jobs write transaction remains held while ``operation`` performs
+        the resource CAS. A competing store therefore cannot claim the child
+        between a false CAS result and deletion. Lock order is jobs then
+        resources, matching the existing child claim guards.
+        """
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            row = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == job_id)
+                )
+            ).scalar_one_or_none()
+            if (
+                row is None
+                or row.parent_job_id is None
+                or row.status
+                not in {JobStatus.PENDING.value, JobStatus.RUNNING.value}
+            ):
+                return False
+            parent = (
+                await session.execute(
+                    select(JobRow).where(JobRow.job_id == row.parent_job_id)
+                )
+            ).scalar_one_or_none()
+            if parent is None or parent.status not in {
+                JobStatus.SUCCEEDED.value,
+                JobStatus.PARTIAL.value,
+            }:
+                return False
+            if await operation():
+                return True
+            await session.delete(row)
+            return False
+
     async def append_event(
         self,
         job_id: str,

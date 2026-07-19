@@ -460,3 +460,36 @@ def test_public_video_dump_sanitizes_legacy_repair_history() -> None:
     assert "UNBOUNDED" not in str(history)
     assert "EXTRA FIELD" not in str(history)
     assert "log_artifact_key" not in history[0]
+
+
+def test_public_video_dump_sanitizes_legacy_structured_render_failure() -> None:
+    resource = Resource(
+        type=ResourceType.VIDEO,
+        title="video",
+        format_specific={
+            "render_status": "failed",
+            "render_failure": {
+                "error_code": "provider-token=SECRET_CODE " + ("x" * 500),
+                "summary": "api_key=SECRET_SUMMARY C:\\private\\scene.py",
+                "traceback_tail": [
+                    "provider-token=SECRET_TRACE C:\\private\\worker.py"
+                ],
+                "log_artifact_key": "C:\\private\\operator.log",
+                "unexpected": "SECRET EXTRA",
+            },
+        },
+    )
+
+    failure = public_resource_dump(resource)["format_specific"]["render_failure"]
+
+    assert set(failure) <= {
+        "error_code",
+        "summary",
+        "traceback_tail",
+        "log_artifact_key",
+    }
+    assert len(failure["error_code"]) <= 120
+    assert "SECRET" not in str(failure)
+    assert "C:\\private" not in str(failure)
+    assert "log_artifact_key" not in failure
+    assert "unexpected" not in failure

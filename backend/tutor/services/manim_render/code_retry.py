@@ -368,36 +368,17 @@ class CodeRetry:
         try:
             tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
         except (IndentationError, tokenize.TokenError):
-            tokens = []
-        if tokens:
-            token_starts = {absolute(token.start) for token in tokens}
-            token_ends = {absolute(token.end) for token in tokens}
-            if start not in token_starts or end not in token_ends:
-                return False
-            for token in tokens:
-                if token.type not in {tokenize.STRING, tokenize.COMMENT}:
-                    continue
-                protected_start = absolute(token.start)
-                protected_end = absolute(token.end)
-                if start < protected_end and end > protected_start:
-                    return False
-            return True
-
-        # Tokenization can fail on the malformed source that a retry is meant
-        # to repair. Retain the conservative lexical fallback for that case.
-        before = code[start - 1] if start else ""
-        after = code[end] if end < len(code) else ""
-        first = search[0]
-        last = search[-1]
-        if first.isalnum() or first == "_":
-            if before.isalnum() or before == "_":
-                return False
-            if first.isdigit() and before == ".":
-                return False
-        if last.isalnum() or last == "_":
-            if after.isalnum() or after == "_":
-                return False
-            if last.isdigit() and after == ".":
+            return False
+        token_starts = {absolute(token.start) for token in tokens}
+        token_ends = {absolute(token.end) for token in tokens}
+        if start not in token_starts or end not in token_ends:
+            return False
+        for token in tokens:
+            if token.type not in {tokenize.STRING, tokenize.COMMENT}:
+                continue
+            protected_start = absolute(token.start)
+            protected_end = absolute(token.end)
+            if start < protected_end and end > protected_start:
                 return False
         return True
 

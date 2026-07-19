@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
+
 from tutor.core.capability_protocol import BaseCapability, CapabilityManifest
 from tutor.core.capability_result import CapabilityResult, FollowUpTaskSpec
 from tutor.core.context import UnifiedContext
@@ -505,9 +507,19 @@ class VideoRepairFollowUpCapability(BaseCapability):
 
         await self._guarded_commit(context, persist)
 
-    def _runtime(self) -> tuple[dict[str, str], set[str]]:
+    def _runtime(
+        self,
+    ) -> tuple[
+        dict[str, str],
+        Mapping[str, object] | Collection[str],
+    ]:
         if self._runtime_versions is not None and self._runtime_namespace is not None:
-            return dict(self._runtime_versions), set(self._runtime_namespace)
+            namespace = (
+                dict(self._runtime_namespace)
+                if isinstance(self._runtime_namespace, Mapping)
+                else set(self._runtime_namespace)
+            )
+            return dict(self._runtime_versions), namespace
         import platform
         try:
             import manim
@@ -518,7 +530,7 @@ class VideoRepairFollowUpCapability(BaseCapability):
                 "python": platform.python_version(),
                 "manim": str(getattr(manim, "__version__", "unknown")),
             },
-            set(vars(manim)),
+            dict(vars(manim)),
         )
 
 

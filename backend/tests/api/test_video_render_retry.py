@@ -406,3 +406,89 @@ def test_video_retry_does_not_rebind_stale_active_child_from_old_revision(tmp_pa
         await packages.close()
 
     asyncio.run(verify())
+
+
+def test_video_retry_cas_miss_removes_unbound_child_and_returns_conflict(
+    tmp_path,
+    monkeypatch,
+):
+    jobs = JobStore(tmp_path / "jobs.db")
+    packages = ResourcePackageStore(tmp_path / "packages.db")
+
+    async def seed():
+        await jobs.init()
+        await packages.init()
+        parent = Job(
+            job_id="stale-bind-parent",
+            user_id="owner",
+            session_id="session",
+            status=JobStatus.SUCCEEDED,
+        )
+        await jobs.save(parent)
+        resource = Resource(
+            resource_id="stale-bind-video",
+            type=ResourceType.VIDEO,
+            title="video",
+            format_specific={
+                "manim_code": "failed source",
+                "render_status": "failed",
+                "render_error": "failed",
+                "source_revision": 0,
+            },
+        )
+        package = ResourcePackage(
+            package_id="stale-bind-package",
+            topic="topic",
+            resources=[resource],
+        )
+        package.associate_originating_job(parent.job_id)
+        await packages.save(package, user_id="owner")
+
+    asyncio.run(seed())
+    original_mutate = packages.mutate_video_repair_if_current
+    raced = False
+
+    async def mutate_after_revision_advance(**kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            current = await packages.get_resource("stale-bind-video")
+            assert current is not None
+            current.format_specific["source_revision"] = 1
+            await packages.update_resource(
+                "stale-bind-package",
+                current,
+                user_id="owner",
+            )
+        return await original_mutate(**kwargs)
+
+    monkeypatch.setattr(
+        packages,
+        "mutate_video_repair_if_current",
+        mutate_after_revision_advance,
+    )
+    runner = SimpleNamespace(store=jobs, resume_pending=AsyncMock(return_value=1))
+    app = FastAPI()
+    app.state.settings = SimpleNamespace(multi_user_enabled=True)
+    app.state.resource_package_store = packages
+    app.state.learning_runner = runner
+    app.include_router(router, prefix="/api/v1")
+
+    response = TestClient(app).post(
+        "/api/v1/resources/packages/owner/stale-bind-package/resources/"
+        "stale-bind-video/retry-video"
+    )
+
+    assert response.status_code == 409
+
+    async def verify():
+        assert await jobs.get_children("stale-bind-parent") == []
+        resource = await packages.get_resource("stale-bind-video")
+        assert resource is not None
+        assert resource.format_specific["source_revision"] == 1
+        assert not resource.format_specific.get("repair_job_id")
+        await jobs.close()
+        await packages.close()
+
+    asyncio.run(verify())
+    runner.resume_pending.assert_not_awaited()
