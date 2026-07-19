@@ -835,9 +835,10 @@ function handleIncrementalResource(
   );
   if (existingIndex >= 0) {
     const current = existingResources[existingIndex];
-    if (shouldReplaceIncrementalVideoSnapshot(current, raw) && existing) {
+    const merged = mergeIncrementalVideoSnapshot(current, raw);
+    if (merged && existing) {
       const resources = [...existingResources];
-      resources[existingIndex] = raw;
+      resources[existingIndex] = merged;
       store.setLatestPackage({
         ...existing,
         resources: resources as never,
@@ -877,11 +878,11 @@ function handleIncrementalResource(
   });
 }
 
-function shouldReplaceIncrementalVideoSnapshot(
+function mergeIncrementalVideoSnapshot(
   current: unknown,
   incoming: Record<string, unknown>,
-): boolean {
-  if (!isRecord(current) || incoming.type !== "video") return false;
+): Record<string, unknown> | null {
+  if (!isRecord(current) || incoming.type !== "video") return null;
   const currentFormat = isRecord(current.format_specific)
     ? current.format_specific
     : {};
@@ -896,14 +897,114 @@ function shouldReplaceIncrementalVideoSnapshot(
     typeof incomingFormat.source_revision === "number"
       ? incomingFormat.source_revision
       : 0;
-  if (incomingRevision > currentRevision) return true;
-  if (incomingRevision < currentRevision) return false;
-  return (
-    incomingFormat.repair_job_id !== currentFormat.repair_job_id ||
-    incomingFormat.repair_status !== currentFormat.repair_status ||
-    incomingFormat.render_status !== currentFormat.render_status ||
-    incomingFormat.video_url !== currentFormat.video_url
+  if (incomingRevision < currentRevision) return null;
+  if (
+    incomingRevision === currentRevision &&
+    !isEqualRevisionVideoAdvance(currentFormat, incomingFormat)
+  ) {
+    return null;
+  }
+
+  const repairHistory = mergeRepairHistory(
+    currentFormat.repair_history,
+    incomingFormat.repair_history,
   );
+  return {
+    ...current,
+    ...incoming,
+    metadata: {
+      ...(isRecord(current.metadata) ? current.metadata : {}),
+      ...(isRecord(incoming.metadata) ? incoming.metadata : {}),
+    },
+    format_specific: {
+      ...currentFormat,
+      ...incomingFormat,
+      ...(repairHistory.length > 0 ? { repair_history: repairHistory } : {}),
+    },
+  };
+}
+
+function isEqualRevisionVideoAdvance(
+  current: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+): boolean {
+  const currentRepairJob = stringField(current.repair_job_id);
+  const incomingRepairJob = stringField(incoming.repair_job_id);
+  if (currentRepairJob || incomingRepairJob) {
+    if (!currentRepairJob || !incomingRepairJob) return false;
+    if (currentRepairJob === incomingRepairJob) {
+      return sameJobStatusAdvances(
+        stringField(current.repair_status),
+        stringField(incoming.repair_status),
+        ["pending", "running"],
+        ["ready", "failed"],
+      );
+    }
+    if (historyTerminalizes(incoming.repair_history, currentRepairJob)) {
+      return true;
+    }
+    if (historyTerminalizes(current.repair_history, incomingRepairJob)) {
+      return false;
+    }
+    return false;
+  }
+
+  const currentRenderJob = stringField(current.render_job_id);
+  const incomingRenderJob = stringField(incoming.render_job_id);
+  if (!currentRenderJob || currentRenderJob !== incomingRenderJob) return false;
+  return sameJobStatusAdvances(
+    stringField(current.render_status),
+    stringField(incoming.render_status),
+    ["pending", "rendering", "running"],
+    ["ready", "failed"],
+  );
+}
+
+function sameJobStatusAdvances(
+  currentStatus: string,
+  incomingStatus: string,
+  activeOrder: string[],
+  terminalStatuses: string[],
+): boolean {
+  const currentTerminal = terminalStatuses.includes(currentStatus);
+  const incomingTerminal = terminalStatuses.includes(incomingStatus);
+  if (currentTerminal) {
+    return incomingTerminal && incomingStatus === currentStatus;
+  }
+  if (incomingTerminal) return true;
+  const currentIndex = activeOrder.indexOf(currentStatus);
+  const incomingIndex = activeOrder.indexOf(incomingStatus);
+  return currentIndex >= 0 && incomingIndex >= currentIndex;
+}
+
+function historyTerminalizes(value: unknown, jobId: string): boolean {
+  return Array.isArray(value) && value.some(
+    (record) =>
+      isRecord(record) &&
+      record.job_id === jobId &&
+      (record.status === "ready" || record.status === "failed"),
+  );
+}
+
+function mergeRepairHistory(current: unknown, incoming: unknown): unknown[] {
+  const records = [
+    ...(Array.isArray(current) ? current : []),
+    ...(Array.isArray(incoming) ? incoming : []),
+  ].filter(isRecord);
+  const merged = new Map<string, Record<string, unknown>>();
+  for (const record of records) {
+    const key = JSON.stringify([
+      record.job_id,
+      record.failed_revision,
+      record.status,
+    ]);
+    merged.set(key, record);
+  }
+  return [...merged.values()].slice(-10);
+}
+
+function stringField(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function packageIdFromValue(value: unknown): string | null {

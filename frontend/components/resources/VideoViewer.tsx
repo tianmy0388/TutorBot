@@ -175,7 +175,13 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     formatSpec.repair_status === "running" ||
     (formatSpec.repair_status === undefined &&
       (repairChild?.status === "pending" || repairChild?.status === "running"));
-  const isRepairActive = retrying || !!retryTracking || persistedRepairActive;
+  const canonicalRepairJobIsLocal =
+    !!retryTracking &&
+    canonicalRepairJobId === retryTracking.jobId &&
+    (formatSpec.repair_status === "pending" ||
+      formatSpec.repair_status === "running");
+  const isRepairActive =
+    retrying || canonicalRepairJobIsLocal || persistedRepairActive;
   const boundedRepairHistory = (formatSpec.repair_history ?? []).slice(-10);
   const latestRepairFailure = [...boundedRepairHistory]
     .reverse()
@@ -202,11 +208,20 @@ export function VideoViewer({ resource }: { resource: Resource }) {
       + `/resources/${encodeURIComponent(canonicalResource.resource_id)}/artifacts/${encodeURIComponent(logArtifact.name)}`
     : "";
 
-  const trackingJobId =
-    retryTracking?.jobId || (persistedRepairActive ? canonicalRepairJobId : "");
+  const persistedRepairJobId =
+    persistedRepairActive
+      ? canonicalRepairJobId || repairChild?.job_id || ""
+      : "";
+  const trackingJobId = canonicalRepairJobIsLocal
+    ? retryTracking.jobId
+    : persistedRepairJobId;
   const trackingPollJobId =
-    retryTracking?.parentJobId || repairChild?.parent_job_id || trackingJobId;
-  const trackingPackageId = retryTracking?.packageId || packageId;
+    canonicalRepairJobIsLocal
+      ? retryTracking.parentJobId
+      : repairChild?.parent_job_id || trackingJobId;
+  const trackingPackageId = canonicalRepairJobIsLocal
+    ? retryTracking.packageId
+    : packageId;
 
   useEffect(() => {
     if (
@@ -459,7 +474,7 @@ export function VideoViewer({ resource }: { resource: Resource }) {
                   <RefreshCw className={cn("h-3 w-3", isRepairActive && "animate-spin")} />
                   {retrying ? "正在提交…" : "智能修复并重新渲染"}
                 </button>
-                {retryError && !trackingJobId && (
+                {retryError && !retryTracking && (
                   <div className="mt-1 text-xs text-red-300">{retryError}</div>
                 )}
               </div>

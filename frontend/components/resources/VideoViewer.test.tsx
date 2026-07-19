@@ -478,6 +478,117 @@ describe("VideoViewer durable render lifecycle", () => {
     ).toBeEnabled();
   });
 
+  it("drops local retry tracking when the matching canonical repair fails", async () => {
+    setCanonicalResource(failedResource);
+    mocks.getJobDetail.mockReturnValue(new Promise(() => {}));
+    render(<VideoViewer resource={failedResource} />);
+
+    await beginRetry();
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
+    expect(mocks.getJobDetail).toHaveBeenCalledWith("local-user", "parent");
+
+    const terminalFailure = {
+      ...failedResource,
+      format_specific: {
+        ...failedResource.format_specific,
+        repair_status: "failed",
+        repair_job_id: "retry-child",
+        repair_history: [
+          {
+            job_id: "retry-child",
+            failed_revision: 0,
+            status: "failed",
+            error_code: "repair_render_failed",
+            summary: "本轮修复已终止",
+          },
+        ],
+      },
+    } satisfies Resource;
+    await act(async () => {
+      setCanonicalResource(terminalFailure);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("正在生成修复代码并重新渲染…")).not.toBeInTheDocument();
+    expect(screen.getByText("智能修复失败")).toBeInTheDocument();
+    expect(screen.getByText("本轮修复已终止")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "智能修复并重新渲染" }),
+    ).toBeEnabled();
+  });
+
+  it("drops failed local polling when the matching canonical repair becomes ready", async () => {
+    vi.useFakeTimers();
+    setCanonicalResource(failedResource);
+    mocks.getJobDetail.mockRejectedValueOnce(new Error("stale local poll"));
+    render(<VideoViewer resource={failedResource} />);
+
+    await beginRetry();
+    expect(screen.getByText(/stale local poll/)).toBeInTheDocument();
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
+
+    await act(async () => {
+      setCanonicalResource(readyResource);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("正在生成修复代码并重新渲染…")).not.toBeInTheDocument();
+    expect(screen.queryByText(/stale local poll/)).not.toBeInTheDocument();
+    expect(document.querySelector("source")).toHaveAttribute(
+      "src",
+      "/static/manim/retry.mp4",
+    );
+    expect(
+      screen.queryByRole("button", { name: "智能修复并重新渲染" }),
+    ).not.toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops polling a stale local job when canonical repair identity changes", async () => {
+    setCanonicalResource(failedResource);
+    mocks.getJobDetail.mockReturnValue(new Promise(() => {}));
+    render(<VideoViewer resource={failedResource} />);
+
+    await beginRetry();
+    expect(mocks.getJobDetail).toHaveBeenNthCalledWith(1, "local-user", "parent");
+
+    const newRepairChild = {
+      ...retryChild("running"),
+      job_id: "repair-new",
+      parent_job_id: "parent-new",
+      dedupe_key: "video-repair:pkg-1:video-1:0:2",
+    } satisfies JobChildSummary;
+    const newCanonicalRepair = {
+      ...failedResource,
+      format_specific: {
+        ...failedResource.format_specific,
+        repair_status: "running",
+        repair_job_id: "repair-new",
+      },
+    } satisfies Resource;
+    await act(async () => {
+      useTutorStore.getState().rehydrateJobFromDetail({
+        job_id: "parent-new",
+        capability: "resource_generation",
+        status: "succeeded",
+        message_preview: "",
+        created_at: "2026-07-17T00:00:00Z",
+        events: [],
+        event_count: 0,
+        children: [newRepairChild],
+      });
+      setCanonicalResource(newCanonicalRepair);
+      await Promise.resolve();
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenNthCalledWith(
+      2,
+      "local-user",
+      "parent-new",
+    );
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
+  });
+
   it("restores active repair polling after unmount and remount", async () => {
     vi.useFakeTimers();
     const repairing = {

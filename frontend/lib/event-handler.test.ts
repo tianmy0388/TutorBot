@@ -164,6 +164,37 @@ function inactiveStageEvent(
   };
 }
 
+function setCanonicalVideo(formatSpecific: Record<string, unknown>): void {
+  mockStoreState.latestPackage = {
+    package_id: "pkg-repair",
+    resources: [
+      {
+        resource_id: "r-video",
+        type: "video",
+        title: "动画演示",
+        content: "完整视频说明",
+        metadata: { package_id: "pkg-repair" },
+        format_specific: formatSpecific,
+      },
+    ],
+  };
+}
+
+function dispatchVideoSnapshot(formatSpecific: Record<string, unknown>): void {
+  dispatchStreamEvent(
+    resourceEvent("r-video", "video", "动画演示", {
+      metadata: { package_id: "pkg-repair" },
+      format_specific: formatSpecific,
+    }),
+  );
+}
+
+function currentVideoFormat(): Record<string, unknown> {
+  return (mockStoreState.latestPackage as {
+    resources: Array<{ format_specific: Record<string, unknown> }>;
+  }).resources[0].format_specific;
+}
+
 describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOURCE content", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -436,6 +467,137 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
       repair_history: [expect.objectContaining({ summary: "上一轮安全诊断" })],
     });
   });
+
+  it.each([
+    ["failed", "pending"],
+    ["ready", "running"],
+  ])(
+    "keeps same-job terminal repair %s over delayed %s",
+    (terminalStatus, delayedStatus) => {
+      setCanonicalVideo({
+        render_status: terminalStatus === "ready" ? "ready" : "failed",
+        source_revision: 3,
+        repair_status: terminalStatus,
+        repair_job_id: "repair-same",
+        video_url: "/static/manim/current.mp4",
+        repair_history: [
+          {
+            job_id: "repair-same",
+            failed_revision: 3,
+            status: terminalStatus,
+            summary: "当前终态诊断",
+          },
+        ],
+      });
+
+      dispatchVideoSnapshot({
+        render_status: "failed",
+        source_revision: 3,
+        repair_status: delayedStatus,
+        repair_job_id: "repair-same",
+        repair_history: [],
+      });
+
+      expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+      expect(currentVideoFormat()).toMatchObject({
+        repair_status: terminalStatus,
+        video_url: "/static/manim/current.mp4",
+        repair_history: [expect.objectContaining({ summary: "当前终态诊断" })],
+      });
+    },
+  );
+
+  it("rejects a delayed old repair job when current history terminalizes it", () => {
+    setCanonicalVideo({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "pending",
+      repair_job_id: "repair-new",
+      video_url: "/static/manim/last-good.mp4",
+      repair_history: [
+        {
+          job_id: "repair-old",
+          failed_revision: 3,
+          status: "failed",
+          summary: "旧任务已结束",
+        },
+      ],
+    });
+
+    dispatchVideoSnapshot({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "running",
+      repair_job_id: "repair-old",
+      repair_history: [],
+    });
+
+    expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+    expect(currentVideoFormat()).toMatchObject({
+      repair_job_id: "repair-new",
+      video_url: "/static/manim/last-good.mp4",
+    });
+  });
+
+  it("accepts a causally newer repair attempt and preserves canonical history and video", () => {
+    const oldHistory = {
+      job_id: "repair-old",
+      failed_revision: 3,
+      status: "failed",
+      summary: "旧任务已结束",
+    };
+    setCanonicalVideo({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "failed",
+      repair_job_id: "repair-old",
+      video_url: "/static/manim/last-good.mp4",
+      repair_history: [oldHistory],
+    });
+
+    dispatchVideoSnapshot({
+      render_status: "failed",
+      source_revision: 3,
+      repair_status: "pending",
+      repair_job_id: "repair-new",
+      repair_history: [oldHistory],
+    });
+
+    expect(mockStoreState.setLatestPackage).toHaveBeenCalledTimes(1);
+    expect(currentVideoFormat()).toMatchObject({
+      repair_status: "pending",
+      repair_job_id: "repair-new",
+      video_url: "/static/manim/last-good.mp4",
+      repair_history: [expect.objectContaining({ job_id: "repair-old" })],
+    });
+  });
+
+  it.each([
+    ["failed", "pending"],
+    ["ready", "rendering"],
+  ])(
+    "keeps legacy render terminal %s over delayed %s for the same job",
+    (terminalStatus, delayedStatus) => {
+      setCanonicalVideo({
+        render_status: terminalStatus,
+        render_job_id: "render-same",
+        source_revision: 0,
+        video_url: "/static/manim/legacy-current.mp4",
+      });
+
+      dispatchVideoSnapshot({
+        render_status: delayedStatus,
+        render_job_id: "render-same",
+        source_revision: 0,
+      });
+
+      expect(mockStoreState.setLatestPackage).not.toHaveBeenCalled();
+      expect(currentVideoFormat()).toMatchObject({
+        render_status: terminalStatus,
+        video_url: "/static/manim/legacy-current.mp4",
+      });
+    },
+  );
 
   it("recovers an invalid durable package once using the authoritative user", async () => {
     let resolveRecovery!: (value: unknown) => void;
