@@ -103,3 +103,22 @@ it("shows an explicit failure instead of cached profile content after refresh fa
   expect(screen.getByText("学习状态加载失败")).toBeInTheDocument();
   expect(screen.getByText("refresh offline")).toBeInTheDocument();
 });
+
+it("shows major and level from profile metadata", () => {
+  profileHook.mockReturnValue({
+    profile: {
+      ...cachedProfile,
+      metadata: { major: "计算机科学", level: "graduate" },
+    },
+    loaded: true,
+    loading: false,
+    error: null,
+    status: "success",
+    refresh,
+  });
+
+  render(<ProfilePanel />);
+
+  expect(screen.getByText("专业与层次")).toBeInTheDocument();
+  expect(screen.getByText(/计算机科学 · 硕士/)).toBeInTheDocument();
+});

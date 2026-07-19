@@ -33,6 +33,8 @@ const mockStoreState = {
   applyStreamEvent: vi.fn(),
   addMessage: vi.fn(),
   completeActiveTurn: vi.fn(),
+  setProfile: vi.fn(),
+  setPlannedPath: vi.fn(),
   messages: [] as Array<{ id: string; role: "assistant"; content: string; timestamp: number; metadata?: Record<string, unknown> }>,
   userId: "u-test",
   sessionId: "s-test",
@@ -50,10 +52,17 @@ vi.mock("./store", () => ({
 vi.mock("./api", () => ({
   appendConversationMessage: vi.fn().mockResolvedValue(undefined),
   getResourcePackageDetail: vi.fn(),
+  getProfile: vi.fn(),
+  getLearningPath: vi.fn(),
 }));
 
 import { dispatchStreamEvent } from "./event-handler";
-import { appendConversationMessage, getResourcePackageDetail } from "./api";
+import {
+  appendConversationMessage,
+  getLearningPath,
+  getProfile,
+  getResourcePackageDetail,
+} from "./api";
 import type { StreamEvent } from "./types";
 
 const RESOURCE_BASE = {
@@ -204,6 +213,8 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
     mockStoreState.completeActiveTurn.mockClear();
     vi.mocked(appendConversationMessage).mockClear();
     vi.mocked(getResourcePackageDetail).mockReset();
+    vi.mocked(getProfile).mockReset();
+    vi.mocked(getLearningPath).mockReset();
     mockStoreState.sessionId = "s-test";
   });
 
@@ -971,5 +982,50 @@ describe("bbf6ddbf — buildPartialPackageFromContract must preserve real RESOUR
 
     expect(mockStoreState.applyStreamEvent).not.toHaveBeenCalled();
     expect(mockStoreState.addMessage).not.toHaveBeenCalled();
+  });
+
+  it("refreshes learning state when a profile_updated marker event arrives", async () => {
+    dispatchStreamEvent(
+      {
+        type: "progress",
+        source: "profile_dialogue_ingest",
+        stage: "profile_dialogue_ingest",
+        content: "已从对话更新学习画像",
+        metadata: { job_id: "job-1", profile_updated: true, version: 2 },
+        session_id: "s-test",
+        turn_id: "t",
+        seq: 1,
+        timestamp: Date.now() / 1000,
+        event_id: "e1",
+      },
+      { sessionId: "s-test", userId: "local-user" },
+    );
+
+    await vi.waitFor(() => {
+      expect(getProfile).toHaveBeenCalledWith("local-user");
+      expect(getLearningPath).toHaveBeenCalledWith("local-user");
+    });
+  });
+
+  it("ignores progress events without the profile_updated marker", async () => {
+    dispatchStreamEvent(
+      {
+        type: "progress",
+        source: "resource_capability",
+        stage: "parallel_resource_generation",
+        content: "正在生成资源",
+        metadata: { job_id: "job-2" },
+        session_id: "s-test",
+        turn_id: "t",
+        seq: 1,
+        timestamp: Date.now() / 1000,
+        event_id: "e2",
+      },
+      { sessionId: "s-test", userId: "local-user" },
+    );
+
+    await Promise.resolve();
+    expect(getProfile).not.toHaveBeenCalled();
+    expect(getLearningPath).not.toHaveBeenCalled();
   });
 });

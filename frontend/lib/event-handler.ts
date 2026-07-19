@@ -14,6 +14,7 @@
 import { useTutorStore } from "./store";
 import { getJobIdFromEvent } from "./job-reducer";
 import { getResourcePackageDetail } from "./api";
+import { refreshLearningState } from "./learning-state";
 import {
   isUsableResourcePackage,
   isUsableStreamedResource,
@@ -143,6 +144,18 @@ export function dispatchStreamEvent(
 
   // 1. Always reduce into per-job state.
   useTutorStore.getState().applyStreamEvent(streamEv);
+
+  // Conversational profile building: the backend marks a dialogue-driven
+  // profile update with metadata.profile_updated (the job runner
+  // normalizes the observation to a "progress" event but keeps metadata).
+  // Refresh profile + path so the panel reflects the new version without
+  // a manual reload.
+  if (
+    (streamEv.metadata as Record<string, unknown> | undefined)
+      ?.profile_updated === true
+  ) {
+    void refreshLearningState(context.userId || useTutorStore.getState().userId, "");
+  }
 
   // 2. Capability-specific routing for known event types.
   switch (streamEv.type) {

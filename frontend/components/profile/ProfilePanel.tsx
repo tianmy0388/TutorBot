@@ -37,6 +37,7 @@ import {
   RefreshCw,
   TrendingUp,
   AlertCircle,
+  GraduationCap,
 } from "lucide-react";
 import { useProfile } from "@/hooks/useProfile";
 import { useTutorStore } from "@/lib/store";
@@ -179,6 +180,22 @@ function OverviewTab({
   const pace = profile.pace;
   const motivation = profile.motivation;
 
+  // Conversational profile building: surface the learner's major and
+  // education level captured from dialogue (Task 6).
+  const metadata = (profile.metadata ?? {}) as Record<string, unknown>;
+  const major = typeof metadata.major === "string" ? metadata.major : "";
+  const levelKey = typeof metadata.level === "string" ? metadata.level : "";
+  const levelLabel =
+    (
+      {
+        high_school: "高中",
+        undergraduate: "本科",
+        graduate: "硕士",
+        phd: "博士",
+        professional: "职场",
+      } as Record<string, string>
+    )[levelKey] ?? "";
+
   // Build radar chart data (modality preferences)
   const radarData = useMemo(() => {
     if (!modality) return [];
@@ -243,6 +260,12 @@ function OverviewTab({
         </div>
       )}
 
+      <DimensionCard
+        icon={GraduationCap}
+        name="专业与层次"
+        value={[major, levelLabel].filter(Boolean).join(" · ")}
+        detail=""
+      />
       <DimensionCard
         icon={Eye}
         name="认知风格"
