@@ -16,6 +16,10 @@ const TERMINAL = new Set(["succeeded", "partial", "failed", "cancelled"]);
 const FIXTURE_SESSION = "fixture-reliability-session";
 const FIXTURE_PACKAGE = "fixture-reliability-package";
 const FIXTURE_QUESTION = "fixture-code-question";
+const FIXTURE_CHOICE_RESOURCE = "fixture-choice-exercise";
+const FIXTURE_CHOICE_QUESTION = "fixture-choice-question";
+const FIXTURE_VIDEO_RESOURCE = "fixture-failed-video";
+const FIXTURE_REPAIR_JOB = "fixture-repair-child";
 
 type JsonObject = Record<string, any>;
 
@@ -41,6 +45,28 @@ function fixtureResource(overrides: JsonObject): JsonObject {
     metadata: { package_id: FIXTURE_PACKAGE, package_persisted: true },
     ...overrides,
   };
+}
+
+function fixtureFailedVideo(formatOverrides: JsonObject = {}): JsonObject {
+  return fixtureResource({
+    resource_id: FIXTURE_VIDEO_RESOURCE,
+    type: "video",
+    title: "Fixture failed Manim video",
+    content: "",
+    format_specific: {
+      render_status: "failed",
+      render_error: "Missing required asset files: person_silhouette.svg",
+      render_failure: {
+        error_code: "MISSING_ASSET",
+        summary: "缺少动画资源文件：person_silhouette.svg",
+      },
+      scene_class: "MainScene",
+      manim_code:
+        'from manim import *\nclass MainScene(Scene):\n    def construct(self):\n        self.add(SVGMobject("person_silhouette.svg"))\n',
+      source_revision: 0,
+      ...formatOverrides,
+    },
+  });
 }
 
 const FIXTURE_RESOURCES = [
@@ -71,6 +97,63 @@ const FIXTURE_RESOURCES = [
     },
   }),
   fixtureResource({
+    resource_id: FIXTURE_CHOICE_RESOURCE,
+    type: "exercise",
+    title: "Fixture choice exercise",
+    content: "选择正确答案。",
+    format_specific: {
+      questions: [
+        {
+          id: FIXTURE_CHOICE_QUESTION,
+          type: "single_choice",
+          difficulty: 2,
+          knowledge_point: "注意力",
+          question: "自注意力中 Q、K、V 分别来自哪里？",
+          options: [
+            { label: "A", text: "三个不同的输入序列" },
+            { label: "B", text: "同一输入的三种线性投影" },
+            { label: "C", text: "三个独立的注意力头" },
+            { label: "D", text: "编码器与解码器" },
+          ],
+          explanation: "Q、K、V 都是同一输入经过不同线性变换得到的。",
+        },
+      ],
+    },
+  }),
+  fixtureResource({
+    resource_id: "fixture-broken-mindmap",
+    type: "mindmap",
+    title: "Fixture broken mindmap",
+    content: "",
+    format_specific: {
+      // A standalone quoted node is rejected by the Mermaid 11.14 mindmap
+      // grammar; the viewer must fall back to the stored outline.
+      mermaid_dsl:
+        'mindmap\n  root((反向传播))\n    "前向传播"\n    "激活函数 a=σ(z)"',
+      central_topic: "反向传播",
+      outline: [
+        { depth: 0, label: "反向传播" },
+        { depth: 1, label: "前向传播" },
+        { depth: 1, label: "激活函数 a=σ(z)" },
+      ],
+    },
+  }),
+  fixtureResource({
+    resource_id: "fixture-numpy-code",
+    type: "code",
+    title: "Fixture NumPy text output",
+    content: "import numpy as np\nprint(int(np.arange(5).sum()))",
+    format_specific: {
+      language: "python",
+      code: "import numpy as np\nprint(int(np.arange(5).sum()))",
+      output_kind: "text",
+      execution_status: "succeeded",
+      stdout: "10\n",
+      stderr: "",
+      artifacts: [],
+    },
+  }),
+  fixtureResource({
     resource_id: "fixture-matplotlib-code",
     type: "code",
     title: "Fixture Matplotlib output",
@@ -84,30 +167,21 @@ const FIXTURE_RESOURCES = [
       ],
     },
   }),
-  fixtureResource({
-    resource_id: "fixture-failed-video",
-    type: "video",
-    title: "Fixture failed Manim video",
-    content: "",
-    format_specific: {
-      render_status: "failed",
-      render_error: "Missing required asset files: person_silhouette.svg",
-      render_failure: {
-        error_code: "MISSING_ASSET",
-        summary: "缺少动画资源文件：person_silhouette.svg",
-      },
-      scene_class: "MainScene",
-      manim_code:
-        'from manim import *\nclass MainScene(Scene):\n    def construct(self):\n        self.add(SVGMobject("person_silhouette.svg"))\n',
-    },
-  }),
+  fixtureFailedVideo(),
 ];
 
-function fixturePackage(): JsonObject {
+function fixturePackage(failedVideoOverrides?: JsonObject): JsonObject {
+  const resources = failedVideoOverrides
+    ? FIXTURE_RESOURCES.map((resource) =>
+        resource.resource_id === FIXTURE_VIDEO_RESOURCE
+          ? fixtureFailedVideo(failedVideoOverrides)
+          : resource,
+      )
+    : FIXTURE_RESOURCES;
   return {
     package_id: FIXTURE_PACKAGE,
     topic: "Reliability fixture",
-    resources: FIXTURE_RESOURCES,
+    resources,
     target_profile_snapshot: {},
     learning_path_summary: {},
     generated_by: ["fixture-agent"],
@@ -202,43 +276,150 @@ function fixtureJobs(settled: boolean): JsonObject[] {
   ];
 }
 
-function fixtureConversation(): JsonObject {
+function fixtureConversation(workflow?: JsonObject): JsonObject {
+  const messages: JsonObject[] = [
+    {
+      id: "fixture-message-user",
+      role: "user",
+      content: "请生成一组可靠性学习资源。",
+      job_id: "fixture-parent",
+      capability: "resource_generation",
+      created_at: FIXTURE_TIME,
+      metadata: {},
+    },
+    {
+      id: "fixture-message-assistant",
+      role: "assistant",
+      content: "Fixture resource generation completed and persisted.",
+      job_id: "fixture-parent",
+      capability: "resource_generation",
+      created_at: "2026-07-18T08:00:03.000Z",
+      metadata: {},
+    },
+  ];
+  if (workflow) {
+    messages.push({
+      id: `fixture-message-workflow-${workflow.job_id}`,
+      role: "assistant",
+      content: "",
+      job_id: workflow.job_id,
+      capability: "resource_generation",
+      created_at: "2026-07-18T08:00:04.000Z",
+      metadata: {
+        kind: "workflow_timeline",
+        job_id: workflow.job_id,
+        client_message_id: `workflow:${workflow.job_id}`,
+        workflow,
+      },
+    });
+  }
   return {
     session_id: FIXTURE_SESSION,
     user_id: USER_ID,
     title: "Fixture reliability conversation",
-    message_count: 2,
+    message_count: messages.length,
     last_message_preview: "资源已生成并持久化。",
     web_search_enabled: false,
     created_at: FIXTURE_TIME,
     updated_at: FIXTURE_TIME,
-    messages: [
-      {
-        id: "fixture-message-user",
-        role: "user",
-        content: "请生成一组可靠性学习资源。",
-        job_id: "fixture-parent",
-        capability: "resource_generation",
-        created_at: FIXTURE_TIME,
-        metadata: {},
-      },
-      {
-        id: "fixture-message-assistant",
-        role: "assistant",
-        content: "Fixture resource generation completed and persisted.",
-        job_id: "fixture-parent",
-        capability: "resource_generation",
-        created_at: "2026-07-18T08:00:03.000Z",
-        metadata: {},
-      },
-    ],
+    messages,
   };
 }
 
-async function installFixtureApi(page: any, options: { running?: boolean } = {}) {
+async function installFixtureApi(
+  page: any,
+  options: {
+    running?: boolean;
+    workflow?: JsonObject;
+    failedVideoOverrides?: JsonObject;
+    repair?: "ready" | "failed";
+  } = {},
+) {
   let settled = !options.running;
   const attempts: JsonObject[] = [];
-  const packageSnapshot = fixturePackage();
+  const drafts = new Map<string, JsonObject>();
+  const packageSnapshot = fixturePackage(options.failedVideoOverrides);
+  const repairState = options.repair
+    ? {
+        outcome: options.repair,
+        status:
+          options.failedVideoOverrides?.repair_status === "running" ||
+          options.failedVideoOverrides?.repair_status === "pending"
+            ? "running"
+            : "idle",
+      }
+    : null;
+  const withVideo = (videoResource: JsonObject): JsonObject => ({
+    ...packageSnapshot,
+    resources: packageSnapshot.resources.map((resource: JsonObject) =>
+      resource.resource_id === FIXTURE_VIDEO_RESOURCE ? videoResource : resource,
+    ),
+  });
+  const repairedVideoResource = () =>
+    fixtureResource({
+      resource_id: FIXTURE_VIDEO_RESOURCE,
+      type: "video",
+      title: "Fixture failed Manim video",
+      content: "",
+      format_specific: {
+        render_status: "ready",
+        repair_status: "ready",
+        repair_job_id: FIXTURE_REPAIR_JOB,
+        source_revision: 1,
+        scene_class: "MainScene",
+        manim_code:
+          "from manim import *\nclass MainScene(Scene):\n    def construct(self):\n        dot = Dot()\n        self.play(FadeIn(dot), run_time=0.1)\n",
+        video_url: "/static/manim/fixture-repaired.mp4",
+        artifact_key: "manim_videos/fixture-repaired.mp4",
+        duration_seconds: 1,
+        repair_history: [
+          { job_id: FIXTURE_REPAIR_JOB, failed_revision: 0, status: "ready" },
+        ],
+      },
+    });
+  const failedRepairVideoResource = () =>
+    fixtureFailedVideo({
+      repair_status: "failed",
+      repair_job_id: FIXTURE_REPAIR_JOB,
+      repair_history: [
+        {
+          job_id: FIXTURE_REPAIR_JOB,
+          failed_revision: 0,
+          status: "failed",
+          error_code: "process_exit",
+          summary: "修复代码渲染失败：Manim 退出码 1",
+          log_artifact_key: `manim_logs/${FIXTURE_REPAIR_JOB}/attempt-01.log`,
+        },
+      ],
+    });
+  const currentPackage = (): JsonObject => {
+    if (!repairState) return packageSnapshot;
+    if (repairState.status === "succeeded") return withVideo(repairedVideoResource());
+    if (repairState.status === "failed") return withVideo(failedRepairVideoResource());
+    if (repairState.status === "running") {
+      return withVideo(
+        fixtureFailedVideo({
+          repair_status: "running",
+          repair_job_id: FIXTURE_REPAIR_JOB,
+        }),
+      );
+    }
+    return packageSnapshot;
+  };
+  const repairChildSummary = (status: string): JsonObject => ({
+    job_id: FIXTURE_REPAIR_JOB,
+    capability: "video_repair_render",
+    status,
+    parent_job_id: "fixture-parent",
+    task_kind: "video_repair_render",
+    dedupe_key: `video-repair:${FIXTURE_PACKAGE}:${FIXTURE_VIDEO_RESOURCE}:0:1`,
+    metadata: {
+      package_id: FIXTURE_PACKAGE,
+      resource_id: FIXTURE_VIDEO_RESOURCE,
+      failed_revision: 0,
+    },
+    error: status === "failed" ? "Video repair failed" : null,
+  });
   const json = (route: any, body: unknown, status = 200) =>
     route.fulfill({
       status,
@@ -265,16 +446,16 @@ async function installFixtureApi(page: any, options: { running?: boolean } = {})
       path === `${API}/conversations/${FIXTURE_SESSION}/aggregate`
     ) {
       return json(route, {
-        conversation: fixtureConversation(),
+        conversation: fixtureConversation(options.workflow),
         jobs,
-        packages: [packageSnapshot],
+        packages: [currentPackage()],
         profile_summary: {},
         path_summary: {},
         recovery_warnings: [],
       });
     }
     if (method === "GET" && path === `${API}/conversations`) {
-      const conversation = fixtureConversation();
+      const conversation = fixtureConversation(options.workflow);
       delete conversation.messages;
       return json(route, {
         items: [conversation],
@@ -308,7 +489,47 @@ async function installFixtureApi(page: any, options: { running?: boolean } = {})
     }
     if (method === "GET" && path.startsWith(`${API}/jobs/${USER_ID}/`)) {
       const jobId = decodeURIComponent(path.slice(`${API}/jobs/${USER_ID}/`.length));
+      if (jobId === FIXTURE_REPAIR_JOB) {
+        if (!repairState || repairState.status === "idle") {
+          return json(route, { detail: "job not found" }, 404);
+        }
+        const childJob = fixtureJob(FIXTURE_REPAIR_JOB, repairState.status, {
+          parent_job_id: "fixture-parent",
+          capability: "video_repair_render",
+          task_kind: "video_repair_render",
+          dedupe_key: `video-repair:${FIXTURE_PACKAGE}:${FIXTURE_VIDEO_RESOURCE}:0:1`,
+          error: repairState.status === "failed" ? "Video repair failed" : null,
+        });
+        return json(route, {
+          ...childJob,
+          message: "Fixture intelligent video repair",
+          metadata: {
+            package_id: FIXTURE_PACKAGE,
+            resource_id: FIXTURE_VIDEO_RESOURCE,
+            failed_revision: 0,
+          },
+          result: null,
+          events: [],
+          children: [],
+        });
+      }
       const job = jobs.find((candidate) => candidate.job_id === jobId);
+      if (job && jobId === "fixture-parent" && repairState && repairState.status !== "idle") {
+        const children = [
+          ...(Array.isArray(job.children) ? job.children : []).filter(
+            (child: JsonObject) => child.job_id !== FIXTURE_REPAIR_JOB,
+          ),
+          repairChildSummary(repairState.status),
+        ];
+        return json(route, {
+          ...job,
+          children,
+          message: job.message_preview,
+          metadata: {},
+          result: null,
+          events: [],
+        });
+      }
       return json(
         route,
         job
@@ -316,6 +537,55 @@ async function installFixtureApi(page: any, options: { running?: boolean } = {})
           : { detail: "job not found" },
         job ? 200 : 404,
       );
+    }
+    if (
+      method === "GET" &&
+      path === `${API}/exercises/${FIXTURE_PACKAGE}/resources/${FIXTURE_CHOICE_RESOURCE}/responses`
+    ) {
+      const questionId = url.searchParams.get("question_id") ?? "";
+      return json(route, {
+        draft: drafts.get(questionId) ?? null,
+        submissions: [],
+      });
+    }
+    if (
+      method === "PUT" &&
+      path ===
+        `${API}/exercises/${FIXTURE_PACKAGE}/resources/${FIXTURE_CHOICE_RESOURCE}/questions/${FIXTURE_CHOICE_QUESTION}/draft`
+    ) {
+      const payload = request.postDataJSON();
+      drafts.set(FIXTURE_CHOICE_QUESTION, {
+        user_id: USER_ID,
+        package_id: FIXTURE_PACKAGE,
+        resource_id: FIXTURE_CHOICE_RESOURCE,
+        question_id: FIXTURE_CHOICE_QUESTION,
+        question_type: "single_choice",
+        answer_json: payload.answer_json,
+        updated_at: FIXTURE_TIME,
+      });
+      return json(route, { ok: true });
+    }
+    if (
+      method === "POST" &&
+      path ===
+        `${API}/resources/packages/${USER_ID}/${FIXTURE_PACKAGE}/resources/${FIXTURE_VIDEO_RESOURCE}/retry-video`
+    ) {
+      if (!repairState || repairState.status !== "idle") {
+        return json(route, { detail: "video is not retryable" }, 409);
+      }
+      repairState.status = "running";
+      return json(route, {
+        job_id: FIXTURE_REPAIR_JOB,
+        parent_job_id: "fixture-parent",
+        package_id: FIXTURE_PACKAGE,
+        resource_id: FIXTURE_VIDEO_RESOURCE,
+        status: "pending",
+        child: repairChildSummary("pending"),
+        resource: fixtureFailedVideo({
+          repair_status: "pending",
+          repair_job_id: FIXTURE_REPAIR_JOB,
+        }),
+      });
     }
     if (
       path === `${API}/exercises/${FIXTURE_PACKAGE}/${FIXTURE_QUESTION}/attempts`
@@ -383,7 +653,7 @@ async function installFixtureApi(page: any, options: { running?: boolean } = {})
       method === "GET" &&
       path === `${API}/resources/packages/${USER_ID}/${FIXTURE_PACKAGE}`
     ) {
-      return json(route, packageSnapshot);
+      return json(route, currentPackage());
     }
     if (method === "GET" && path === `${API}/resources/packages/${USER_ID}/stats`) {
       return json(route, {
@@ -419,6 +689,15 @@ async function installFixtureApi(page: any, options: { running?: boolean } = {})
       settled = true;
     },
     attempts,
+    drafts,
+    repair: repairState
+      ? {
+          finish() {
+            repairState.status =
+              repairState.outcome === "ready" ? "succeeded" : "failed";
+          },
+        }
+      : null,
   };
 }
 
@@ -658,6 +937,204 @@ test.describe("TutorBot deterministic browser reliability fixtures", () => {
     await page.getByRole("button", { name: "查看源码" }).click();
     await expect(page.getByText(/person_silhouette\.svg/).first()).toBeVisible();
     await expect(page.getByText(/Traceback \(most recent call last\)/)).toHaveCount(0);
+  });
+
+  test("completed workflow stages remain visible after the job goes terminal and after refresh", async ({
+    page,
+  }: {
+    page: any;
+  }) => {
+    await installFixtureApi(page, {
+      workflow: {
+        job_id: "fixture-parent",
+        status: "succeeded",
+        stages: [
+          { name: "intent_understanding", status: "completed" },
+          { name: "content_and_pedagogy", status: "completed" },
+          { name: "package_assembly", status: "completed" },
+        ],
+      },
+    });
+    await openSession(page, FIXTURE_SESSION);
+
+    await expect(page.getByText("工作流程 · 已完成", { exact: true })).toBeVisible();
+    await expect(page.getByText("意图理解", { exact: true })).toBeVisible();
+    await expect(page.getByText("内容生成", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("组装资源包", { exact: true })).toBeVisible();
+    await expect(page.getByText("处理中", { exact: true })).toHaveCount(0);
+    await expect(page.getByText(/任务运行中/)).toHaveCount(0);
+
+    await page.reload();
+    await expect(page.getByText("工作流程 · 已完成", { exact: true })).toBeVisible();
+    await expect(page.getByText("意图理解", { exact: true })).toBeVisible();
+    await expect(page.getByText("组装资源包", { exact: true })).toBeVisible();
+    await expect(page.getByText("处理中", { exact: true })).toHaveCount(0);
+  });
+
+  test("exercise draft restores full options and the saved answer after unmount and refresh", async ({
+    page,
+  }: {
+    page: any;
+  }) => {
+    const fixture = await installFixtureApi(page);
+    await openSession(page, FIXTURE_SESSION);
+    await selectWorkspaceResource(page, "Fixture choice exercise");
+
+    // Full (non-truncated) options render from the canonical resource.
+    await expect(page.getByText("自注意力中 Q、K、V 分别来自哪里？", { exact: true })).toBeVisible();
+    await expect(page.getByText(/A\. 三个不同的输入序列/)).toBeVisible();
+    await expect(page.getByText(/B\. 同一输入的三种线性投影/)).toBeVisible();
+    await expect(page.getByText(/C\. 三个独立的注意力头/)).toBeVisible();
+    await expect(page.getByText(/D\. 编码器与解码器/)).toBeVisible();
+    await expect(page.getByText("[TRUNCATED]", { exact: true })).toHaveCount(0);
+
+    const optionB = page.getByRole("radio", { name: /B\. 同一输入的三种线性投影/ });
+    const saved = page.waitForResponse(
+      (response: any) =>
+        response.request().method() === "PUT" &&
+        response.url().includes(`/questions/${FIXTURE_CHOICE_QUESTION}/draft`),
+    );
+    await optionB.click();
+    expect((await saved).status()).toBe(200);
+    await expect(optionB).toBeChecked();
+    expect(fixture.drafts.get(FIXTURE_CHOICE_QUESTION)?.answer_json).toBe("B");
+
+    // Unmount by switching resources: the restored draft still checks option B.
+    await selectWorkspaceResource(page, "Fixture reliability lesson");
+    await selectWorkspaceResource(page, "Fixture choice exercise");
+    await expect(
+      page.getByRole("radio", { name: /B\. 同一输入的三种线性投影/ }),
+    ).toBeChecked();
+
+    // Full refresh restores the durable draft from the backend state.
+    await page.reload();
+    await selectWorkspaceResource(page, "Fixture choice exercise");
+    await expect(
+      page.getByRole("radio", { name: /B\. 同一输入的三种线性投影/ }),
+    ).toBeChecked();
+  });
+
+  test("Mermaid fallback shows the stored outline for an invalid quoted-node mindmap", async ({
+    page,
+  }: {
+    page: any;
+  }) => {
+    await installFixtureApi(page);
+    await openSession(page, FIXTURE_SESSION);
+    await selectWorkspaceResource(page, "Fixture broken mindmap");
+
+    await expect(page.getByText("思维导图暂时无法显示。", { exact: true })).toBeVisible();
+    const outline = page.getByRole("list", { name: "思维导图文字版" });
+    await expect(outline).toBeVisible();
+    await expect(outline.getByText("反向传播", { exact: true })).toBeVisible();
+    await expect(outline.getByText("前向传播", { exact: true })).toBeVisible();
+    await expect(outline.getByText("激活函数 a=σ(z)", { exact: true })).toBeVisible();
+    // The raw Mermaid parser blob is never surfaced to the user.
+    await expect(page.getByText(/Parse error on line/)).toHaveCount(0);
+  });
+
+  test("text-only NumPy code shows stdout without a false image error", async ({
+    page,
+  }: {
+    page: any;
+  }) => {
+    await installFixtureApi(page);
+    await openSession(page, FIXTURE_SESSION);
+    await selectWorkspaceResource(page, "Fixture NumPy text output");
+
+    await expect(page.getByText("运行结果", { exact: true })).toBeVisible();
+    await expect(page.getByText("10", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(/图片生成失败/)).toHaveCount(0);
+    await expect(page.getByText(/产物 \(/)).toHaveCount(0);
+  });
+
+  test("intelligent video repair click-through shows progress, survives refresh, and finishes ready", async ({
+    page,
+  }: {
+    page: any;
+  }) => {
+    const fixture = await installFixtureApi(page, { repair: "ready" });
+    // Keep the video request pending so the player shell stays mounted for
+    // the deterministic src assertion (no decode error can flip the UI).
+    await page.route("**/static/manim/fixture-repaired.mp4", async () => {});
+    await openSession(page, FIXTURE_SESSION);
+    await selectWorkspaceResource(page, "Fixture failed Manim video");
+
+    const repairButton = page.getByRole("button", { name: "智能修复并重新渲染" });
+    await expect(repairButton).toBeEnabled();
+    const requested = page.waitForResponse(
+      (response: any) =>
+        response.request().method() === "POST" &&
+        response.url().includes(`/resources/${FIXTURE_VIDEO_RESOURCE}/retry-video`),
+    );
+    await repairButton.click();
+    expect((await requested).status()).toBe(200);
+    await expect(page.getByText("正在生成修复代码并重新渲染…", { exact: true })).toBeVisible();
+    await expect(repairButton).toBeDisabled();
+
+    // A mid-repair refresh restores the active repair from canonical state.
+    await page.reload();
+    await selectWorkspaceResource(page, "Fixture failed Manim video");
+    await expect(page.getByText("正在生成修复代码并重新渲染…", { exact: true })).toBeVisible();
+
+    fixture.repair?.finish();
+    const source = page.locator("video source");
+    await expect(source).toHaveAttribute("src", "/static/manim/fixture-repaired.mp4");
+    await expect(page.getByText("正在生成修复代码并重新渲染…", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("渲染失败", { exact: true })).toHaveCount(0);
+  });
+
+  test("intelligent video repair resumes polling from a persisted running repair without a click", async ({
+    page,
+  }: {
+    page: any;
+  }) => {
+    const fixture = await installFixtureApi(page, {
+      repair: "ready",
+      failedVideoOverrides: {
+        repair_status: "running",
+        repair_job_id: FIXTURE_REPAIR_JOB,
+      },
+    });
+    await page.route("**/static/manim/fixture-repaired.mp4", async () => {});
+    await openSession(page, FIXTURE_SESSION);
+    await selectWorkspaceResource(page, "Fixture failed Manim video");
+
+    // The backend restart / browser refresh path: no click, polling resumes
+    // from the canonical repair_job_id and the button stays disabled.
+    await expect(page.getByText("正在生成修复代码并重新渲染…", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "智能修复并重新渲染" })).toBeDisabled();
+
+    fixture.repair?.finish();
+    const source = page.locator("video source");
+    await expect(source).toHaveAttribute("src", "/static/manim/fixture-repaired.mp4");
+    await expect(page.getByText("正在生成修复代码并重新渲染…", { exact: true })).toHaveCount(0);
+  });
+
+  test("intelligent video repair failure keeps the original failure and re-enables manual repair", async ({
+    page,
+  }: {
+    page: any;
+  }) => {
+    const fixture = await installFixtureApi(page, { repair: "failed" });
+    await openSession(page, FIXTURE_SESSION);
+    await selectWorkspaceResource(page, "Fixture failed Manim video");
+
+    const repairButton = page.getByRole("button", { name: "智能修复并重新渲染" });
+    await repairButton.click();
+    await expect(page.getByText("正在生成修复代码并重新渲染…", { exact: true })).toBeVisible();
+
+    fixture.repair?.finish();
+    await expect(page.getByText("智能修复失败", { exact: true })).toBeVisible();
+    await expect(page.getByText("修复代码渲染失败：Manim 退出码 1", { exact: true })).toBeVisible();
+    // The original render failure and its diagnostic stay visible, and the
+    // repair action is available again for the next manual attempt.
+    await expect(page.getByText("渲染失败", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("缺少动画资源文件：person_silhouette.svg", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("正在生成修复代码并重新渲染…", { exact: true })).toHaveCount(0);
+    await expect(repairButton).toBeEnabled();
   });
 });
 

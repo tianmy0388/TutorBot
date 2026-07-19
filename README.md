@@ -118,6 +118,42 @@ curl http://localhost:18000/api/v1/capabilities
 
 每条消息都会以 **流式事件** 推送到前端,右侧面板自动切换到对应结果。
 
+### 本地验证与回归测试
+
+后端测试统一使用 `tutor` Conda 解释器（含 Manim / Matplotlib 运行时）：
+
+```powershell
+cd E:\github\TutorBot
+# 全量后端回归
+E:\Anaconda3\anaconda\envs\tutor\python.exe -m pytest backend/tests -q
+# 本地校验后续流程的跨系统集成测试
+E:\Anaconda3\anaconda\envs\tutor\python.exe -m pytest backend/tests/integration/test_local_validation_follow_up.py -q
+# 真实运行时冒烟：NumPy/Matplotlib 代码执行
+E:\Anaconda3\anaconda\envs\tutor\python.exe -m pytest backend/tests/agents/resource/test_code_sandbox_artifacts.py backend/tests/agents/resource/test_code_sandbox_matplotlib_drain.py -q
+# 真实 Manim 渲染（requires_manim，未安装 manim 时自动跳过）
+E:\Anaconda3\anaconda\envs\tutor\python.exe -m pytest backend/tests/services/jobs/test_video_render_follow_up.py -q -k real
+```
+
+前端在 `frontend/` 下执行：
+
+```powershell
+cd frontend
+npm test -- --run        # Vitest 单元/组件测试
+npm run type-check       # tsc --noEmit
+npm run test:e2e         # Playwright；自动启动 3010 端口的 dev server
+```
+
+Playwright 说明：
+
+- 确定性用例通过页面内 `installFixtureApi` mock 后端，不依赖真实 Python 进程；
+- `@real-data` 用例需要 `TUTOR_E2E_REAL_DATA=1` 且本地后端正在运行；
+- MiniMax MCP 验收需要 `TUTOR_E2E_MINIMAX_SEARCH=1` 且 MiniMax MCP 服务可达：
+
+```powershell
+npm run test:e2e -- --grep "MiniMax MCP|completed workflow|exercise draft|intelligent video repair"
+```
+
+
 ### 本地历史数据迁移与恢复
 
 如果项目曾分别从仓库根目录和 `backend/` 启动，历史数据可能分散在 `data/` 与
