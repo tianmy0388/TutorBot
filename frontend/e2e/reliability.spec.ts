@@ -20,6 +20,8 @@ const FIXTURE_CHOICE_RESOURCE = "fixture-choice-exercise";
 const FIXTURE_CHOICE_QUESTION = "fixture-choice-question";
 const FIXTURE_VIDEO_RESOURCE = "fixture-failed-video";
 const FIXTURE_REPAIR_JOB = "fixture-repair-child";
+const FIXTURE_RENDER_VIDEO_RESOURCE = "fixture-rendering-video";
+const FIXTURE_RENDER_JOB = "fixture-render-child";
 
 type JsonObject = Record<string, any>;
 
@@ -215,48 +217,51 @@ function fixtureJob(
   };
 }
 
-function fixtureJobs(settled: boolean): JsonObject[] {
-  const children = settled
-    ? [
-        {
-          job_id: "fixture-child-code",
-          capability: "resource_generation",
-          status: "succeeded",
-          parent_job_id: "fixture-parent",
-          task_kind: "code_generation",
-          dedupe_key: "fixture:code",
-          error: null,
-        },
-        {
-          job_id: "fixture-child-video",
-          capability: "resource_generation",
-          status: "failed",
-          parent_job_id: "fixture-parent",
-          task_kind: "video_rendering",
-          dedupe_key: "fixture:video",
-          error: "Missing required asset files",
-        },
-      ]
-    : [
-        {
-          job_id: "fixture-child-code",
-          capability: "resource_generation",
-          status: "running",
-          parent_job_id: "fixture-parent",
-          task_kind: "code_generation",
-          dedupe_key: "fixture:code",
-          error: null,
-        },
-        {
-          job_id: "fixture-child-video",
-          capability: "resource_generation",
-          status: "pending",
-          parent_job_id: "fixture-parent",
-          task_kind: "video_rendering",
-          dedupe_key: "fixture:video",
-          error: null,
-        },
-      ];
+function fixtureJobs(settled: boolean, extraChildren: JsonObject[] = []): JsonObject[] {
+  const children = [
+    ...(settled
+      ? [
+          {
+            job_id: "fixture-child-code",
+            capability: "resource_generation",
+            status: "succeeded",
+            parent_job_id: "fixture-parent",
+            task_kind: "code_generation",
+            dedupe_key: "fixture:code",
+            error: null,
+          },
+          {
+            job_id: "fixture-child-video",
+            capability: "resource_generation",
+            status: "failed",
+            parent_job_id: "fixture-parent",
+            task_kind: "video_rendering",
+            dedupe_key: "fixture:video",
+            error: "Missing required asset files",
+          },
+        ]
+      : [
+          {
+            job_id: "fixture-child-code",
+            capability: "resource_generation",
+            status: "running",
+            parent_job_id: "fixture-parent",
+            task_kind: "code_generation",
+            dedupe_key: "fixture:code",
+            error: null,
+          },
+          {
+            job_id: "fixture-child-video",
+            capability: "resource_generation",
+            status: "pending",
+            parent_job_id: "fixture-parent",
+            task_kind: "video_rendering",
+            dedupe_key: "fixture:video",
+            error: null,
+          },
+        ]),
+    ...extraChildren,
+  ];
   const parent = fixtureJob("fixture-parent", settled ? "partial" : "running", {
     children,
     background_status: settled ? "failed" : "running",
@@ -331,6 +336,7 @@ async function installFixtureApi(
     workflow?: JsonObject;
     failedVideoOverrides?: JsonObject;
     repair?: "ready" | "failed";
+    initialRender?: boolean;
   } = {},
 ) {
   let settled = !options.running;
@@ -347,6 +353,7 @@ async function installFixtureApi(
             : "idle",
       }
     : null;
+  const renderState = options.initialRender ? { status: "running" } : null;
   const withVideo = (videoResource: JsonObject): JsonObject => ({
     ...packageSnapshot,
     resources: packageSnapshot.resources.map((resource: JsonObject) =>
@@ -390,19 +397,59 @@ async function installFixtureApi(
         },
       ],
     });
+  const initialRenderVideoResource = () =>
+    fixtureResource({
+      resource_id: FIXTURE_RENDER_VIDEO_RESOURCE,
+      type: "video",
+      title: "Fixture initial render video",
+      content: "",
+      format_specific: {
+        render_status: renderState?.status === "succeeded" ? "ready" : "rendering",
+        render_job_id: FIXTURE_RENDER_JOB,
+        scene_class: "MainScene",
+        manim_code:
+          "from manim import *\nclass MainScene(Scene):\n    def construct(self):\n        self.play(FadeIn(Circle()), run_time=0.1)\n",
+        source_revision: 0,
+        ...(renderState?.status === "succeeded"
+          ? {
+              video_url: "/static/manim/fixture-initial.mp4",
+              artifact_key: "manim_videos/fixture-initial.mp4",
+              duration_seconds: 1,
+            }
+          : {}),
+      },
+    });
+  const initialRenderChildSummary = (status: string): JsonObject => ({
+    job_id: FIXTURE_RENDER_JOB,
+    capability: "video_render",
+    status,
+    parent_job_id: "fixture-parent",
+    task_kind: "video_render",
+    dedupe_key: `video-render:${FIXTURE_PACKAGE}:${FIXTURE_RENDER_VIDEO_RESOURCE}`,
+    metadata: {
+      package_id: FIXTURE_PACKAGE,
+      resource_id: FIXTURE_RENDER_VIDEO_RESOURCE,
+    },
+    error: null,
+  });
   const currentPackage = (): JsonObject => {
-    if (!repairState) return packageSnapshot;
-    if (repairState.status === "succeeded") return withVideo(repairedVideoResource());
-    if (repairState.status === "failed") return withVideo(failedRepairVideoResource());
-    if (repairState.status === "running") {
-      return withVideo(
-        fixtureFailedVideo({
-          repair_status: "running",
-          repair_job_id: FIXTURE_REPAIR_JOB,
-        }),
-      );
-    }
-    return packageSnapshot;
+    const base = !repairState
+      ? packageSnapshot
+      : repairState.status === "succeeded"
+        ? withVideo(repairedVideoResource())
+        : repairState.status === "failed"
+          ? withVideo(failedRepairVideoResource())
+          : repairState.status === "running"
+            ? withVideo(
+                fixtureFailedVideo({
+                  repair_status: "running",
+                  repair_job_id: FIXTURE_REPAIR_JOB,
+                }),
+              )
+            : packageSnapshot;
+    return renderState
+      ? { ...base, resources: [...base.resources, initialRenderVideoResource()] }
+      : base;
   };
   const repairChildSummary = (status: string): JsonObject => ({
     job_id: FIXTURE_REPAIR_JOB,
@@ -437,7 +484,10 @@ async function installFixtureApi(
     const url = new URL(request.url());
     const path = url.pathname;
     const method = request.method();
-    const jobs = fixtureJobs(settled);
+    const jobs = fixtureJobs(
+      settled,
+      renderState ? [initialRenderChildSummary(renderState.status)] : [],
+    );
 
     if (
       method === "GET" &&
@@ -693,6 +743,13 @@ async function installFixtureApi(
           finish() {
             repairState.status =
               repairState.outcome === "ready" ? "succeeded" : "failed";
+          },
+        }
+      : null,
+    renderJob: renderState
+      ? {
+          finish() {
+            renderState.status = "succeeded";
           },
         }
       : null,
@@ -1133,6 +1190,31 @@ test.describe("TutorBot deterministic browser reliability fixtures", () => {
     ).toBeVisible();
     await expect(page.getByText("正在生成修复代码并重新渲染…", { exact: true })).toHaveCount(0);
     await expect(repairButton).toBeEnabled();
+  });
+
+  test("initial video render success syncs the playable video without reload", async ({
+    page,
+  }: {
+    page: any;
+  }) => {
+    const fixture = await installFixtureApi(page, { initialRender: true });
+    // Keep the video request pending so the player shell stays mounted for
+    // the deterministic src assertion (same technique as the repair flow).
+    await page.route("**/static/manim/fixture-initial.mp4", async () => {});
+    await openSession(page, FIXTURE_SESSION);
+    await selectWorkspaceResource(page, "Fixture initial render video");
+
+    // The initial video_render child is still running: the open page shows
+    // the pending card and the VideoViewer polls the parent job for it.
+    await expect(page.getByText("视频渲染中…", { exact: true })).toBeVisible();
+
+    // The child succeeds in the background; without any reload the terminal
+    // sync must swap the pending card for the playable video.
+    fixture.renderJob?.finish();
+    const source = page.locator("video source");
+    await expect(source).toHaveAttribute("src", "/static/manim/fixture-initial.mp4");
+    await expect(page.getByText("视频渲染中…", { exact: true })).toHaveCount(0);
+    await expect(page.getByText(/资源详情正在同步/)).toHaveCount(0);
   });
 });
 

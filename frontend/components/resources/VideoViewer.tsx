@@ -212,13 +212,45 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     persistedRepairActive
       ? canonicalRepairJobId || repairChild?.job_id || ""
       : "";
-  const trackingJobId = canonicalRepairJobIsLocal
+  const repairTrackingJobId = canonicalRepairJobIsLocal
     ? retryTracking.jobId
     : persistedRepairJobId;
+  // **2026-07-19 fix:** the initial ``video_render`` child gets the same
+  // terminal-sync treatment as a repair child. Child events only stream on
+  // the child's own job channel while the page subscribes to the parent,
+  // so a succeeded initial render never delivered ``video_url`` to an open
+  // page — the "渲染完成 / 资源详情正在同步" banner stuck forever. Repair
+  // tracking keeps precedence. The identity stays engaged through any
+  // terminal transition so the final package fetch is never torn down
+  // mid-flight; the effect itself skips a child that was already
+  // failed/cancelled when it engaged (that state already surfaces the
+  // actionable failure banner).
+  const renderChildActive =
+    renderChild?.status === "pending" || renderChild?.status === "running";
+  const renderChildTerminal =
+    !!renderChild &&
+    ["succeeded", "partial", "failed", "cancelled"].includes(
+      renderChild.status,
+    );
+  const canonicalRenderStale =
+    !formatSpec.video_url &&
+    formatSpec.render_status !== "ready" &&
+    formatSpec.render_status !== "failed";
+  const renderTrackingJobId =
+    !repairTrackingJobId &&
+    !!renderChild &&
+    !!packageId &&
+    canonicalRenderStale &&
+    (renderChildActive || renderChildTerminal)
+      ? renderChild.job_id
+      : "";
+  const trackingJobId = repairTrackingJobId || renderTrackingJobId;
   const trackingPollJobId =
     canonicalRepairJobIsLocal
       ? retryTracking.parentJobId
-      : repairChild?.parent_job_id || trackingJobId;
+      : repairTrackingJobId
+        ? repairChild?.parent_job_id || repairTrackingJobId
+        : renderChild?.parent_job_id || "";
   const trackingPackageId = canonicalRepairJobIsLocal
     ? retryTracking.packageId
     : packageId;
@@ -241,6 +273,23 @@ export function VideoViewer({ resource }: { resource: Resource }) {
     };
 
     const track = async () => {
+      // An initial render child that was already failed/cancelled when
+      // this sync engaged is already surfaced by the failure banner with
+      // its manual repair action — no background fetch for it. A child
+      // that was active (or succeeded) at engagement keeps polling and
+      // gets the terminal package refresh.
+      const trackedChild = Object.values(
+        useTutorStore.getState().jobsById,
+      )
+        .flatMap((job) => job.children ?? [])
+        .find((candidate) => candidate.job_id === trackingJobId);
+      if (
+        trackedChild?.task_kind === "video_render" &&
+        (trackedChild.status === "failed" ||
+          trackedChild.status === "cancelled")
+      ) {
+        return;
+      }
       let terminalObserved = false;
       let consecutiveFailures = 0;
       while (!cancelled) {
@@ -269,7 +318,12 @@ export function VideoViewer({ resource }: { resource: Resource }) {
               trackingPackageId,
             );
             if (!cancelled) {
-              setLatestPackage(persisted);
+              // Only adopt the fetched package when it actually belongs to
+              // the tracked package — a stale response must never clobber
+              // the canonical package for a different one.
+              if (persisted.package_id === trackingPackageId) {
+                setLatestPackage(persisted);
+              }
               setRetryError("");
               setRetryTracking(null);
             }

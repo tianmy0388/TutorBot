@@ -156,6 +156,57 @@ const readyResource = {
   },
 } satisfies Resource;
 
+function initialRenderChild(status: JobChildSummary["status"]): JobChildSummary {
+  return { ...childSummary(status), job_id: "initial-render-child" };
+}
+
+function initialRenderParentDetail(status: JobChildSummary["status"]) {
+  return {
+    job_id: "parent",
+    capability: "resource_generation",
+    status: "succeeded" as const,
+    message_preview: "",
+    created_at: "2026-07-17T00:00:00Z",
+    events: [],
+    event_count: 0,
+    children: [initialRenderChild(status)],
+  };
+}
+
+const renderingResource = {
+  ...baseResource,
+  format_specific: {
+    render_status: "rendering",
+    render_job_id: "initial-render-child",
+  },
+} satisfies Resource;
+
+const initialReadyResource = {
+  ...baseResource,
+  format_specific: {
+    render_status: "ready",
+    render_job_id: "initial-render-child",
+    source_revision: 0,
+    video_url: "/static/manim/initial.mp4",
+    artifact_key: "manim_videos/initial.mp4",
+  },
+} satisfies Resource;
+
+const initialFailedResource = {
+  ...baseResource,
+  format_specific: {
+    render_status: "failed",
+    render_job_id: "initial-render-child",
+    source_revision: 0,
+    render_failure: {
+      error_code: "process_exit",
+      summary: "Manim 渲染进程退出码 1",
+      traceback_tail: ["RuntimeError: initial render failed"],
+      log_artifact_key: "manim_logs/initial-render-child/attempt-01.log",
+    },
+  },
+} satisfies Resource;
+
 async function beginRetry() {
   fireEvent.click(
     screen.getByRole("button", { name: "智能修复并重新渲染" }),
@@ -855,5 +906,162 @@ describe("VideoViewer durable render lifecycle", () => {
     expect(await screen.findByText("network down")).toBeInTheDocument();
     expect(screen.getByText("渲染失败")).toBeInTheDocument();
     expect(screen.queryByText("视频渲染中…")).not.toBeInTheDocument();
+  });
+});
+
+describe("VideoViewer initial render sync", () => {
+  it("polls the parent job while the initial render child runs and syncs the playable video once it succeeds", async () => {
+    vi.useFakeTimers();
+    setCanonicalResource(renderingResource);
+    setChildren(initialRenderChild("running"));
+    mocks.getJobDetail
+      .mockResolvedValueOnce(initialRenderParentDetail("running"))
+      .mockResolvedValueOnce(initialRenderParentDetail("succeeded"));
+    mocks.getResourcePackageDetail.mockResolvedValue(
+      packageWith(initialReadyResource),
+    );
+    render(<VideoViewer resource={renderingResource} />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.getJobDetail).toHaveBeenCalledWith("local-user", "parent");
+    expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+    expect(document.querySelector("source")).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(2);
+    expect(mocks.getResourcePackageDetail).toHaveBeenCalledWith(
+      "local-user",
+      "pkg-1",
+    );
+    expect(document.querySelector("source")).toHaveAttribute(
+      "src",
+      "/static/manim/initial.mp4",
+    );
+    expect(screen.queryByText("视频渲染中…")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("后台视频任务已成功完成，资源详情正在同步。"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("syncs the stale package once on mount when the initial render child is already terminal", async () => {
+    vi.useFakeTimers();
+    const staleResource = {
+      ...baseResource,
+      format_specific: {
+        render_status: "pending",
+        render_job_id: "initial-render-child",
+      },
+    } satisfies Resource;
+    setCanonicalResource(staleResource);
+    setChildren(initialRenderChild("succeeded"));
+    mocks.getJobDetail.mockResolvedValue(initialRenderParentDetail("succeeded"));
+    mocks.getResourcePackageDetail.mockResolvedValue(
+      packageWith(initialReadyResource),
+    );
+    render(<VideoViewer resource={staleResource} />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // One-shot recovery: a single parent poll confirms the terminal child
+    // and the persisted package is fetched exactly once — no interval
+    // polling is left running afterwards.
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(1);
+    expect(mocks.getResourcePackageDetail).toHaveBeenCalledTimes(1);
+    expect(mocks.getResourcePackageDetail).toHaveBeenCalledWith(
+      "local-user",
+      "pkg-1",
+    );
+    expect(document.querySelector("source")).toHaveAttribute(
+      "src",
+      "/static/manim/initial.mp4",
+    );
+    expect(screen.queryByText("渲染完成")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("后台视频任务已成功完成，资源详情正在同步。"),
+    ).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mocks.getJobDetail).toHaveBeenCalledTimes(1);
+    expect(mocks.getResourcePackageDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces the persisted structured failure after the initial render child fails", async () => {
+    vi.useFakeTimers();
+    setCanonicalResource(renderingResource);
+    setChildren(initialRenderChild("running"));
+    mocks.getJobDetail
+      .mockResolvedValueOnce(initialRenderParentDetail("running"))
+      .mockResolvedValueOnce(initialRenderParentDetail("failed"));
+    mocks.getResourcePackageDetail.mockResolvedValue(
+      packageWith(initialFailedResource),
+    );
+    render(<VideoViewer resource={renderingResource} />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("视频渲染中…")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(mocks.getResourcePackageDetail).toHaveBeenCalledWith(
+      "local-user",
+      "pkg-1",
+    );
+    expect(screen.getByText("渲染失败")).toBeInTheDocument();
+    expect(screen.getByText("Manim 渲染进程退出码 1")).toBeInTheDocument();
+    expect(screen.queryByText("视频渲染中…")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "智能修复并重新渲染" }),
+    ).toBeEnabled();
+  });
+
+  it("keeps repair tracking precedence over the initial render sync", async () => {
+    const repairingResource = {
+      ...baseResource,
+      format_specific: {
+        render_status: "rendering",
+        render_job_id: "initial-render-child",
+        repair_status: "running",
+        repair_job_id: "retry-child",
+      },
+    } satisfies Resource;
+    setCanonicalResource(repairingResource);
+    setChildren(initialRenderChild("running"));
+    useTutorStore.getState().rehydrateJobFromDetail({
+      job_id: "parent-repair",
+      capability: "resource_generation",
+      status: "succeeded",
+      message_preview: "",
+      created_at: "2026-07-17T00:00:00Z",
+      events: [],
+      event_count: 0,
+      children: [{ ...retryChild("running"), parent_job_id: "parent-repair" }],
+    });
+    mocks.getJobDetail.mockReturnValue(new Promise(() => {}));
+    render(<VideoViewer resource={repairingResource} />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mocks.getJobDetail).toHaveBeenCalledWith(
+      "local-user",
+      "parent-repair",
+    );
+    expect(mocks.getJobDetail).not.toHaveBeenCalledWith("local-user", "parent");
+    expect(screen.getByText("正在生成修复代码并重新渲染…")).toBeInTheDocument();
   });
 });
