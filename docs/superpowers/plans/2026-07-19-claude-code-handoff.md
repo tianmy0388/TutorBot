@@ -39,7 +39,8 @@ All items below were implemented test-first and independently reviewed clean unl
    - `d636bac feat: expose intelligent Manim repair`
    - `3d9e021 fix: preserve terminal Manim repair state`
    - `70d0733 fix: harden equal-revision repair ordering`
-   - implementation and tests are complete; the final narrow read-only re-review was still running when this line was updated.
+   - `9c0537e fix: reject terminalized first repair snapshots`
+   - implementation and tests are complete; the final ultra-narrow read-only re-review was still running when this line was updated.
 
 ## Task 9 final behavior and evidence
 
@@ -56,7 +57,7 @@ Task 9 is complete and review-clean.
 
 ## Current active work: finish Task 10 review fixes
 
-Current Task 10 implementation HEAD: `70d0733` (a separate handoff-doc commit `522deb8` precedes it).
+Current Task 10 implementation HEAD: `9c0537e` (handoff-doc commits also appear between implementation commits).
 
 The first Task 10 implementation passed:
 
@@ -81,6 +82,8 @@ The active implementer completed both cases and committed `70d0733`:
 - `git diff --check`: passed;
 - Playwright was not repeated because the final patch changes event ordering only.
 
+A final review found that a delayed active snapshot could still be mistaken for a first repair when the current resource had no `repair_job_id` but its history already terminalized that incoming job. Commit `9c0537e` adds that history guard and regression. Final evidence: focused 56/56, full frontend 260/260, TypeScript and diff checks passed.
+
 After commit, `git status --short` should show only:
 
 ```text
@@ -91,7 +94,7 @@ This is the unrelated pre-existing user file.
 
 To close Task 10:
 
-1. Obtain/confirm a clean independent review of `c5a11d8..70d0733`, particularly the two final event-ordering cases. A narrow re-review was requested before this update.
+1. Obtain/confirm a clean independent review of `c5a11d8..9c0537e`, particularly the final event-ordering/history guard. An ultra-narrow re-review was requested before this update.
 2. If desired, re-run/confirm:
 
    ```powershell
