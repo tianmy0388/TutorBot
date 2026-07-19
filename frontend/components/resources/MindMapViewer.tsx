@@ -22,6 +22,7 @@ import {
   ListTree,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { resolveThemeColor } from "@/lib/theme-color";
 import type { Resource } from "@/lib/types";
 
 let mermaidInitialized = false;
@@ -34,13 +35,16 @@ function ensureMermaid() {
     fontFamily:
       "var(--font-body), PingFang SC, Microsoft YaHei, sans-serif",
     themeVariables: {
-      background: "rgb(var(--color-bg-panel))",
-      primaryColor: "rgb(var(--color-brand-100))",
-      primaryTextColor: "rgb(var(--color-fg))",
-      primaryBorderColor: "rgb(var(--color-brand-500))",
-      lineColor: "rgb(var(--color-fg-muted))",
-      secondaryColor: "rgb(var(--color-bg-subtle))",
-      tertiaryColor: "rgb(var(--color-bg))",
+      background: resolveThemeColor("--color-bg-panel", "rgb(255,250,244)"),
+      primaryColor: resolveThemeColor("--color-brand-100", "rgb(255,226,207)"),
+      primaryTextColor: resolveThemeColor("--color-fg", "rgb(27,58,71)"),
+      primaryBorderColor: resolveThemeColor(
+        "--color-brand-500",
+        "rgb(244,165,115)",
+      ),
+      lineColor: resolveThemeColor("--color-fg-muted", "rgb(92,107,122)"),
+      secondaryColor: resolveThemeColor("--color-bg-subtle", "rgb(255,226,197)"),
+      tertiaryColor: resolveThemeColor("--color-bg", "rgb(255,237,213)"),
     },
   });
   mermaidInitialized = true;
