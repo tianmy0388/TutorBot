@@ -299,6 +299,8 @@ class LearnerProfile(BaseModel):
             "urgency": self.motivation.urgency.value,
             "self_efficacy": round(self.motivation.self_efficacy, 3),
             "modality_dominant": self.modality.dominant(),
+            "major": str(self.metadata.get("major") or ""),
+            "level": str(self.metadata.get("level") or ""),
             "session_duration_min": self.learning_pace.avg_session_duration_min,
             "event_watermark": self.event_watermark,
             "updated_at": self.updated_at.isoformat(),

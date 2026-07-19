@@ -213,3 +213,18 @@ def test_motivation_efficacy_in_range():
 def test_pace_non_negative():
     with pytest.raises(ValidationError):
         PaceProfile(avg_session_duration_min=-1)
+
+
+def test_summary_carries_major_and_level_from_metadata() -> None:
+    profile = empty_profile("user-major")
+    profile.metadata["major"] = "计算机科学"
+    profile.metadata["level"] = "graduate"
+    summary = profile.to_summary()
+    assert summary["major"] == "计算机科学"
+    assert summary["level"] == "graduate"
+
+
+def test_summary_major_level_default_to_empty_string() -> None:
+    summary = empty_profile("user-plain").to_summary()
+    assert summary["major"] == ""
+    assert summary["level"] == ""
