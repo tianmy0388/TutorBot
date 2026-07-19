@@ -123,10 +123,7 @@ export function dispatchStreamEvent(
     return;
   }
   const stateAtDispatch = useTutorStore.getState();
-  if (
-    authoritativeSessionId &&
-    stateAtDispatch.sessionId !== authoritativeSessionId
-  ) {
+  if (stateAtDispatch.sessionId !== authoritativeSessionId) {
     // Events for a non-visible session are dropped. The backend runner
     // persists the terminal workflow/assistant messages itself
     // (2026-07-19 plan), so the browser no longer tracks or POSTs

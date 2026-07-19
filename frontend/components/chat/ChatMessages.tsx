@@ -151,21 +151,10 @@ function formatTime(timestamp: number) {
   });
 }
 
-function MarkdownContent({
-  content,
-  streaming = false,
-}: {
-  content: string;
-  streaming?: boolean;
-}) {
+function MarkdownContent({ content }: { content: string }) {
   if (!content.trim()) return null;
   return (
-    <div
-      className={cn(
-        "prose-tutor text-sm leading-7",
-        streaming && "streaming-cursor",
-      )}
-    >
+    <div className={cn("prose-tutor text-sm leading-7")}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}

@@ -8,6 +8,7 @@
  *  2. Intuition     — intuitive / analogy-based explanation
  *  3. Principle     — formal principle / definition
  *  4. Example       — worked example
+ *  + 完整讲解 (full_markdown) — full markdown answer with LaTeX
  *  + Follow-up suggestion
  *  + Related concepts
  *  + Sources

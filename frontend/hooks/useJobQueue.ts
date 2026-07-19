@@ -68,6 +68,12 @@ export interface UseJobQueueState {
   remove: (jobId: string) => Promise<boolean>;
 }
 
+// In-flight subscribers, shared across all hook instances (JobTray,
+// ChatComposer, …) so a given job_id gets exactly one WS subscription no
+// matter which instance subscribes first. Entries are removed on terminal
+// events, close/error, and cancel, so later legitimate re-subscribes work.
+const liveClients = new Map<string, WsClient>();
+
 export function useJobQueue(userId: string | null | undefined): UseJobQueueState {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -76,9 +82,6 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
   const [stats, setStats] = useState<JobStatsResponse | null>(null);
   const [tick, setTick] = useState(0); // bump on optimistic updates to re-render
   const jobsRef = useRef<JobSummary[]>([]);
-
-  // In-flight subscribers (so we can tear them down on unmount)
-  const liveClients = useRef<Map<string, WsClient>>(new Map());
 
   const refresh = useCallback(async () => {
     if (!userId) return;
@@ -261,7 +264,7 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
       context?: Pick<SubmitJobContext, "sessionId">,
     ) => {
       if (!jobId) return;
-      if (liveClients.current.has(jobId)) return; // already subscribed
+      if (liveClients.has(jobId)) return; // already subscribed
       if (typeof window === "undefined") return;
 
       // Re-hydrate the per-job state from the REST snapshot first so
@@ -322,18 +325,18 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
             streamEv.type === "cancelled"
           ) {
             setTimeout(() => refresh(), 100);
-            liveClients.current.delete(jobId);
+            liveClients.delete(jobId);
             client.close();
           }
         },
         onClose: () => {
-          liveClients.current.delete(jobId);
+          liveClients.delete(jobId);
         },
         onError: () => {
-          liveClients.current.delete(jobId);
+          liveClients.delete(jobId);
         },
       });
-      liveClients.current.set(jobId, client);
+      liveClients.set(jobId, client);
       client.connect();
     },
     [userId, refresh],
@@ -344,10 +347,10 @@ export function useJobQueue(userId: string | null | undefined): UseJobQueueState
       if (!userId) return false;
       try {
         await apiCancelJob(userId, jobId);
-        const live = liveClients.current.get(jobId);
+        const live = liveClients.get(jobId);
         if (live) {
           live.close();
-          liveClients.current.delete(jobId);
+          liveClients.delete(jobId);
         }
         await refresh();
         return true;
