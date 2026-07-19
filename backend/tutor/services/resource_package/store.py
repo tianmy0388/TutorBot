@@ -487,6 +487,28 @@ class ResourcePackageStore:
                 await session.delete(r)
         return count
 
+    async def delete_for_session(self, session_id: str) -> int:
+        """Delete all packages linked to a conversation. Returns count removed.
+
+        ResourceRow rows are removed by the relationship's delete-orphan
+        cascade, same as :meth:`delete`.
+        """
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            rows = (
+                await session.execute(
+                    select(PackageRow).where(
+                        PackageRow.package_metadata["session_id"].as_string()
+                        == session_id
+                    )
+                )
+            ).scalars().all()
+            count = len(rows)
+            for r in rows:
+                await session.delete(r)
+        return count
+
     # ---- reads ------------------------------------------------------------
 
     async def get(self, package_id: str) -> ResourcePackage | None:

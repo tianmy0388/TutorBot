@@ -20,6 +20,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from loguru import logger
 
 from tutor.services.conversations import (
     AppendMessageRequest,
@@ -364,8 +365,42 @@ async def delete_conversation(
         raise HTTPException(status_code=404, detail="conversation not found")
     if existing.user_id != user_id:
         raise HTTPException(status_code=403, detail="not your conversation")
+
+    # 2026-07-19 plan: cascade the session's resource packages and job
+    # rows (messages cascade inside ``store.delete``). A cascade failure
+    # must not block the conversation delete itself — log it and report
+    # the counts that were actually removed. Disk artifacts are kept.
+    packages_deleted = 0
+    jobs_deleted = 0
+    try:
+        from tutor.services.resource_package import get_resource_package_store
+
+        pkg_store = (
+            getattr(request.app.state, "resource_package_store", None)
+            or get_resource_package_store()
+        )
+        packages_deleted = await pkg_store.delete_for_session(session_id)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "conversation cascade delete failed session={session_id} kind=packages",
+            session_id=session_id,
+        )
+    try:
+        from tutor.services.jobs import get_job_store
+
+        jobs_deleted = await get_job_store().delete_for_session(session_id)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "conversation cascade delete failed session={session_id} kind=jobs",
+            session_id=session_id,
+        )
     await store.delete(session_id)
-    return {"deleted": True, "session_id": session_id}
+    return {
+        "deleted": True,
+        "session_id": session_id,
+        "packages_deleted": packages_deleted,
+        "jobs_deleted": jobs_deleted,
+    }
 
 
 @router.post(

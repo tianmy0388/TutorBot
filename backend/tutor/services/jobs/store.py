@@ -787,6 +787,25 @@ class JobStore:
                 await session.delete(r)
         return count
 
+    async def delete_for_session(self, session_id: str) -> int:
+        """Delete all job rows for a conversation. Returns count removed.
+
+        Unlike :meth:`list_for_session` this includes child rows — a
+        deleted conversation must not leave orphaned follow-up jobs.
+        """
+        self._ensure_engine()
+        assert self._write_lock is not None
+        async with self._write_lock, self._with_session() as session:
+            rows = (
+                await session.execute(
+                    select(JobRow).where(JobRow.session_id == session_id)
+                )
+            ).scalars().all()
+            count = len(rows)
+            for r in rows:
+                await session.delete(r)
+        return count
+
     # ---- reads ------------------------------------------------------------
 
     async def get(self, job_id: str) -> Job | None:
